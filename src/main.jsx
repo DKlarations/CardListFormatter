@@ -18,9 +18,12 @@ const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
 const SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search";
 const SCRYFALL_SETS_URL = "https://api.scryfall.com/sets";
-const BATCH_SIZE = 75;
+const BATCH_SIZE = 50;
 const PRINT_FACT_CONCURRENCY = 5;
+const SCRYFALL_MIN_INTERVAL_MS = 120;
 const STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
+let scryfallRequestGate = Promise.resolve();
+let lastScryfallRequestAt = 0;
 
 const sampleList = `Gavin Verhey
 206-555-5265
@@ -112,6 +115,22 @@ function titleCaseFallback(value) {
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForScryfallSlot() {
+  const previousGate = scryfallRequestGate;
+  let releaseGate;
+  scryfallRequestGate = new Promise((resolve) => {
+    releaseGate = resolve;
+  });
+
+  await previousGate;
+  const elapsed = Date.now() - lastScryfallRequestAt;
+  if (elapsed < SCRYFALL_MIN_INTERVAL_MS) {
+    await sleep(SCRYFALL_MIN_INTERVAL_MS - elapsed);
+  }
+  lastScryfallRequestAt = Date.now();
+  releaseGate();
 }
 
 function formatPhoneNumber(value) {
@@ -228,6 +247,10 @@ function parseRarities(value) {
     .split(/[,/]+|\band\b/i)
     .map((part) => parseRarity(part.trim()))
     .filter(Boolean);
+}
+
+function rarityPattern() {
+  return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
 }
 
 function isQuantityOnlyLine(line) {
@@ -425,10 +448,10 @@ function parseCardLine(rawLine, index) {
 
   line = stripTrailingDescriptors(line, statedRarities);
 
-  const trailingRarityMatch = line.match(/\s+(mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)$/i);
-  if (trailingRarityMatch) {
-    statedRarities.push(...parseRarities(trailingRarityMatch[1]));
-    line = line.slice(0, trailingRarityMatch.index).trim();
+  const trailingRaritiesMatch = line.match(new RegExp(`\\s+(${rarityPattern()}(?:\\s*(?:/|,|and)\\s*${rarityPattern()})*)$`, "i"));
+  if (trailingRaritiesMatch) {
+    statedRarities.push(...parseRarities(trailingRaritiesMatch[1]));
+    line = line.slice(0, trailingRaritiesMatch.index).trim();
   }
 
   const inputName = cleanLookupName(line);
@@ -482,15 +505,17 @@ function chunk(items, size) {
 async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
   let lastError;
   let lastStatus = 0;
+  const retryableStatuses = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      await waitForScryfallSlot();
       const response = await fetch(url, options);
       lastStatus = response.status;
 
-      if (response.status === 429 && attempt < attempts) {
+      if (retryableStatuses.has(response.status) && attempt < attempts) {
         const retryAfter = Number(response.headers.get("Retry-After")) || 1;
-        await sleep(Math.max(retryAfter * 1000, 1200 * attempt));
+        await sleep(Math.max(retryAfter * 1000, 900 * attempt));
         continue;
       }
 
@@ -501,7 +526,7 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
       return { ok: true, status: response.status, data: await response.json() };
     } catch (error) {
       lastError = error;
-      if (attempt < attempts) await sleep(600 * attempt);
+      if (attempt < attempts) await sleep(900 * attempt);
     }
   }
 
@@ -671,6 +696,8 @@ async function fetchPrintFacts(card) {
         rarities: [card.rarity].filter(Boolean),
         nonSecretRarities: [card.rarity].filter(Boolean),
         hasFullArt: Boolean(card.full_art),
+        prints: [card].filter(Boolean),
+        eligibleRarityChecked: false,
         printLookupFailed: true,
       };
     }
@@ -922,7 +949,7 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
 
   const facts = await fetchPrintFacts(item.card);
   const enrichedItem = { ...item, ...facts };
-  const notPlayablePaper = !hasPlayablePaperPrint(facts.prints);
+  const notPlayablePaper = !facts.printLookupFailed && !hasPlayablePaperPrint(facts.prints);
   const specialRequestMissing = hasSpecialPrintRequest(item)
     && !facts.printLookupFailed
     && !facts.prints?.some((print) => printMatchesSpecialRequests(print, item));
@@ -930,17 +957,34 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
 
   return {
     ...enrichedItem,
-    status: specialRequestMissing || facts.printLookupFailed || notPlayablePaper ? "review" : item.status,
+    status: specialRequestMissing || notPlayablePaper ? "review" : item.status,
     caseNote: caseCheck ? caseNoteForItem(enrichedItem, recentCaseSets) : "",
     alternateTitle: requestedFlavorName(item, facts.prints),
     note: specialRequestMissing
       ? specialRequestReviewNote(item)
-      : facts.printLookupFailed
-        ? "Print history lookup failed"
-        : notPlayablePaper
+      : notPlayablePaper
           ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card"
           : item.note,
   };
+}
+
+async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage) {
+  const retriedItems = [...items];
+  const failedIndexes = retriedItems
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => item.status === "found" && item.printLookupFailed);
+
+  for (const [retryIndex, { item, index }] of failedIndexes.entries()) {
+    setMessage(`${passLabel}: Scryfall threw an error, retrying print history ${retryIndex + 1} of ${failedIndexes.length}...`);
+    if (retryIndex > 0) await sleep(delayMs);
+    retriedItems[index] = await enrichResolvedItem(
+      { ...item, printLookupFailed: false },
+      caseCheck,
+      recentCaseSets,
+    );
+  }
+
+  return retriedItems;
 }
 
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }) {
@@ -1037,7 +1081,7 @@ function App() {
         await sleep(250);
       }
 
-      const withRarities = [];
+      let withRarities = [];
       const printGroups = chunk(fuzzyResolved, PRINT_FACT_CONCURRENCY);
       for (const [groupIndex, group] of printGroups.entries()) {
         const starting = groupIndex * PRINT_FACT_CONCURRENCY + 1;
@@ -1049,6 +1093,24 @@ function App() {
         withRarities.push(...enrichedGroup);
         await sleep(250);
       }
+
+      withRarities = await retryFailedPrintHistories(
+        withRarities,
+        caseCheck,
+        recentCaseSets,
+        500,
+        "Second pass",
+        setMessage,
+      );
+
+      withRarities = await retryFailedPrintHistories(
+        withRarities,
+        caseCheck,
+        recentCaseSets,
+        2000,
+        "Third pass",
+        setMessage,
+      );
 
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
@@ -1132,7 +1194,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.2.1</span>
+              <span>v0.2.2</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
