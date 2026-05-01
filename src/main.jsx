@@ -12,12 +12,14 @@ import {
   Trash2,
 } from "lucide-react";
 import "./styles.css";
+import rrgLogo from "../images/LOGO_PNG_HEADER.png";
 
 const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
 const SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search";
 const SCRYFALL_SETS_URL = "https://api.scryfall.com/sets";
 const BATCH_SIZE = 75;
+const PRINT_FACT_CONCURRENCY = 5;
 const STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
 
 const sampleList = `Gavin Verhey
@@ -26,10 +28,11 @@ const sampleList = `Gavin Verhey
 1 Chub Toad - G unc
 Storm crow
 Psychatog r
-One With Nothing
+One With Nothing U
 3x cheatyface foil
 1 goblin game-rare
 Squire
+raph's jitte
 4x Lightningbolt
 liliana
 4x Godless Shrine land
@@ -111,6 +114,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function formatPhoneNumber(value) {
+  const digits = value.replace(/\D/g, "");
+  const tenDigits = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+  if (tenDigits.length !== 10) return value.trim();
+  return `${tenDigits.slice(0, 3)}-${tenDigits.slice(3, 6)}-${tenDigits.slice(6)}`;
+}
+
+function normalizeContactValue(value) {
+  const trimmed = value.trim();
+  if (/(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(trimmed)) {
+    return formatPhoneNumber(trimmed);
+  }
+  return trimmed;
+}
+
 function extractContact(line) {
   const headerFromMatch = line.match(/\bpull\s+list\s+from\s+(.+?)(?:\s+on\s+facebook|\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|$)/i);
   if (headerFromMatch) {
@@ -132,7 +150,7 @@ function extractContact(line) {
   if (bracketMatch) {
     return {
       name: bracketMatch[1].trim(),
-      contact: bracketMatch[2].trim(),
+      contact: normalizeContactValue(bracketMatch[2]),
     };
   }
 
@@ -145,7 +163,7 @@ function extractContact(line) {
 
   return {
     name: line.replace(contact, "").replace(/\s+/g, " ").trim(),
-    contact,
+    contact: normalizeContactValue(contact),
   };
 }
 
@@ -210,6 +228,46 @@ function parseRarities(value) {
     .split(/[,/]+|\band\b/i)
     .map((part) => parseRarity(part.trim()))
     .filter(Boolean);
+}
+
+function isQuantityOnlyLine(line) {
+  return /^\d+\s*x?$/i.test(line.trim());
+}
+
+function isTableHeaderLine(line) {
+  return ["qty", "quantity", "card name", "card", "rarity"].includes(normalizeName(line));
+}
+
+function isStandaloneRarityLine(line) {
+  return Boolean(parseRarity(line));
+}
+
+function normalizeCopiedTableLines(lines) {
+  const normalized = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+
+    if (isTableHeaderLine(line)) continue;
+
+    if (
+      isQuantityOnlyLine(line)
+      && lines[index + 1]
+      && lines[index + 2]
+      && !isTableHeaderLine(lines[index + 1])
+      && isStandaloneRarityLine(lines[index + 2])
+    ) {
+      normalized.push(`${line} ${lines[index + 1]} ${lines[index + 2]}`);
+      index += 2;
+      continue;
+    }
+
+    if (isQuantityOnlyLine(line) || isStandaloneRarityLine(line)) continue;
+
+    normalized.push(line);
+  }
+
+  return normalized;
 }
 
 function isDescriptor(part) {
@@ -284,6 +342,22 @@ function specialRequestReviewNote(item) {
   if (!requests.length) return "";
   if (requests.length === 1) return `${requests[0]} version not found`;
   return `${requests.join(" / ")} version not found`;
+}
+
+function requestedFlavorName(item, prints = []) {
+  const candidates = [item.card, ...prints].filter(Boolean);
+  const inputNormalized = normalizeName(item.inputName);
+  const inputCompact = compactName(item.inputName);
+  const flavorNames = candidates.flatMap((print) => [
+    print.flavor_name,
+    ...(print.card_faces || []).map((face) => face.flavor_name),
+  ]).filter(Boolean);
+  const match = flavorNames.find((flavorName) => (
+    normalizeName(flavorName) === inputNormalized
+      || compactName(flavorName) === inputCompact
+  ));
+
+  return match || "";
 }
 
 function stripReviewParentheticals(line, statedRarities, specialRequests) {
@@ -373,9 +447,10 @@ function parseCardLine(rawLine, index) {
 
 function parsePullList(text) {
   const { customer, cardLines } = parseCustomerAndCards(text);
+  const normalizedCardLines = normalizeCopiedTableLines(cardLines);
   const grouped = new Map();
 
-  cardLines.forEach((line, index) => {
+  normalizedCardLines.forEach((line, index) => {
     const item = parseCardLine(line, index);
     if (!item) return;
 
@@ -393,7 +468,7 @@ function parsePullList(text) {
     grouped.set(item.lookupKey, { ...item, originals: [item.original] });
   });
 
-  return { customer, cards: Array.from(grouped.values()), cardLineCount: cardLines.length };
+  return { customer, cards: Array.from(grouped.values()), cardLineCount: normalizedCardLines.length };
 }
 
 function chunk(items, size) {
@@ -669,6 +744,10 @@ function displayName(item) {
   return item.card?.name || titleCaseFallback(item.inputName);
 }
 
+function alternateTitleNote(item) {
+  return item.alternateTitle ? ` (${item.alternateTitle})` : "";
+}
+
 function sortByName(a, b) {
   return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: "base" });
 }
@@ -681,7 +760,35 @@ function formatCardLine(item, useCheckboxes) {
   const specialNote = specialRequestNote(item);
   const caseNote = item.caseNote ? ` - ${item.caseNote}` : "";
   const reviewNote = item.status !== "found" && item.note ? ` (${item.note})` : "";
-  return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${specialNote}${caseNote}${reviewNote}`;
+  return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${specialNote}${caseNote}${reviewNote}`;
+}
+
+function formatContactLine(contact) {
+  if (!contact) return "";
+  const normalized = normalizeContactValue(contact);
+  if (/^facebook$/i.test(normalized)) return "(Facebook)";
+  return normalized;
+}
+
+function formatCustomerName(name) {
+  return name
+    .trim()
+    .split(/\s+/)
+    .map((word) => word
+      .toLowerCase()
+      .replace(/(^|[-'])([a-z])/g, (_, prefix, letter) => `${prefix}${letter.toUpperCase()}`))
+    .join(" ");
+}
+
+function formatTimestamp(value) {
+  const date = value ? new Date(value) : new Date();
+  return new Intl.DateTimeFormat(undefined, {
+    month: "numeric",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
 }
 
 function isBoundaryNameCandidate(item, cardLineCount) {
@@ -734,7 +841,7 @@ function inferBoundaryCustomer(customer, items, cardLineCount) {
   return { customer, items };
 }
 
-function formatOutput(customer, items, useCheckboxes) {
+function formatOutput(customer, items, useCheckboxes, processedAt) {
   const found = items.filter((item) => item.status === "found");
   const needsReview = items.filter((item) => item.status !== "found");
   const basics = found.filter((item) => item.isBasicLand).sort(sortBasicLands);
@@ -744,8 +851,21 @@ function formatOutput(customer, items, useCheckboxes) {
   const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
   const lines = [];
 
-  lines.push(customer.name || "**NEED NAME**");
-  lines.push(customer.contact ? `(${customer.contact})` : "**NEED CONTACT INFO**");
+  if (customer.name) {
+    lines.push(formatCustomerName(customer.name));
+  } else {
+    lines.push("NAME:");
+    lines.push("");
+  }
+
+  if (customer.contact) {
+    lines.push(formatContactLine(customer.contact));
+  } else {
+    lines.push("CONTACT:");
+    lines.push("");
+  }
+
+  lines.push(`Printed: ${formatTimestamp(processedAt)}`);
   lines.push("");
 
   if (high.length) {
@@ -785,6 +905,44 @@ function safeFileName(customer) {
   return `${base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "pull-list"}.txt`;
 }
 
+async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
+  if (item.status !== "found") return item;
+
+  if (item.isBasicLand) {
+    return {
+      ...item,
+      rarities: ["common"],
+      nonSecretRarities: ["common"],
+      hasFullArt: Boolean(item.card?.full_art),
+      specialRequestFound: !hasSpecialPrintRequest(item),
+      caseNote: "",
+      alternateTitle: "",
+    };
+  }
+
+  const facts = await fetchPrintFacts(item.card);
+  const enrichedItem = { ...item, ...facts };
+  const notPlayablePaper = !hasPlayablePaperPrint(facts.prints);
+  const specialRequestMissing = hasSpecialPrintRequest(item)
+    && !facts.printLookupFailed
+    && !facts.prints?.some((print) => printMatchesSpecialRequests(print, item));
+  const ambiguousNonPlayable = notPlayablePaper && await hasAmbiguousPlayableName(item.inputName);
+
+  return {
+    ...enrichedItem,
+    status: specialRequestMissing || facts.printLookupFailed || notPlayablePaper ? "review" : item.status,
+    caseNote: caseCheck ? caseNoteForItem(enrichedItem, recentCaseSets) : "",
+    alternateTitle: requestedFlavorName(item, facts.prints),
+    note: specialRequestMissing
+      ? specialRequestReviewNote(item)
+      : facts.printLookupFailed
+        ? "Print history lookup failed"
+        : notPlayablePaper
+          ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card"
+          : item.note,
+  };
+}
+
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }) {
   return (
     <button className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
@@ -797,6 +955,7 @@ function App() {
   const [input, setInput] = useState(sampleList);
   const [resolvedItems, setResolvedItems] = useState([]);
   const [processedCustomer, setProcessedCustomer] = useState(null);
+  const [processedAt, setProcessedAt] = useState(null);
   const [useCheckboxes, setUseCheckboxes] = useState(true);
   const [caseCheck, setCaseCheck] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -805,8 +964,8 @@ function App() {
   const parsed = useMemo(() => parsePullList(input), [input]);
   const outputCustomer = processedCustomer || parsed.customer;
   const output = useMemo(
-    () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes) : ""),
-    [outputCustomer, resolvedItems, useCheckboxes],
+    () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes, processedAt) : ""),
+    [outputCustomer, resolvedItems, useCheckboxes, processedAt],
   );
   const totalQuantity = parsed.cards.reduce((sum, item) => sum + item.quantity, 0);
   const needsReview = resolvedItems.filter((item) => item.status !== "found").length;
@@ -828,7 +987,8 @@ function App() {
       }
 
       const firstPass = [];
-      for (const [batchIndex, batch] of chunk(parsed.cards, BATCH_SIZE).entries()) {
+      const exactBatches = chunk(parsed.cards, BATCH_SIZE);
+      for (const [batchIndex, batch] of exactBatches.entries()) {
         setMessage(`Exact lookup batch ${batchIndex + 1}...`);
         const result = await fetchCollection(batch);
         if (result.ok) {
@@ -854,7 +1014,7 @@ function App() {
         const card = await fetchNamedCard(item.inputName, "fuzzy");
         const ambiguous = card && await isAmbiguousFuzzyMatch(item.inputName, card);
         fuzzyResolved.push(
-          card && isPlayablePaperCard(card) && !ambiguous
+          card && !ambiguous
             ? {
               ...item,
               card,
@@ -878,50 +1038,22 @@ function App() {
       }
 
       const withRarities = [];
-      for (const item of fuzzyResolved) {
-        if (item.status !== "found") {
-          withRarities.push(item);
-          continue;
-        }
-
-        if (item.isBasicLand) {
-          withRarities.push({
-            ...item,
-            rarities: ["common"],
-            nonSecretRarities: ["common"],
-            hasFullArt: Boolean(item.card?.full_art),
-            specialRequestFound: !hasSpecialPrintRequest(item),
-            caseNote: "",
-          });
-          continue;
-        }
-
-        setMessage(`Checking print rarities for "${item.card.name}"...`);
-        const facts = await fetchPrintFacts(item.card);
-        const enrichedItem = { ...item, ...facts };
-        const notPlayablePaper = !hasPlayablePaperPrint(facts.prints);
-        const specialRequestMissing = hasSpecialPrintRequest(item)
-          && !facts.printLookupFailed
-          && !facts.prints?.some((print) => printMatchesSpecialRequests(print, item));
-        const ambiguousNonPlayable = notPlayablePaper && await hasAmbiguousPlayableName(item.inputName);
-        withRarities.push({
-          ...enrichedItem,
-          status: specialRequestMissing || facts.printLookupFailed || notPlayablePaper ? "review" : item.status,
-          caseNote: caseCheck ? caseNoteForItem(enrichedItem, recentCaseSets) : "",
-          note: specialRequestMissing
-            ? specialRequestReviewNote(item)
-            : facts.printLookupFailed
-              ? "Print history lookup failed"
-              : notPlayablePaper
-                ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card"
-                : item.note,
-        });
+      const printGroups = chunk(fuzzyResolved, PRINT_FACT_CONCURRENCY);
+      for (const [groupIndex, group] of printGroups.entries()) {
+        const starting = groupIndex * PRINT_FACT_CONCURRENCY + 1;
+        const ending = Math.min(starting + group.length - 1, fuzzyResolved.length);
+        setMessage(`Working through Scryfall print history ${starting}-${ending} of ${fuzzyResolved.length}...`);
+        const enrichedGroup = await Promise.all(
+          group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets)),
+        );
+        withRarities.push(...enrichedGroup);
         await sleep(250);
       }
 
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
       setResolvedItems(inferred.items);
+      setProcessedAt(new Date().toISOString());
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : "List formatted.");
     } catch (error) {
@@ -986,6 +1118,7 @@ function App() {
     setInput(value);
     setResolvedItems([]);
     setProcessedCustomer(null);
+    setProcessedAt(null);
     setMessage("Input changed. Process again when ready.");
   }
 
@@ -993,15 +1126,17 @@ function App() {
     <main className="app-shell">
       <section className="formatter">
         <header className="app-header">
-          <div className="logo-slot" aria-label="RRG logo placeholder">
-            <span>RRG</span>
-            <small>LOGO</small>
+          <div className="logo-slot">
+            <img src={rrgLogo} alt="Red Raccoon Games logo" />
           </div>
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.1</span>
+              <span>v0.2</span>
             </div>
+          </div>
+          <div className="logo-slot logo-slot-right" aria-hidden="true">
+            <img src={rrgLogo} alt="" />
           </div>
         </header>
 
@@ -1017,6 +1152,7 @@ function App() {
                     setCaseCheck(event.target.checked);
                     setResolvedItems([]);
                     setProcessedCustomer(null);
+                    setProcessedAt(null);
                     setMessage("Case check setting changed. Process again when ready.");
                   }}
                 />
@@ -1074,7 +1210,7 @@ function App() {
 
           <textarea
             className="output-box"
-            value={output || "Processed output will appear here."}
+            value={output || "Processed output will appear here! :-)"}
             readOnly
             aria-label="Formatted output text"
             onFocus={(event) => event.target.select()}
@@ -1082,9 +1218,11 @@ function App() {
         </section>
 
         <footer className="status-bar" aria-live="polite">
-          <span><Clipboard size={17} /> {parsed.cards.length} parsed</span>
-          <span><Check size={17} /> {resolvedItems.length - needsReview} resolved</span>
           <strong>{message}</strong>
+          <div className="status-counts">
+            <span><Clipboard size={17} /> {parsed.cards.length} parsed</span>
+            <span><Check size={17} /> {resolvedItems.length - needsReview} resolved</span>
+          </div>
         </footer>
 
         <p className="work-note">Still working on this, let me know if you come across any weirdness! -Derek</p>

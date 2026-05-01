@@ -48,45 +48,31 @@ button {
 
 .app-header {
   display: grid;
-  grid-template-columns: 76px minmax(0, 1fr) 76px;
+  grid-template-columns: 132px minmax(0, 1fr) 132px;
   align-items: center;
   gap: 18px;
-  min-height: 88px;
+  min-height: 132px;
 }
 
-.app-header > div:last-child {
+.app-header > div:nth-child(2) {
   grid-column: 2;
   text-align: center;
 }
 
 .logo-slot {
   display: flex;
-  flex-direction: column;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  width: 76px;
-  height: 76px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 8px;
-  color: #9fb5c8;
-  background: #17283d;
-  font-weight: 800;
-  text-align: center;
+  width: 132px;
+  height: 132px;
 }
 
-.logo-slot span,
-.logo-slot small {
+.logo-slot img {
   display: block;
-  line-height: 0.92;
-  font-size: 1rem;
-  font-weight: 800;
-}
-
-.logo-slot small {
-  margin-top: 0;
-  letter-spacing: 0;
-  opacity: 1;
+  width: 132px;
+  height: 132px;
+  object-fit: contain;
 }
 
 .eyebrow,
@@ -264,6 +250,7 @@ h2 {
   align-items: center;
   flex-wrap: wrap;
   gap: 12px;
+  justify-content: space-between;
   min-height: 50px;
   padding: 10px 12px;
   border: 1px solid rgba(255, 255, 255, 0.12);
@@ -272,7 +259,15 @@ h2 {
   background: #0c1522;
 }
 
-.status-bar span {
+.status-counts {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.status-counts span {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -283,6 +278,7 @@ h2 {
 }
 
 .status-bar strong {
+  flex: 1 1 260px;
   color: #ffffff;
   font-weight: 700;
 }
