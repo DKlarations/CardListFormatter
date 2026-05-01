@@ -875,7 +875,7 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
 
   if (both.length) {
     if (lines.at(-1) !== "") lines.push("");
-    lines.push("=== Both Rarities ===");
+    lines.push("=== Rarity Shifted ===");
     both.forEach((item) => lines.push(formatCardLine(item, useCheckboxes)));
   }
 
@@ -1132,7 +1132,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.2</span>
+              <span>v0.2.1</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
