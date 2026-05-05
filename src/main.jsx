@@ -1,12 +1,14 @@
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Check,
+  CircleX,
   Clipboard,
   Copy,
   Download,
   Loader2,
   Printer,
+  RefreshCw,
   Search,
   Sparkles,
   Trash2,
@@ -21,14 +23,38 @@ const SCRYFALL_SETS_URL = "https://api.scryfall.com/sets";
 const BATCH_SIZE = 50;
 const PRINT_FACT_CONCURRENCY = 5;
 const SCRYFALL_MIN_INTERVAL_MS = 120;
+const CAREFUL_SCRYFALL_MIN_INTERVAL_MS = 500;
+const CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1000;
+const CACHE_PREFIX = "rrg-scryfall-cache:";
 const STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
 let scryfallRequestGate = Promise.resolve();
 let lastScryfallRequestAt = 0;
+let activeScryfallSignal = null;
+let activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
 
-const sampleList = `Gavin Verhey
-206-555-5265
+const SAMPLE_CUSTOMER_NAMES = [
+  "Mark Rosewater",
+  "Bill Rose",
+  "Skaff Elias",
+  "Beth Moursund",
+  "Tom Wylie",
+  "Aaron Forsythe",
+  "Erik Lauer",
+  "Devin Low",
+  "Mark Gottlieb",
+  "Tom LaPille",
+  "Dave Humpherys",
+  "Sam Stoddard",
+  "Gavin Verhey",
+  "Ken Nagle",
+  "Ethan Fleischer",
+  "Melissa DeTora",
+  "Jeremy Jarvis",
+  "Carmen Klomparens",
+  "Matt Cavotta",
+];
 
-1 Chub Toad - G unc
+const sampleCardList = `1 Chub Toad - G unc
 Storm crow
 Psychatog r
 One With Nothing U
@@ -41,6 +67,23 @@ liliana
 4x Godless Shrine land
 Yargle gluttin of urborg
 sol ring :-)`;
+
+function randomSampleCustomerName() {
+  return SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * SAMPLE_CUSTOMER_NAMES.length)];
+}
+
+function randomSamplePhoneNumber() {
+  const areaCode = Math.random() < 0.5 ? "206" : "564";
+  const lastFour = String(Math.floor(Math.random() * 10000)).padStart(4, "0");
+  return `${areaCode}-555-${lastFour}`;
+}
+
+function createSampleList() {
+  return `${randomSampleCustomerName()}
+${randomSamplePhoneNumber()}
+
+${sampleCardList}`;
+}
 
 const CARD_HINTS = new Set([
   "artifact",
@@ -73,6 +116,42 @@ const BASIC_LANDS_BY_COLOR = {
 const BASIC_LAND_NAMES = new Set(Object.values(BASIC_LANDS_BY_COLOR));
 const BASIC_LAND_ORDER = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
 const CASE_RELEVANT_SET_TYPES = new Set(["core", "commander", "draft_innovation", "expansion", "masters"]);
+const TOKEN_KEYWORD_PATTERNS = [
+  ["Double Strike", /\bdouble\s+strike\b/i],
+  ["First Strike", /\bfirst\s+strike\b/i],
+  ["Deathtouch", /\bdeathtouch\b/i],
+  ["Defender", /\bdefender\b/i],
+  ["Flying", /\bflying\b/i],
+  ["Haste", /\bhaste\b/i],
+  ["Hexproof", /\bhexproof\b/i],
+  ["Indestructible", /\bindestructible\b/i],
+  ["Lifelink", /\blifelink\b/i],
+  ["Menace", /\bmenace\b/i],
+  ["Reach", /\breach\b/i],
+  ["Trample", /\btrample\b/i],
+  ["Vigilance", /\bvigilance\b/i],
+  ["Ward", /\bward\b/i],
+  ["Prowess", /\bprowess\b/i],
+  ["Toxic", /\btoxic\b/i],
+  ["Infect", /\binfect\b/i],
+  ["Wither", /\bwither\b/i],
+  ["Shroud", /\bshroud\b/i],
+  ["Fear", /\bfear\b/i],
+  ["Intimidate", /\bintimidate\b/i],
+  ["Islandwalk", /\bislandwalk\b/i],
+  ["Swampwalk", /\bswampwalk\b/i],
+  ["Mountainwalk", /\bmountainwalk\b/i],
+  ["Forestwalk", /\bforestwalk\b/i],
+  ["Plainswalk", /\bplainswalk\b/i],
+];
+const TOKEN_COLOR_PATTERNS = [
+  ["White", /\bwhite\b/i],
+  ["Blue", /\bblue\b/i],
+  ["Black", /\bblack\b/i],
+  ["Red", /\bred\b/i],
+  ["Green", /\bgreen\b/i],
+  ["Colorless", /\bcolorless\b/i],
+];
 const SPECIAL_REQUEST_PATTERNS = [
   { label: "FOIL", pattern: /\b(?:foil|foiled)\b/i },
   { label: "NONFOIL", pattern: /\b(?:non[-\s]?foil|nonfoil)\b/i },
@@ -126,11 +205,53 @@ async function waitForScryfallSlot() {
 
   await previousGate;
   const elapsed = Date.now() - lastScryfallRequestAt;
-  if (elapsed < SCRYFALL_MIN_INTERVAL_MS) {
-    await sleep(SCRYFALL_MIN_INTERVAL_MS - elapsed);
+  if (elapsed < activeScryfallMinIntervalMs) {
+    await sleep(activeScryfallMinIntervalMs - elapsed);
   }
   lastScryfallRequestAt = Date.now();
   releaseGate();
+}
+
+function cacheKeyForRequest(url, options = {}) {
+  const method = (options.method || "GET").toUpperCase();
+  return `${CACHE_PREFIX}${method}:${url}:${options.body || ""}`;
+}
+
+function readCachedResponse(url, options = {}) {
+  if (typeof localStorage === "undefined") return null;
+
+  try {
+    const raw = localStorage.getItem(cacheKeyForRequest(url, options));
+    if (!raw) return null;
+    const cached = JSON.parse(raw);
+    if (!cached?.savedAt || Date.now() - cached.savedAt > CACHE_TTL_MS) {
+      localStorage.removeItem(cacheKeyForRequest(url, options));
+      return null;
+    }
+    return { ok: true, status: cached.status || 200, data: cached.data, cached: true };
+  } catch {
+    return null;
+  }
+}
+
+function writeCachedResponse(url, options = {}, result) {
+  if (typeof localStorage === "undefined" || !result?.ok) return;
+
+  try {
+    localStorage.setItem(cacheKeyForRequest(url, options), JSON.stringify({
+      savedAt: Date.now(),
+      status: result.status,
+      data: result.data,
+    }));
+  } catch {
+    // Cache is an optimization; storage limits should never block processing.
+  }
+}
+
+function throwIfAborted() {
+  if (activeScryfallSignal?.aborted) {
+    throw new DOMException("Processing canceled.", "AbortError");
+  }
 }
 
 function formatPhoneNumber(value) {
@@ -329,6 +450,57 @@ function cleanLookupName(value) {
   return cleanCardName(stripSpecialRequests(value));
 }
 
+function isTokenRequestName(value) {
+  return /\btoken\b/i.test(value);
+}
+
+function extractPowerToughness(value) {
+  const match = value.match(/\b((?:\d+|x|\*)\s*\/\s*(?:\d+|x|\*))\b/i);
+  return match ? match[1].replace(/\s+/g, "").toUpperCase() : "";
+}
+
+function extractTokenDetails(value) {
+  const powerToughness = extractPowerToughness(value);
+  const keywords = TOKEN_KEYWORD_PATTERNS
+    .filter(([, pattern]) => pattern.test(value))
+    .map(([label]) => label);
+  return Array.from(new Set([powerToughness, ...keywords].filter(Boolean)));
+}
+
+function extractTokenColors(value) {
+  const colors = TOKEN_COLOR_PATTERNS
+    .filter(([, pattern]) => pattern.test(value))
+    .map(([label]) => label);
+  return Array.from(new Set(colors));
+}
+
+function cleanTokenName(value) {
+  let cleaned = value
+    .replace(/\b(?:\d+|x|\*)\s*\/\s*(?:\d+|x|\*)\b/ig, " ");
+
+  TOKEN_KEYWORD_PATTERNS.forEach(([, pattern]) => {
+    cleaned = cleaned.replace(pattern, " ");
+  });
+
+  TOKEN_COLOR_PATTERNS.forEach(([, pattern]) => {
+    cleaned = cleaned.replace(pattern, " ");
+  });
+
+  return cleaned
+    .replace(/\b(?:with|and|or|has|having)\b/ig, " ")
+    .replace(/\s*[,.;:-]\s*$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function applyTokenColors(name, colors = []) {
+  if (!colors.length) return name;
+  const colorPrefix = colors.join("/");
+  return normalizeName(name).startsWith(normalizeName(colorPrefix))
+    ? name
+    : `${colorPrefix} ${name}`;
+}
+
 function mergeSpecialRequests(a = [], b = []) {
   return Array.from(new Set([...a, ...b]));
 }
@@ -454,7 +626,12 @@ function parseCardLine(rawLine, index) {
     line = line.slice(0, trailingRaritiesMatch.index).trim();
   }
 
-  const inputName = cleanLookupName(line);
+  let inputName = cleanLookupName(line);
+  if (!inputName) return null;
+  const isToken = isTokenRequestName(inputName);
+  const tokenDetails = isToken ? extractTokenDetails(rawLine) : [];
+  const tokenColors = isToken ? extractTokenColors(rawLine) : [];
+  if (isToken) inputName = applyTokenColors(cleanTokenName(inputName), tokenColors);
   if (!inputName) return null;
 
   return {
@@ -464,7 +641,15 @@ function parseCardLine(rawLine, index) {
     inputName,
     statedRarities: Array.from(new Set(statedRarities)),
     specialRequests: Array.from(new Set(specialRequests)),
-    lookupKey: normalizeName(inputName),
+    lookupKey: isToken ? normalizeName(`${inputName} ${tokenDetails.join(" ")}`) : normalizeName(inputName),
+    ...(isToken ? {
+      status: "found",
+      isToken: true,
+      tokenDetails,
+      tokenColors,
+      rarities: ["common"],
+      nonSecretRarities: ["common"],
+    } : {}),
   };
 }
 
@@ -483,6 +668,8 @@ function parsePullList(text) {
       existing.originals.push(item.original);
       existing.statedRarities = Array.from(new Set([...existing.statedRarities, ...item.statedRarities]));
       existing.specialRequests = mergeSpecialRequests(existing.specialRequests, item.specialRequests);
+      existing.tokenDetails = Array.from(new Set([...(existing.tokenDetails || []), ...(item.tokenDetails || [])]));
+      existing.tokenColors = Array.from(new Set([...(existing.tokenColors || []), ...(item.tokenColors || [])]));
       existing.presetStatus = existing.presetStatus || item.presetStatus;
       existing.note = existing.note || item.note;
       return;
@@ -503,14 +690,23 @@ function chunk(items, size) {
 }
 
 async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
+  throwIfAborted();
+  const cached = readCachedResponse(url, options);
+  if (cached) return cached;
+
   let lastError;
   let lastStatus = 0;
   const retryableStatuses = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
+      throwIfAborted();
       await waitForScryfallSlot();
-      const response = await fetch(url, options);
+      throwIfAborted();
+      const response = await fetch(url, {
+        ...options,
+        signal: options.signal || activeScryfallSignal || undefined,
+      });
       lastStatus = response.status;
 
       if (retryableStatuses.has(response.status) && attempt < attempts) {
@@ -523,8 +719,11 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
         return { ok: false, status: response.status, data: null };
       }
 
-      return { ok: true, status: response.status, data: await response.json() };
+      const result = { ok: true, status: response.status, data: await response.json() };
+      writeCachedResponse(url, options, result);
+      return result;
     } catch (error) {
+      if (error?.name === "AbortError") throw error;
       lastError = error;
       if (attempt < attempts) await sleep(900 * attempt);
     }
@@ -547,12 +746,15 @@ async function fetchCollection(items) {
 }
 
 async function fetchNamedCard(name, mode = "fuzzy") {
+  const result = await fetchNamedCardResult(name, mode);
+  return result.ok ? result.data : null;
+}
+
+async function fetchNamedCardResult(name, mode = "fuzzy") {
   const params = new URLSearchParams({ [mode]: name });
-  const result = await fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
+  return fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
   });
-
-  return result.ok ? result.data : null;
 }
 
 async function hasAmbiguousPlayableName(inputName) {
@@ -748,6 +950,53 @@ function mergeResolvedCards(batch, result) {
   });
 }
 
+function resolveItemWithCard(item, card) {
+  return {
+    ...item,
+    card,
+    status: "found",
+    isBasicLand: BASIC_LAND_NAMES.has(card.name),
+    correction: normalizeName(card.name) !== normalizeName(item.inputName),
+  };
+}
+
+async function resolveExactBatch(batch, batchNumber, setMessage) {
+  let lastResult = null;
+
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    setMessage(attempt === 1
+      ? `Exact lookup batch ${batchNumber}...`
+      : `Exact lookup batch ${batchNumber} retry ${attempt}...`);
+    lastResult = await fetchCollection(batch);
+    if (lastResult.ok) return mergeResolvedCards(batch, lastResult.data);
+    await sleep(500 * attempt);
+  }
+
+  setMessage(`Exact lookup batch ${batchNumber} failed; trying exact names one at a time...`);
+  const resolved = [];
+
+  for (const [index, item] of batch.entries()) {
+    setMessage(`Exact retry ${index + 1} of ${batch.length}: "${item.inputName}"...`);
+    const result = await fetchNamedCardResult(item.inputName, "exact");
+
+    if (result.ok) {
+      resolved.push(resolveItemWithCard(item, result.data));
+    } else {
+      resolved.push({
+        ...item,
+        status: "missing",
+        note: result.status && result.status !== 404
+          ? `Exact lookup failed (${result.status})`
+          : "",
+      });
+    }
+
+    await sleep(250);
+  }
+
+  return resolved;
+}
+
 function rarityBucket(item) {
   const eligiblePrintRarities = item.nonSecretRarities?.length
     ? item.nonSecretRarities
@@ -775,6 +1024,10 @@ function alternateTitleNote(item) {
   return item.alternateTitle ? ` (${item.alternateTitle})` : "";
 }
 
+function tokenDetailsNote(item) {
+  return item.tokenDetails?.length ? ` (${item.tokenDetails.join(", ")})` : "";
+}
+
 function sortByName(a, b) {
   return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: "base" });
 }
@@ -787,7 +1040,7 @@ function formatCardLine(item, useCheckboxes) {
   const specialNote = specialRequestNote(item);
   const caseNote = item.caseNote ? ` - ${item.caseNote}` : "";
   const reviewNote = item.status !== "found" && item.note ? ` (${item.note})` : "";
-  return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${specialNote}${caseNote}${reviewNote}`;
+  return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${tokenDetailsNote(item)}${specialNote}${caseNote}${reviewNote}`;
 }
 
 function formatContactLine(contact) {
@@ -871,8 +1124,9 @@ function inferBoundaryCustomer(customer, items, cardLineCount) {
 function formatOutput(customer, items, useCheckboxes, processedAt) {
   const found = items.filter((item) => item.status === "found");
   const needsReview = items.filter((item) => item.status !== "found");
+  const tokens = found.filter((item) => item.isToken).sort(sortByName);
   const basics = found.filter((item) => item.isBasicLand).sort(sortBasicLands);
-  const nonBasics = found.filter((item) => !item.isBasicLand);
+  const nonBasics = found.filter((item) => !item.isBasicLand && !item.isToken);
   const high = nonBasics.filter((item) => rarityBucket(item) === "high").sort(sortByName);
   const both = nonBasics.filter((item) => rarityBucket(item) === "both").sort(sortByName);
   const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
@@ -912,6 +1166,12 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
     low.forEach((item) => lines.push(formatCardLine(item, useCheckboxes)));
   }
 
+  if (tokens.length) {
+    if (lines.at(-1) !== "") lines.push("");
+    lines.push("=== Tokens ===");
+    tokens.forEach((item) => lines.push(formatCardLine(item, useCheckboxes)));
+  }
+
   if (basics.length) {
     if (lines.at(-1) !== "") lines.push("");
     lines.push("=== Basic Lands ===");
@@ -934,6 +1194,21 @@ function safeFileName(customer) {
 
 async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
   if (item.status !== "found") return item;
+
+  if (item.isToken) {
+    return {
+      ...item,
+      rarities: ["common"],
+      nonSecretRarities: ["common"],
+      hasFullArt: false,
+      specialRequestFound: !hasSpecialPrintRequest(item),
+      caseNote: "",
+      alternateTitle: "",
+      tokenDetails: item.tokenDetails || [],
+      tokenColors: item.tokenColors || [],
+      printLookupFailed: false,
+    };
+  }
 
   if (item.isBasicLand) {
     return {
@@ -977,14 +1252,98 @@ async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delay
   for (const [retryIndex, { item, index }] of failedIndexes.entries()) {
     setMessage(`${passLabel}: Scryfall threw an error, retrying print history ${retryIndex + 1} of ${failedIndexes.length}...`);
     if (retryIndex > 0) await sleep(delayMs);
-    retriedItems[index] = await enrichResolvedItem(
+    const retriedItem = await enrichResolvedItem(
       { ...item, printLookupFailed: false },
       caseCheck,
       recentCaseSets,
     );
+    retriedItems[index] = { ...retriedItem, printHistoryRetried: true };
   }
 
   return retriedItems;
+}
+
+async function resolveCardNames(items, setMessage, carefulMode) {
+  const firstPass = items.filter((item) => item.status === "found" || item.status === "review");
+  const lookupItems = items.filter((item) => item.status !== "found" && item.status !== "review");
+  const exactBatches = chunk(lookupItems, carefulMode ? 1 : BATCH_SIZE);
+
+  for (const [batchIndex, batch] of exactBatches.entries()) {
+    firstPass.push(...await resolveExactBatch(batch, batchIndex + 1, setMessage));
+    await sleep(carefulMode ? 500 : 150);
+  }
+
+  const fuzzyResolved = [];
+  for (const item of firstPass) {
+    if (item.status === "found" || item.status === "review") {
+      fuzzyResolved.push(item);
+      continue;
+    }
+
+    setMessage(`Trying fuzzy match for "${item.inputName}"...`);
+    const fuzzyResult = await fetchNamedCardResult(item.inputName, "fuzzy");
+    const card = fuzzyResult.ok ? fuzzyResult.data : null;
+    const ambiguous = card && await isAmbiguousFuzzyMatch(item.inputName, card);
+    fuzzyResolved.push(
+      card && !ambiguous
+        ? resolveItemWithCard(item, card)
+        : {
+          ...item,
+          status: "review",
+          note: ambiguous
+            ? "Ambiguous card name"
+            : item.note
+              ? item.note.includes("not a playable paper card")
+                ? "Not a playable paper card"
+                : fuzzyResult.status && fuzzyResult.status !== 404
+                  ? `${item.note}; fuzzy lookup failed (${fuzzyResult.status})`
+                  : `${item.note}; no fuzzy Scryfall match`
+              : fuzzyResult.status && fuzzyResult.status !== 404
+                ? `Fuzzy lookup failed (${fuzzyResult.status})`
+                : "No Scryfall match",
+        },
+    );
+    await sleep(carefulMode ? 500 : 250);
+  }
+
+  return fuzzyResolved;
+}
+
+async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode) {
+  let withRarities = [];
+  const concurrency = carefulMode ? 1 : PRINT_FACT_CONCURRENCY;
+  const printGroups = chunk(items, concurrency);
+
+  for (const [groupIndex, group] of printGroups.entries()) {
+    const starting = groupIndex * concurrency + 1;
+    const ending = Math.min(starting + group.length - 1, items.length);
+    setMessage(`Working through Scryfall print history ${starting}-${ending} of ${items.length}...`);
+    const enrichedGroup = await Promise.all(
+      group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets)),
+    );
+    withRarities.push(...enrichedGroup);
+    await sleep(carefulMode ? 500 : 250);
+  }
+
+  withRarities = await retryFailedPrintHistories(
+    withRarities,
+    caseCheck,
+    recentCaseSets,
+    500,
+    "Second pass",
+    setMessage,
+  );
+
+  withRarities = await retryFailedPrintHistories(
+    withRarities,
+    caseCheck,
+    recentCaseSets,
+    2000,
+    "Third pass",
+    setMessage,
+  );
+
+  return withRarities;
 }
 
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }) {
@@ -996,14 +1355,17 @@ function IconButton({ children, onClick, title, disabled = false, variant = "sec
 }
 
 function App() {
-  const [input, setInput] = useState(sampleList);
+  const [input, setInput] = useState(() => createSampleList());
   const [resolvedItems, setResolvedItems] = useState([]);
   const [processedCustomer, setProcessedCustomer] = useState(null);
   const [processedAt, setProcessedAt] = useState(null);
   const [useCheckboxes, setUseCheckboxes] = useState(true);
   const [caseCheck, setCaseCheck] = useState(false);
+  const [carefulMode, setCarefulMode] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState("Paste a customer list, then process.");
+  const [reliabilityNote, setReliabilityNote] = useState("");
+  const abortControllerRef = useRef(null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
   const outputCustomer = processedCustomer || parsed.customer;
@@ -1013,6 +1375,15 @@ function App() {
   );
   const totalQuantity = parsed.cards.reduce((sum, item) => sum + item.quantity, 0);
   const needsReview = resolvedItems.filter((item) => item.status !== "found").length;
+  const printFallbacks = resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length;
+
+  function reliabilityMessage(items) {
+    const retryCount = items.filter((item) => item.printHistoryRetried).length;
+    const fallbackCount = items.filter((item) => item.status === "found" && item.printLookupFailed).length;
+    if (fallbackCount) return `${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`;
+    if (retryCount) return `Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`;
+    return "";
+  }
 
   async function processList() {
     if (!parsed.cards.length) {
@@ -1021,7 +1392,11 @@ function App() {
     }
 
     setIsProcessing(true);
+    setReliabilityNote("");
     setMessage(`Checking ${parsed.cards.length} unique card names with Scryfall...`);
+    abortControllerRef.current = new AbortController();
+    activeScryfallSignal = abortControllerRef.current.signal;
+    activeScryfallMinIntervalMs = carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : SCRYFALL_MIN_INTERVAL_MS;
 
     try {
       let recentCaseSets = [];
@@ -1030,99 +1405,75 @@ function App() {
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const firstPass = [];
-      const exactBatches = chunk(parsed.cards, BATCH_SIZE);
-      for (const [batchIndex, batch] of exactBatches.entries()) {
-        setMessage(`Exact lookup batch ${batchIndex + 1}...`);
-        const result = await fetchCollection(batch);
-        if (result.ok) {
-          firstPass.push(...mergeResolvedCards(batch, result.data));
-        } else {
-          firstPass.push(...batch.map((item) => ({
-            ...item,
-            status: "missing",
-            note: result.status ? `Exact batch lookup failed (${result.status})` : "Exact batch lookup failed",
-          })));
-        }
-        await sleep(150);
-      }
-
-      const fuzzyResolved = [];
-      for (const item of firstPass) {
-        if (item.status === "found" || item.status === "review") {
-          fuzzyResolved.push(item);
-          continue;
-        }
-
-        setMessage(`Trying fuzzy match for "${item.inputName}"...`);
-        const card = await fetchNamedCard(item.inputName, "fuzzy");
-        const ambiguous = card && await isAmbiguousFuzzyMatch(item.inputName, card);
-        fuzzyResolved.push(
-          card && !ambiguous
-            ? {
-              ...item,
-              card,
-              status: "found",
-              isBasicLand: BASIC_LAND_NAMES.has(card.name),
-              correction: normalizeName(card.name) !== normalizeName(item.inputName),
-            }
-            : {
-              ...item,
-              status: "review",
-              note: ambiguous
-                ? "Ambiguous card name"
-                : item.note
-                  ? item.note.includes("not a playable paper card")
-                    ? "Not a playable paper card"
-                    : `${item.note}; no fuzzy Scryfall match`
-                  : "No Scryfall match",
-            },
-        );
-        await sleep(250);
-      }
-
-      let withRarities = [];
-      const printGroups = chunk(fuzzyResolved, PRINT_FACT_CONCURRENCY);
-      for (const [groupIndex, group] of printGroups.entries()) {
-        const starting = groupIndex * PRINT_FACT_CONCURRENCY + 1;
-        const ending = Math.min(starting + group.length - 1, fuzzyResolved.length);
-        setMessage(`Working through Scryfall print history ${starting}-${ending} of ${fuzzyResolved.length}...`);
-        const enrichedGroup = await Promise.all(
-          group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets)),
-        );
-        withRarities.push(...enrichedGroup);
-        await sleep(250);
-      }
-
-      withRarities = await retryFailedPrintHistories(
-        withRarities,
-        caseCheck,
-        recentCaseSets,
-        500,
-        "Second pass",
-        setMessage,
-      );
-
-      withRarities = await retryFailedPrintHistories(
-        withRarities,
-        caseCheck,
-        recentCaseSets,
-        2000,
-        "Third pass",
-        setMessage,
-      );
+      const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode);
+      const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck, recentCaseSets, setMessage, carefulMode);
 
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
       setResolvedItems(inferred.items);
       setProcessedAt(new Date().toISOString());
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
+      setReliabilityNote(reliabilityMessage(inferred.items));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : "List formatted.");
     } catch (error) {
-      setMessage(error.message || "Something went wrong while processing.");
+      setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while processing.");
     } finally {
+      activeScryfallSignal = null;
+      activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+      abortControllerRef.current = null;
       setIsProcessing(false);
     }
+  }
+
+  async function retryNeedsReview() {
+    const reviewEntries = resolvedItems
+      .map((item, index) => ({ item, index }))
+      .filter(({ item }) => item.status !== "found");
+
+    if (!reviewEntries.length || isProcessing) return;
+
+    setIsProcessing(true);
+    setReliabilityNote("");
+    setMessage(`Retrying ${reviewEntries.length} review item${reviewEntries.length === 1 ? "" : "s"}...`);
+    abortControllerRef.current = new AbortController();
+    activeScryfallSignal = abortControllerRef.current.signal;
+    activeScryfallMinIntervalMs = carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : SCRYFALL_MIN_INTERVAL_MS;
+
+    try {
+      let recentCaseSets = [];
+      if (caseCheck) {
+        setMessage("Checking recent set list for case rules...");
+        recentCaseSets = await fetchRecentCaseSets();
+      }
+
+      const namesResolved = await resolveCardNames(
+        reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
+        setMessage,
+        carefulMode,
+      );
+      const retried = await enrichPrintHistories(namesResolved, caseCheck, recentCaseSets, setMessage, carefulMode);
+      const nextItems = [...resolvedItems];
+      reviewEntries.forEach(({ index }, retryIndex) => {
+        nextItems[index] = retried[retryIndex] || nextItems[index];
+      });
+
+      setResolvedItems(nextItems);
+      const reviewCount = nextItems.filter((item) => item.status !== "found").length;
+      setReliabilityNote(reliabilityMessage(nextItems));
+      setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
+    } catch (error) {
+      setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while retrying.");
+    } finally {
+      activeScryfallSignal = null;
+      activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+      abortControllerRef.current = null;
+      setIsProcessing(false);
+    }
+  }
+
+  function abortProcessing() {
+    abortControllerRef.current?.abort();
+    setMessage("Canceling current Scryfall work...");
   }
 
   async function copyOutput() {
@@ -1181,6 +1532,7 @@ function App() {
     setResolvedItems([]);
     setProcessedCustomer(null);
     setProcessedAt(null);
+    setReliabilityNote("");
     setMessage("Input changed. Process again when ready.");
   }
 
@@ -1194,7 +1546,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.2.2</span>
+              <span>v0.2.3</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -1215,10 +1567,26 @@ function App() {
                     setResolvedItems([]);
                     setProcessedCustomer(null);
                     setProcessedAt(null);
+                    setReliabilityNote("");
                     setMessage("Case check setting changed. Process again when ready.");
                   }}
                 />
                 Case Check
+              </label>
+              <label className="checkbox-option" title="Use slower one-at-a-time Scryfall lookups.">
+                <input
+                  type="checkbox"
+                  checked={carefulMode}
+                  onChange={(event) => {
+                    setCarefulMode(event.target.checked);
+                    setResolvedItems([]);
+                    setProcessedCustomer(null);
+                    setProcessedAt(null);
+                    setReliabilityNote("");
+                    setMessage("Careful Mode setting changed. Process again when ready.");
+                  }}
+                />
+                Careful Mode
               </label>
               <span className="checkbox-option disabled-option" title="Coming Soon">
                 <Sparkles size={16} />
@@ -1267,6 +1635,9 @@ function App() {
               <IconButton onClick={printOutput} title="Print output" disabled={!output}>
                 <Printer size={18} />
               </IconButton>
+              <IconButton onClick={retryNeedsReview} title="Retry Needs Review items" disabled={!needsReview || isProcessing}>
+                <RefreshCw size={18} />
+              </IconButton>
             </div>
           </div>
 
@@ -1280,10 +1651,17 @@ function App() {
         </section>
 
         <footer className="status-bar" aria-live="polite">
+          {isProcessing && (
+            <IconButton onClick={abortProcessing} title="Cancel processing" variant="danger">
+              <CircleX size={18} />
+            </IconButton>
+          )}
           <strong>{message}</strong>
+          {reliabilityNote && <em>{reliabilityNote}</em>}
           <div className="status-counts">
             <span><Clipboard size={17} /> {parsed.cards.length} parsed</span>
             <span><Check size={17} /> {resolvedItems.length - needsReview} resolved</span>
+            {printFallbacks > 0 && <span>{printFallbacks} fallback</span>}
           </div>
         </footer>
 

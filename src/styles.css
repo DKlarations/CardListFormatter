@@ -208,6 +208,12 @@ h2 {
   font-weight: 800;
 }
 
+.icon-button.danger {
+  background: #3a1720;
+  border-color: #7f3444;
+  color: #ffdce2;
+}
+
 .icon-button:disabled {
   cursor: not-allowed;
   opacity: 0.5;
@@ -280,6 +286,13 @@ h2 {
 .status-bar strong {
   flex: 1 1 260px;
   color: #ffffff;
+  font-weight: 700;
+}
+
+.status-bar em {
+  color: #f2cc8f;
+  font-size: 0.82rem;
+  font-style: normal;
   font-weight: 700;
 }
 
