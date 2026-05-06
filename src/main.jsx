@@ -198,7 +198,7 @@ function titleCaseFallback(value) {
     .join(" ");
 }
 
-// Tiny pause helper for being polite to APIs and letting retry loops breathe.
+// Tiny pause helper for being polite to APIs and letting retry loops breathe so we can maybe stop breaking Scryfall so dang much :-)
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -327,7 +327,7 @@ function isSeparatorLine(line) {
   return /^[-_=]{4,}$/.test(line.trim());
 }
 
-// Filters out friendly human chatter like "thanks!" before it can confuse the card parser.
+// Filters out friendly human chatter like "thanks!" before it can confuse the card parser. Another point of failure for sure.
 function isLikelyNoteLine(line) {
   const normalized = normalizeName(line);
   if (!normalized) return true;
@@ -338,7 +338,7 @@ function isLikelyNoteLine(line) {
   return /[!?]$/.test(line) && normalized.split(" ").length > 4;
 }
 
-// Checks whether a line smells like customer info instead of cardboard.
+// Checks whether a line smells like customer info instead of expensive cardboard.
 function hasContactOrHeader(line) {
   return /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(line)
     || /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(line)
@@ -391,7 +391,7 @@ function parseRarities(value) {
     .filter(Boolean);
 }
 
-// Builds the regex chunk for rarity labels that may appear after card names.
+// Builds the regex chunk for rarity labels that may appear after card names. Hopefully this uncompasses all the options, but stuff could break it.
 function rarityPattern() {
   return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
 }
@@ -411,7 +411,7 @@ function isStandaloneRarityLine(line) {
   return Boolean(parseRarity(line));
 }
 
-// Reassembles messy copied tables back into "qty card rarity" lines.
+// Reassembles messy copied tables back into "qty card rarity" lines. This is worth a review if shit gets weird - we've had a few copy-pasted tables into teams and this should hopefully resolve it.
 function normalizeCopiedTableLines(lines) {
   const normalized = [];
 
@@ -492,7 +492,7 @@ function extractPowerToughness(value) {
   return match ? match[1].replace(/\s+/g, "").toUpperCase() : "";
 }
 
-// Pulls token details into "(3/3, Trample, Vigilance)" style notes.
+// Pulls token details into "(3/3, Trample, Vigilance)" style notes. P/T first, then keyword abilities.
 function extractTokenDetails(value) {
   const powerToughness = extractPowerToughness(value);
   const keywords = TOKEN_KEYWORD_PATTERNS
@@ -529,7 +529,7 @@ function cleanTokenName(value) {
     .trim();
 }
 
-// Adds color words before a token name unless they are already there waving hello.
+// Adds color words before a token name to help with the pullingses
 function applyTokenColors(name, colors = []) {
   if (!colors.length) return name;
   const colorPrefix = colors.join("/");
@@ -611,7 +611,7 @@ function stripReviewParentheticals(line, statedRarities, specialRequests) {
   });
 }
 
-// Peels off trailing descriptors like "- rare" without chopping real names like Retro-Mutation.
+// Peels off trailing descriptors like "- rare" without chopping real names (e.g. "Retro-Mutation" threw an error previously, hopefully this fixes that)
 function stripTrailingDescriptors(line, statedRarities) {
   let remaining = line.trim();
 
@@ -728,7 +728,7 @@ function parsePullList(text) {
   return { customer, cards: Array.from(grouped.values()), cardLineCount: normalizedCardLines.length };
 }
 
-// Slices arrays into small batches for parallel-but-polite Scryfall work.
+// Slices arrays into small batches for parallel-but-polite Scryfall work, so scryfall doesn't give me a spank.
 function chunk(items, size) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -781,7 +781,7 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
   return { ok: false, status: lastStatus, data: null, error: lastError };
 }
 
-// Sends up to 50 exact card-name lookups to Scryfall in one neat bundle.
+// Sends up to 50 exact card-name lookups to Scryfall in one neat bundle. This has been reduced from 100, then 75, might end up reducing it again to 25 if we have to.
 async function fetchCollection(items) {
   return fetchJsonWithRetry(SCRYFALL_COLLECTION_URL, {
     method: "POST",
@@ -809,7 +809,7 @@ async function fetchNamedCardResult(name, mode = "fuzzy") {
   });
 }
 
-// Checks short one-word inputs like "Liliana" so vague names do not sneak into the sorted list.
+// Checks short one-word inputs so vague names do not sneak into the sorted list. mostly just for silly edge cases the customer might have put in the list
 async function hasAmbiguousPlayableName(inputName) {
   const normalized = normalizeName(inputName);
   const words = normalized.split(" ").filter(Boolean);
@@ -827,14 +827,14 @@ async function hasAmbiguousPlayableName(inputName) {
   return Number(result.data?.total_cards || 0) > 1;
 }
 
-// Decides whether Scryfall's fuzzy answer is helpful or a little too confident.
+// Decides whether Scryfall's fuzzy answer is helpful or a little too confident because shit gets weird.
 async function isAmbiguousFuzzyMatch(inputName, card) {
   if (!card) return false;
   if (compactName(inputName) === compactName(card.name)) return false;
   return hasAmbiguousPlayableName(inputName);
 }
 
-// Filters out digital-only, tokens, emblems, and other not-for-the-drawer objects.
+// Filters out digital-only, tokens, emblems, and other not-for-the-drawer nonsense objects.
 function isPlayablePaperCard(card) {
   if (!card || card.digital) return false;
   if (!card.games?.includes("paper")) return false;
@@ -843,13 +843,13 @@ function isPlayablePaperCard(card) {
   return true;
 }
 
-// Keeps Secret Lair weirdness from incorrectly changing rarity buckets.
+// Keeps Secret Lair weirdness from incorrectly changing rarity buckets. why these might count as 'rare' to scryfall is beyond me but they do, and it breaks the sorting rules hard when they do.
 function isSecretLairPrint(print) {
   return /^sl[dupc]?$/i.test(print?.set || "")
     || /\bsecret\s+lair\b/i.test(print?.set_name || "");
 }
 
-// Keeps old player-reward promos from pretending they are normal rare printings.
+// Keeps old player-reward promos from pretending they are normal rare printings because otherwise god damn everything becomes rarity shifted and sad.
 function isPlayerRewardPrint(print) {
   return /\bplayer\s+rewards?\b/i.test(print?.set_name || "")
     || /^mpr$/i.test(print?.set || "");
@@ -863,7 +863,7 @@ function isEligibleRarityPrint(print) {
   return print.set_type === "commander";
 }
 
-// Turns Scryfall's USD price string into a number for case-check math.
+// Turns Scryfall's USD price string into a usable number for case-check math.
 function priceValue(print) {
   return Number(print?.prices?.usd || 0);
 }
@@ -876,12 +876,12 @@ function isCasePricePrint(print) {
   return Boolean(print.prices?.usd);
 }
 
-// Tiny land detector for the "$10 land might be in the case" rule.
+// Tiny land detector for the "$10 land might be in the case" rule. WORTH REVISITING THIS - Hard & Fast rules for display case cards?
 function isLandCard(cardOrPrint) {
   return /\bLand\b/i.test(cardOrPrint?.type_line || "");
 }
 
-// Gets the five most recent case-relevant sets so the rules stay current over time.
+// Gets the five most recent case-relevant sets so the rules stay current over time. This will hopefully then future proof this thang.
 async function fetchRecentCaseSets() {
   const result = await fetchJsonWithRetry(SCRYFALL_SETS_URL, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
@@ -901,7 +901,7 @@ async function fetchRecentCaseSets() {
     .map((set, index) => ({ code: set.code, index, name: set.name }));
 }
 
-// Figures out whether a card gets CHECK CASE or the gentler CASE? nudge.
+// Figures out whether a card gets CHECK CASE  (or the gentler CASE? nudge.)
 function caseNoteForItem(item, recentSets) {
   const prints = item.prints || [];
   if (!prints.length) return "";
@@ -933,12 +933,12 @@ function caseNoteForItem(item, recentSets) {
   return "";
 }
 
-// Confirms a card has at least one real playable paper printing somewhere.
+// Confirms a card has at least one real playable paper printing somewhere because otherwise online-only cards get super obnoxious.
 function hasPlayablePaperPrint(prints) {
   return (prints || []).some((print) => isPlayablePaperCard(print));
 }
 
-// Walks a card's print history to learn real rarities, special versions, and case-check facts.
+// Walks a card's print history to learn real rarities, special versions, and case-check facts - hopefully all without breakign scryfall
 async function fetchPrintFacts(card) {
   if (!card?.prints_search_uri) {
     return {
@@ -1016,7 +1016,7 @@ function mergeResolvedCards(batch, result) {
   });
 }
 
-// Attaches a known Scryfall card to one parsed request.
+// Attaches a known Scryfall card to one parsed request... hopefully.
 function resolveItemWithCard(item, card) {
   return {
     ...item,
@@ -1065,7 +1065,7 @@ async function resolveExactBatch(batch, batchNumber, setMessage) {
   return resolved;
 }
 
-// Chooses the output section: high rarity, low rarity, or rarity-shifted chaos.
+// Chooses the output section: high rarity/low rarity (or rarity-shifted chaos because WotC)
 function rarityBucket(item) {
   const eligiblePrintRarities = item.nonSecretRarities?.length
     ? item.nonSecretRarities
@@ -1085,17 +1085,17 @@ function rarityBucket(item) {
   return "low";
 }
 
-// Picks the official card name when we have it, otherwise makes the input presentable.
+// Picks the official card name when we have it, otherwise makes the input not look like bootysauce
 function displayName(item) {
   return item.card?.name || titleCaseFallback(item.inputName);
 }
 
-// Adds the requested reskin name in parentheses after the real card name.
+// Adds the requested reskin name in parentheses after the real card name. So far this is working fine, but I do have concerns with it & scryfall's output
 function alternateTitleNote(item) {
   return item.alternateTitle ? ` (${item.alternateTitle})` : "";
 }
 
-// Adds token stats/keywords after the token name.
+// Adds token stats/keywords after the token name. POTENTIALLY REFACTORABLE OR COMBINABLE WITH OTHER FUNCTIONS
 function tokenDetailsNote(item) {
   return item.tokenDetails?.length ? ` (${item.tokenDetails.join(", ")})` : "";
 }
@@ -1118,7 +1118,7 @@ function formatCardLine(item, useCheckboxes) {
   return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${tokenDetailsNote(item)}${specialNote}${caseNote}${reviewNote}`;
 }
 
-// Formats contact info; Facebook gets parentheses, phone/email do not.
+// Formats contact info -  right now Facebook gets parentheses, phone/email do not.
 function formatContactLine(contact) {
   if (!contact) return "";
   const normalized = normalizeContactValue(contact);
@@ -1169,7 +1169,7 @@ function isBoundaryNameFragment(item, expectedIndex) {
   return /^[A-Za-z.'-]+$/.test(item.inputName.trim());
 }
 
-// Rescues customer names from the edges of the card list when no contact header was obvious.
+// Rescues customer names from the edges of the card list when no contact header was obvious (REVIST THIS - BREAKS SOMETIMES)
 function inferBoundaryCustomer(customer, items, cardLineCount) {
   if (customer.name) return { customer, items };
 
@@ -1202,7 +1202,7 @@ function inferBoundaryCustomer(customer, items, cardLineCount) {
   return { customer, items };
 }
 
-// Assembles the receipt-ready final text, including our blank header/footer breathing room.
+// Assembles the receipt-ready final text, including also now some blank header/footer breathing room.
 function formatOutput(customer, items, useCheckboxes, processedAt) {
   const found = items.filter((item) => item.status === "found");
   const needsReview = items.filter((item) => item.status !== "found");
