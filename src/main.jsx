@@ -68,16 +68,19 @@ liliana
 Yargle gluttin of urborg
 sol ring :-)`;
 
+// Picks a random Magic design/dev name so the sample list gets a tiny shuffle on reload.
 function randomSampleCustomerName() {
   return SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * SAMPLE_CUSTOMER_NAMES.length)];
 }
 
+// Makes a fake local-ish phone number; no real customers were bothered in the making of this sample.
 function randomSamplePhoneNumber() {
   const areaCode = Math.random() < 0.5 ? "206" : "564";
   const lastFour = String(Math.floor(Math.random() * 10000)).padStart(4, "0");
   return `${areaCode}-555-${lastFour}`;
 }
 
+// Builds the default paste-in sample with a fresh fake customer each page load.
 function createSampleList() {
   return `${randomSampleCustomerName()}
 ${randomSamplePhoneNumber()}
@@ -165,6 +168,7 @@ const SPECIAL_REQUEST_PATTERNS = [
   { label: "PROMO", pattern: /\bpromo\b/i },
 ];
 
+// Squishes a card/customer string into a plain comparison key so spelling weirdness has less room to party.
 function normalizeName(value) {
   return value
     .toLowerCase()
@@ -175,10 +179,12 @@ function normalizeName(value) {
     .trim();
 }
 
+// Removes spaces too, because "Lightningbolt" still knows what it did.
 function compactName(value) {
   return normalizeName(value).replace(/\s+/g, "");
 }
 
+// Gives unmatched names a readable title-case glow-up when Scryfall cannot bless us with the official name.
 function titleCaseFallback(value) {
   const smallWords = new Set(["a", "an", "and", "at", "by", "for", "in", "of", "or", "the", "to"]);
   return value
@@ -192,10 +198,12 @@ function titleCaseFallback(value) {
     .join(" ");
 }
 
+// Tiny pause helper for being polite to APIs and letting retry loops breathe.
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Keeps Scryfall requests spaced out so we do not hammer the good card oracle.
 async function waitForScryfallSlot() {
   const previousGate = scryfallRequestGate;
   let releaseGate;
@@ -212,11 +220,13 @@ async function waitForScryfallSlot() {
   releaseGate();
 }
 
+// Turns a request into a localStorage key for the four-day "we already asked this" stash.
 function cacheKeyForRequest(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
   return `${CACHE_PREFIX}${method}:${url}:${options.body || ""}`;
 }
 
+// Checks the browser cache first, because repeating homework is for villains and slow Wi-Fi.
 function readCachedResponse(url, options = {}) {
   if (typeof localStorage === "undefined") return null;
 
@@ -234,6 +244,7 @@ function readCachedResponse(url, options = {}) {
   }
 }
 
+// Saves successful Scryfall answers locally so the next run can skip some waiting.
 function writeCachedResponse(url, options = {}, result) {
   if (typeof localStorage === "undefined" || !result?.ok) return;
 
@@ -248,12 +259,14 @@ function writeCachedResponse(url, options = {}, result) {
   }
 }
 
+// Throws the emergency brake when the user hits cancel mid-Scryfall adventure.
 function throwIfAborted() {
   if (activeScryfallSignal?.aborted) {
     throw new DOMException("Processing canceled.", "AbortError");
   }
 }
 
+// Normalizes phone numbers into receipt-friendly 555-555-5555 format.
 function formatPhoneNumber(value) {
   const digits = value.replace(/\D/g, "");
   const tenDigits = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
@@ -261,6 +274,7 @@ function formatPhoneNumber(value) {
   return `${tenDigits.slice(0, 3)}-${tenDigits.slice(3, 6)}-${tenDigits.slice(6)}`;
 }
 
+// Cleans contact details without wrapping emails or phone numbers in extra nonsense.
 function normalizeContactValue(value) {
   const trimmed = value.trim();
   if (/(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(trimmed)) {
@@ -269,6 +283,7 @@ function normalizeContactValue(value) {
   return trimmed;
 }
 
+// Pulls a customer name/contact out of header-ish lines, emails, phones, and Facebook mentions.
 function extractContact(line) {
   const headerFromMatch = line.match(/\bpull\s+list\s+from\s+(.+?)(?:\s+on\s+facebook|\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|$)/i);
   if (headerFromMatch) {
@@ -307,10 +322,12 @@ function extractContact(line) {
   };
 }
 
+// Spots divider lines from pasted emails so they do not pretend to be cards.
 function isSeparatorLine(line) {
   return /^[-_=]{4,}$/.test(line.trim());
 }
 
+// Filters out friendly human chatter like "thanks!" before it can confuse the card parser.
 function isLikelyNoteLine(line) {
   const normalized = normalizeName(line);
   if (!normalized) return true;
@@ -321,6 +338,7 @@ function isLikelyNoteLine(line) {
   return /[!?]$/.test(line) && normalized.split(" ").length > 4;
 }
 
+// Checks whether a line smells like customer info instead of cardboard.
 function hasContactOrHeader(line) {
   return /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(line)
     || /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(line)
@@ -328,6 +346,7 @@ function hasContactOrHeader(line) {
     || /\bfacebook\b|\bfb\b/i.test(line);
 }
 
+// Splits the big paste into customer info and possible card lines; first pass, broad net.
 function parseCustomerAndCards(text) {
   const lines = text
     .split(/\r?\n/)
@@ -354,6 +373,7 @@ function parseCustomerAndCards(text) {
   return { customer, cardLines };
 }
 
+// Converts shorthand like R, UC, and mythic into the rarity words the sorter expects.
 function parseRarity(value) {
   const normalized = normalizeName(value);
   if (normalized === "m" || normalized === "mr" || normalized === "mythic" || normalized === "mythic rare") return "mythic";
@@ -363,6 +383,7 @@ function parseRarity(value) {
   return "";
 }
 
+// Handles rarity combos like "C / R" without making everyone sad.
 function parseRarities(value) {
   return value
     .split(/[,/]+|\band\b/i)
@@ -370,22 +391,27 @@ function parseRarities(value) {
     .filter(Boolean);
 }
 
+// Builds the regex chunk for rarity labels that may appear after card names.
 function rarityPattern() {
   return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
 }
 
+// Catches lonely quantity cells from copied spreadsheet/table paste.
 function isQuantityOnlyLine(line) {
   return /^\d+\s*x?$/i.test(line.trim());
 }
 
+// Tosses table headers like Qty, Card Name, and Rarity into the bin.
 function isTableHeaderLine(line) {
   return ["qty", "quantity", "card name", "card", "rarity"].includes(normalizeName(line));
 }
 
+// Catches rarity cells that got pasted on their own line.
 function isStandaloneRarityLine(line) {
   return Boolean(parseRarity(line));
 }
 
+// Reassembles messy copied tables back into "qty card rarity" lines.
 function normalizeCopiedTableLines(lines) {
   const normalized = [];
 
@@ -414,6 +440,7 @@ function normalizeCopiedTableLines(lines) {
   return normalized;
 }
 
+// Decides whether a trailing chunk is metadata, not part of a hyphenated card name.
 function isDescriptor(part) {
   const normalized = normalizeName(part);
   if (parseRarities(normalized).length) return true;
@@ -424,12 +451,14 @@ function isDescriptor(part) {
   return false;
 }
 
+// Collects asks like FOIL, FULL ART, BORDERLESS, and other picky-printing business.
 function extractSpecialRequests(value) {
   return SPECIAL_REQUEST_PATTERNS
     .filter(({ pattern }) => pattern.test(value))
     .map(({ label }) => label);
 }
 
+// Removes special-printing words from the lookup name while keeping them for the final note.
 function stripSpecialRequests(value) {
   return SPECIAL_REQUEST_PATTERNS.reduce(
     (current, { pattern }) => current.replace(pattern, ""),
@@ -437,6 +466,7 @@ function stripSpecialRequests(value) {
   );
 }
 
+// Tidies punctuation and pasted list leftovers before we ask Scryfall what this thing is.
 function cleanCardName(value) {
   return value
     .replace(/[•*]/g, "")
@@ -446,19 +476,23 @@ function cleanCardName(value) {
     .trim();
 }
 
+// Produces the Scryfall lookup name after special requests have been safely peeled off.
 function cleanLookupName(value) {
   return cleanCardName(stripSpecialRequests(value));
 }
 
+// Spots token requests so they can skip Scryfall and go to their own little token corner.
 function isTokenRequestName(value) {
   return /\btoken\b/i.test(value);
 }
 
+// Finds token stats like 3/3 and formats them first, as the cardboard gods intended.
 function extractPowerToughness(value) {
   const match = value.match(/\b((?:\d+|x|\*)\s*\/\s*(?:\d+|x|\*))\b/i);
   return match ? match[1].replace(/\s+/g, "").toUpperCase() : "";
 }
 
+// Pulls token details into "(3/3, Trample, Vigilance)" style notes.
 function extractTokenDetails(value) {
   const powerToughness = extractPowerToughness(value);
   const keywords = TOKEN_KEYWORD_PATTERNS
@@ -467,6 +501,7 @@ function extractTokenDetails(value) {
   return Array.from(new Set([powerToughness, ...keywords].filter(Boolean)));
 }
 
+// Finds token colors so "Green Dinosaur Token" comes out green first.
 function extractTokenColors(value) {
   const colors = TOKEN_COLOR_PATTERNS
     .filter(([, pattern]) => pattern.test(value))
@@ -474,6 +509,7 @@ function extractTokenColors(value) {
   return Array.from(new Set(colors));
 }
 
+// Removes stats, colors, and keywords from token names so the final line is not double-stuffed.
 function cleanTokenName(value) {
   let cleaned = value
     .replace(/\b(?:\d+|x|\*)\s*\/\s*(?:\d+|x|\*)\b/ig, " ");
@@ -493,6 +529,7 @@ function cleanTokenName(value) {
     .trim();
 }
 
+// Adds color words before a token name unless they are already there waving hello.
 function applyTokenColors(name, colors = []) {
   if (!colors.length) return name;
   const colorPrefix = colors.join("/");
@@ -501,14 +538,17 @@ function applyTokenColors(name, colors = []) {
     : `${colorPrefix} ${name}`;
 }
 
+// Merges special-printing asks while deduping repeats from grouped lines.
 function mergeSpecialRequests(a = [], b = []) {
   return Array.from(new Set([...a, ...b]));
 }
 
+// Checks whether an item needs a specific printing style beyond plain old nonfoil.
 function hasSpecialPrintRequest(item) {
   return (item.specialRequests || []).some((request) => request !== "NONFOIL");
 }
 
+// Tests whether a specific Scryfall printing satisfies the customer's fancy-version request.
 function printMatchesSpecialRequests(print, item) {
   const requests = item.specialRequests || [];
   if (!requests.length) return true;
@@ -528,10 +568,12 @@ function printMatchesSpecialRequests(print, item) {
   });
 }
 
+// Appends " - FOIL" and friends to the final output line.
 function specialRequestNote(item) {
   return (item.specialRequests || []).map((request) => ` - ${request}`).join("");
 }
 
+// Explains why a special-printing request got kicked to Needs Review.
 function specialRequestReviewNote(item) {
   const requests = item.specialRequests || [];
   if (!requests.length) return "";
@@ -539,6 +581,7 @@ function specialRequestReviewNote(item) {
   return `${requests.join(" / ")} version not found`;
 }
 
+// Finds reskin/Universe Within style names so requested titles stay visible in parentheses.
 function requestedFlavorName(item, prints = []) {
   const candidates = [item.card, ...prints].filter(Boolean);
   const inputNormalized = normalizeName(item.inputName);
@@ -555,6 +598,7 @@ function requestedFlavorName(item, prints = []) {
   return match || "";
 }
 
+// Reads parenthetical rarities/print asks, then removes only the useful metadata bits.
 function stripReviewParentheticals(line, statedRarities, specialRequests) {
   return line.replace(/\(([^)]*)\)/g, (match, content) => {
     const rarities = parseRarities(content);
@@ -567,6 +611,7 @@ function stripReviewParentheticals(line, statedRarities, specialRequests) {
   });
 }
 
+// Peels off trailing descriptors like "- rare" without chopping real names like Retro-Mutation.
 function stripTrailingDescriptors(line, statedRarities) {
   let remaining = line.trim();
 
@@ -591,6 +636,7 @@ function stripTrailingDescriptors(line, statedRarities) {
   return remaining;
 }
 
+// Converts one raw pasted line into a structured card/token/basic-land request.
 function parseCardLine(rawLine, index) {
   let line = rawLine.trim().replace(/^[-•]\s*/, "");
   if (!line || /^(\/\/|#)/.test(line)) return null;
@@ -653,6 +699,7 @@ function parseCardLine(rawLine, index) {
   };
 }
 
+// Parses the whole input, groups duplicates, and counts what we need to resolve.
 function parsePullList(text) {
   const { customer, cardLines } = parseCustomerAndCards(text);
   const normalizedCardLines = normalizeCopiedTableLines(cardLines);
@@ -681,6 +728,7 @@ function parsePullList(text) {
   return { customer, cards: Array.from(grouped.values()), cardLineCount: normalizedCardLines.length };
 }
 
+// Slices arrays into small batches for parallel-but-polite Scryfall work.
 function chunk(items, size) {
   const chunks = [];
   for (let index = 0; index < items.length; index += size) {
@@ -689,6 +737,7 @@ function chunk(items, size) {
   return chunks;
 }
 
+// Fetches JSON with cache, retries, throttling, and a little patience when Scryfall has a mood.
 async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
   throwIfAborted();
   const cached = readCachedResponse(url, options);
@@ -732,6 +781,7 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
   return { ok: false, status: lastStatus, data: null, error: lastError };
 }
 
+// Sends up to 50 exact card-name lookups to Scryfall in one neat bundle.
 async function fetchCollection(items) {
   return fetchJsonWithRetry(SCRYFALL_COLLECTION_URL, {
     method: "POST",
@@ -745,11 +795,13 @@ async function fetchCollection(items) {
   });
 }
 
+// Convenience wrapper for a named-card lookup when we only care about the card.
 async function fetchNamedCard(name, mode = "fuzzy") {
   const result = await fetchNamedCardResult(name, mode);
   return result.ok ? result.data : null;
 }
 
+// Asks Scryfall for one card by exact or fuzzy name and keeps the status details.
 async function fetchNamedCardResult(name, mode = "fuzzy") {
   const params = new URLSearchParams({ [mode]: name });
   return fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
@@ -757,6 +809,7 @@ async function fetchNamedCardResult(name, mode = "fuzzy") {
   });
 }
 
+// Checks short one-word inputs like "Liliana" so vague names do not sneak into the sorted list.
 async function hasAmbiguousPlayableName(inputName) {
   const normalized = normalizeName(inputName);
   const words = normalized.split(" ").filter(Boolean);
@@ -774,12 +827,14 @@ async function hasAmbiguousPlayableName(inputName) {
   return Number(result.data?.total_cards || 0) > 1;
 }
 
+// Decides whether Scryfall's fuzzy answer is helpful or a little too confident.
 async function isAmbiguousFuzzyMatch(inputName, card) {
   if (!card) return false;
   if (compactName(inputName) === compactName(card.name)) return false;
   return hasAmbiguousPlayableName(inputName);
 }
 
+// Filters out digital-only, tokens, emblems, and other not-for-the-drawer objects.
 function isPlayablePaperCard(card) {
   if (!card || card.digital) return false;
   if (!card.games?.includes("paper")) return false;
@@ -788,16 +843,19 @@ function isPlayablePaperCard(card) {
   return true;
 }
 
+// Keeps Secret Lair weirdness from incorrectly changing rarity buckets.
 function isSecretLairPrint(print) {
   return /^sl[dupc]?$/i.test(print?.set || "")
     || /\bsecret\s+lair\b/i.test(print?.set_name || "");
 }
 
+// Keeps old player-reward promos from pretending they are normal rare printings.
 function isPlayerRewardPrint(print) {
   return /\bplayer\s+rewards?\b/i.test(print?.set_name || "")
     || /^mpr$/i.test(print?.set || "");
 }
 
+// Decides which printings count for the real rarity-shift sorting rules.
 function isEligibleRarityPrint(print) {
   if (!print || print.digital) return false;
   if (isSecretLairPrint(print) || isPlayerRewardPrint(print)) return false;
@@ -805,10 +863,12 @@ function isEligibleRarityPrint(print) {
   return print.set_type === "commander";
 }
 
+// Turns Scryfall's USD price string into a number for case-check math.
 function priceValue(print) {
   return Number(print?.prices?.usd || 0);
 }
 
+// Filters printings down to the ones that can reasonably trigger a display-case check.
 function isCasePricePrint(print) {
   if (!print || print.digital) return false;
   if (isSecretLairPrint(print) || isPlayerRewardPrint(print)) return false;
@@ -816,10 +876,12 @@ function isCasePricePrint(print) {
   return Boolean(print.prices?.usd);
 }
 
+// Tiny land detector for the "$10 land might be in the case" rule.
 function isLandCard(cardOrPrint) {
   return /\bLand\b/i.test(cardOrPrint?.type_line || "");
 }
 
+// Gets the five most recent case-relevant sets so the rules stay current over time.
 async function fetchRecentCaseSets() {
   const result = await fetchJsonWithRetry(SCRYFALL_SETS_URL, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
@@ -839,6 +901,7 @@ async function fetchRecentCaseSets() {
     .map((set, index) => ({ code: set.code, index, name: set.name }));
 }
 
+// Figures out whether a card gets CHECK CASE or the gentler CASE? nudge.
 function caseNoteForItem(item, recentSets) {
   const prints = item.prints || [];
   if (!prints.length) return "";
@@ -870,10 +933,12 @@ function caseNoteForItem(item, recentSets) {
   return "";
 }
 
+// Confirms a card has at least one real playable paper printing somewhere.
 function hasPlayablePaperPrint(prints) {
   return (prints || []).some((print) => isPlayablePaperCard(print));
 }
 
+// Walks a card's print history to learn real rarities, special versions, and case-check facts.
 async function fetchPrintFacts(card) {
   if (!card?.prints_search_uri) {
     return {
@@ -925,6 +990,7 @@ async function fetchPrintFacts(card) {
   };
 }
 
+// Matches Scryfall collection results back onto the original parsed items.
 function mergeResolvedCards(batch, result) {
   const byName = new Map();
   (result.data || []).forEach((card) => {
@@ -950,6 +1016,7 @@ function mergeResolvedCards(batch, result) {
   });
 }
 
+// Attaches a known Scryfall card to one parsed request.
 function resolveItemWithCard(item, card) {
   return {
     ...item,
@@ -960,6 +1027,7 @@ function resolveItemWithCard(item, card) {
   };
 }
 
+// Tries exact batch lookup first, then exact one-by-one when the batch trips over itself.
 async function resolveExactBatch(batch, batchNumber, setMessage) {
   let lastResult = null;
 
@@ -997,6 +1065,7 @@ async function resolveExactBatch(batch, batchNumber, setMessage) {
   return resolved;
 }
 
+// Chooses the output section: high rarity, low rarity, or rarity-shifted chaos.
 function rarityBucket(item) {
   const eligiblePrintRarities = item.nonSecretRarities?.length
     ? item.nonSecretRarities
@@ -1016,26 +1085,32 @@ function rarityBucket(item) {
   return "low";
 }
 
+// Picks the official card name when we have it, otherwise makes the input presentable.
 function displayName(item) {
   return item.card?.name || titleCaseFallback(item.inputName);
 }
 
+// Adds the requested reskin name in parentheses after the real card name.
 function alternateTitleNote(item) {
   return item.alternateTitle ? ` (${item.alternateTitle})` : "";
 }
 
+// Adds token stats/keywords after the token name.
 function tokenDetailsNote(item) {
   return item.tokenDetails?.length ? ` (${item.tokenDetails.join(", ")})` : "";
 }
 
+// Alphabetizes cards in a nice case-insensitive way.
 function sortByName(a, b) {
   return displayName(a).localeCompare(displayName(b), undefined, { sensitivity: "base" });
 }
 
+// Sorts basics in WUBRG order instead of alphabet soup.
 function sortBasicLands(a, b) {
   return BASIC_LAND_ORDER.indexOf(displayName(a)) - BASIC_LAND_ORDER.indexOf(displayName(b));
 }
 
+// Builds one printable output line with quantity, notes, case tags, and optional checkbox.
 function formatCardLine(item, useCheckboxes) {
   const specialNote = specialRequestNote(item);
   const caseNote = item.caseNote ? ` - ${item.caseNote}` : "";
@@ -1043,6 +1118,7 @@ function formatCardLine(item, useCheckboxes) {
   return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${tokenDetailsNote(item)}${specialNote}${caseNote}${reviewNote}`;
 }
 
+// Formats contact info; Facebook gets parentheses, phone/email do not.
 function formatContactLine(contact) {
   if (!contact) return "";
   const normalized = normalizeContactValue(contact);
@@ -1050,6 +1126,7 @@ function formatContactLine(contact) {
   return normalized;
 }
 
+// Capitalizes customer names while respecting hyphens and apostrophes.
 function formatCustomerName(name) {
   return name
     .trim()
@@ -1060,6 +1137,7 @@ function formatCustomerName(name) {
     .join(" ");
 }
 
+// Makes the printed timestamp readable for the receipt/printer workflow.
 function formatTimestamp(value) {
   const date = value ? new Date(value) : new Date();
   return new Intl.DateTimeFormat(undefined, {
@@ -1071,6 +1149,7 @@ function formatTimestamp(value) {
   }).format(date);
 }
 
+// Spots a likely customer name accidentally parsed as the first/last card line.
 function isBoundaryNameCandidate(item, cardLineCount) {
   if (!item || item.status === "found") return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
@@ -1082,6 +1161,7 @@ function isBoundaryNameCandidate(item, cardLineCount) {
   return words.every((word) => /^[A-Za-z.'-]+$/.test(word));
 }
 
+// Helps combine two loose name fragments like first-name / last-name lines.
 function isBoundaryNameFragment(item, expectedIndex) {
   if (!item || item.status === "found" || item.index !== expectedIndex) return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
@@ -1089,6 +1169,7 @@ function isBoundaryNameFragment(item, expectedIndex) {
   return /^[A-Za-z.'-]+$/.test(item.inputName.trim());
 }
 
+// Rescues customer names from the edges of the card list when no contact header was obvious.
 function inferBoundaryCustomer(customer, items, cardLineCount) {
   if (customer.name) return { customer, items };
 
@@ -1121,6 +1202,7 @@ function inferBoundaryCustomer(customer, items, cardLineCount) {
   return { customer, items };
 }
 
+// Assembles the receipt-ready final text, including our blank header/footer breathing room.
 function formatOutput(customer, items, useCheckboxes, processedAt) {
   const found = items.filter((item) => item.status === "found");
   const needsReview = items.filter((item) => item.status !== "found");
@@ -1130,7 +1212,7 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
   const high = nonBasics.filter((item) => rarityBucket(item) === "high").sort(sortByName);
   const both = nonBasics.filter((item) => rarityBucket(item) === "both").sort(sortByName);
   const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
-  const lines = [];
+  const lines = ["", "", "", ""];
 
   if (customer.name) {
     lines.push(formatCustomerName(customer.name));
@@ -1184,14 +1266,24 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
     needsReview.sort(sortByName).forEach((item) => lines.push(formatCardLine(item, useCheckboxes)));
   }
 
+  lines.push("", "", "", "", "", "");
   return lines.join("\n");
 }
 
-function safeFileName(customer) {
-  const base = customer.name || "pull-list";
-  return `${base.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "pull-list"}.txt`;
+// Makes a friendly .txt filename from the customer's name and the day it was processed.
+function safeFileName(customer, processedAtValue) {
+  const base = customer.name ? formatCustomerName(customer.name) : "pull-list";
+  const date = processedAtValue ? new Date(processedAtValue) : new Date();
+  const datePart = [
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getFullYear()).slice(-2),
+  ].join("-");
+  const namePart = base.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "") || "pull-list";
+  return `${namePart}-${datePart}.txt`;
 }
 
+// Adds print-history facts to one found card; tokens and basics get the express lane.
 async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
   if (item.status !== "found") return item;
 
@@ -1243,6 +1335,7 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
   };
 }
 
+// For further rounds of inquiry in case Scryfall is being a pain about print history.
 async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage) {
   const retriedItems = [...items];
   const failedIndexes = retriedItems
@@ -1263,6 +1356,7 @@ async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delay
   return retriedItems;
 }
 
+// Resolves parsed names through exact batches, one-off exact retries, then fuzzy cleanup.
 async function resolveCardNames(items, setMessage, carefulMode) {
   const firstPass = items.filter((item) => item.status === "found" || item.status === "review");
   const lookupItems = items.filter((item) => item.status !== "found" && item.status !== "review");
@@ -1309,6 +1403,7 @@ async function resolveCardNames(items, setMessage, carefulMode) {
   return fuzzyResolved;
 }
 
+// Walks print histories in small parallel groups, then runs slower retry passes for failures.
 async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode) {
   let withRarities = [];
   const concurrency = carefulMode ? 1 : PRINT_FACT_CONCURRENCY;
@@ -1346,6 +1441,7 @@ async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage
   return withRarities;
 }
 
+// Reusable little icon button so the toolbar does not turn into copy-paste soup.
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }) {
   return (
     <button className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
@@ -1354,6 +1450,7 @@ function IconButton({ children, onClick, title, disabled = false, variant = "sec
   );
 }
 
+// Main app brain: state, actions, and the actual UI all live here for now.
 function App() {
   const [input, setInput] = useState(() => createSampleList());
   const [resolvedItems, setResolvedItems] = useState([]);
@@ -1377,6 +1474,7 @@ function App() {
   const needsReview = resolvedItems.filter((item) => item.status !== "found").length;
   const printFallbacks = resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length;
 
+  // Reports whether retry/fallback magic happened, because silent weirdness is the worst weirdness.
   function reliabilityMessage(items) {
     const retryCount = items.filter((item) => item.printHistoryRetried).length;
     const fallbackCount = items.filter((item) => item.status === "found" && item.printLookupFailed).length;
@@ -1385,6 +1483,7 @@ function App() {
     return "";
   }
 
+  // Runs the full formatter pipeline from raw paste to sorted, printable output.
   async function processList() {
     if (!parsed.cards.length) {
       setMessage("No card lines found yet.");
@@ -1425,6 +1524,7 @@ function App() {
     }
   }
 
+  // Gives Needs Review items another pass without making the user reprocess the whole list.
   async function retryNeedsReview() {
     const reviewEntries = resolvedItems
       .map((item, index) => ({ item, index }))
@@ -1471,28 +1571,32 @@ function App() {
     }
   }
 
+  // Cancels the current Scryfall run when the user wants off the ride.
   function abortProcessing() {
     abortControllerRef.current?.abort();
     setMessage("Canceling current Scryfall work...");
   }
 
+  // Copies the formatted text to the clipboard for quick paste-and-go store work.
   async function copyOutput() {
     if (!output) return;
     await navigator.clipboard.writeText(output);
     setMessage("Output copied.");
   }
 
+  // Downloads the formatted output as a plain text file.
   function downloadOutput() {
     if (!output) return;
     const blob = new Blob([output], { type: "text/plain;charset=utf-8" });
     const link = document.createElement("a");
     link.href = URL.createObjectURL(blob);
-    link.download = safeFileName(outputCustomer);
+    link.download = safeFileName(outputCustomer, processedAt);
     link.click();
     URL.revokeObjectURL(link.href);
     setMessage("Text file downloaded.");
   }
 
+  // Opens a simple print window with monospace text for receipt-printer friendliness.
   function printOutput() {
     if (!output) return;
 
@@ -1506,7 +1610,7 @@ function App() {
       <!doctype html>
       <html>
         <head>
-          <title>${safeFileName(outputCustomer)}</title>
+          <title>${safeFileName(outputCustomer, processedAt)}</title>
           <style>
             body { font-family: Consolas, monospace; font-size: 11pt; line-height: 1.35; white-space: pre-wrap; }
           </style>
@@ -1527,6 +1631,7 @@ function App() {
     }, 100);
   }
 
+  // Resets processed results whenever the paste changes, so stale output does not cosplay as current.
   function handleInputChange(value) {
     setInput(value);
     setResolvedItems([]);
@@ -1546,7 +1651,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.2.3</span>
+              <span>v0.2.4</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -1635,9 +1740,6 @@ function App() {
               <IconButton onClick={printOutput} title="Print output" disabled={!output}>
                 <Printer size={18} />
               </IconButton>
-              <IconButton onClick={retryNeedsReview} title="Retry Needs Review items" disabled={!needsReview || isProcessing}>
-                <RefreshCw size={18} />
-              </IconButton>
             </div>
           </div>
 
@@ -1661,6 +1763,9 @@ function App() {
           <div className="status-counts">
             <span><Clipboard size={17} /> {parsed.cards.length} parsed</span>
             <span><Check size={17} /> {resolvedItems.length - needsReview} resolved</span>
+            <IconButton onClick={retryNeedsReview} title="Retry Needs Review items" disabled={!needsReview || isProcessing}>
+              <RefreshCw size={18} />
+            </IconButton>
             {printFallbacks > 0 && <span>{printFallbacks} fallback</span>}
           </div>
         </footer>
