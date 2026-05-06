@@ -1,4 +1,5 @@
-import React, { useMemo, useRef, useState } from "react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Check,
@@ -29,8 +30,43 @@ const CACHE_PREFIX = "rrg-scryfall-cache:";
 const STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
 let scryfallRequestGate = Promise.resolve();
 let lastScryfallRequestAt = 0;
-let activeScryfallSignal = null;
+let activeScryfallSignal: AbortSignal | null = null;
 let activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+
+type Customer = {
+  name: string;
+  contact: string;
+};
+
+type ScryfallSetSummary = {
+  code: string;
+  index: number;
+  name: string;
+};
+
+type PullItem = Record<string, any> & {
+  index: number;
+  original: string;
+  originals?: string[];
+  quantity: number;
+  inputName: string;
+  statedRarities: string[];
+  specialRequests: string[];
+  lookupKey: string;
+  note?: string;
+  presetStatus?: string;
+  status?: string;
+};
+
+type FetchResult = {
+  ok: boolean;
+  status: number;
+  data: any;
+  cached?: boolean;
+  error?: unknown;
+};
+
+type LabeledPattern = readonly [string, RegExp];
 
 const SAMPLE_CUSTOMER_NAMES = [
   "Mark Rosewater",
@@ -119,7 +155,7 @@ const BASIC_LANDS_BY_COLOR = {
 const BASIC_LAND_NAMES = new Set(Object.values(BASIC_LANDS_BY_COLOR));
 const BASIC_LAND_ORDER = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
 const CASE_RELEVANT_SET_TYPES = new Set(["core", "commander", "draft_innovation", "expansion", "masters"]);
-const TOKEN_KEYWORD_PATTERNS = [
+const TOKEN_KEYWORD_PATTERNS: LabeledPattern[] = [
   ["Double Strike", /\bdouble\s+strike\b/i],
   ["First Strike", /\bfirst\s+strike\b/i],
   ["Deathtouch", /\bdeathtouch\b/i],
@@ -147,7 +183,7 @@ const TOKEN_KEYWORD_PATTERNS = [
   ["Forestwalk", /\bforestwalk\b/i],
   ["Plainswalk", /\bplainswalk\b/i],
 ];
-const TOKEN_COLOR_PATTERNS = [
+const TOKEN_COLOR_PATTERNS: LabeledPattern[] = [
   ["White", /\bwhite\b/i],
   ["Blue", /\bblue\b/i],
   ["Black", /\bblack\b/i],
@@ -221,13 +257,13 @@ async function waitForScryfallSlot() {
 }
 
 // Turns a request into a localStorage key for the four-day "we already asked this" stash.
-function cacheKeyForRequest(url, options = {}) {
+function cacheKeyForRequest(url: string, options: RequestInit = {}) {
   const method = (options.method || "GET").toUpperCase();
-  return `${CACHE_PREFIX}${method}:${url}:${options.body || ""}`;
+  return `${CACHE_PREFIX}${method}:${url}:${String(options.body || "")}`;
 }
 
 // Checks the browser cache first, because repeating homework is for villains and slow Wi-Fi.
-function readCachedResponse(url, options = {}) {
+function readCachedResponse(url: string, options: RequestInit = {}): FetchResult | null {
   if (typeof localStorage === "undefined") return null;
 
   try {
@@ -245,7 +281,7 @@ function readCachedResponse(url, options = {}) {
 }
 
 // Saves successful Scryfall answers locally so the next run can skip some waiting.
-function writeCachedResponse(url, options = {}, result) {
+function writeCachedResponse(url: string, options: RequestInit = {}, result: FetchResult) {
   if (typeof localStorage === "undefined" || !result?.ok) return;
 
   try {
@@ -637,7 +673,7 @@ function stripTrailingDescriptors(line, statedRarities) {
 }
 
 // Converts one raw pasted line into a structured card/token/basic-land request.
-function parseCardLine(rawLine, index) {
+function parseCardLine(rawLine: string, index: number): PullItem | null {
   let line = rawLine.trim().replace(/^[-•]\s*/, "");
   if (!line || /^(\/\/|#)/.test(line)) return null;
 
@@ -700,10 +736,10 @@ function parseCardLine(rawLine, index) {
 }
 
 // Parses the whole input, groups duplicates, and counts what we need to resolve.
-function parsePullList(text) {
+function parsePullList(text: string) {
   const { customer, cardLines } = parseCustomerAndCards(text);
   const normalizedCardLines = normalizeCopiedTableLines(cardLines);
-  const grouped = new Map();
+  const grouped = new Map<string, PullItem>();
 
   normalizedCardLines.forEach((line, index) => {
     const item = parseCardLine(line, index);
@@ -729,8 +765,8 @@ function parsePullList(text) {
 }
 
 // Slices arrays into small batches for parallel-but-polite Scryfall work, so scryfall doesn't give me a spank.
-function chunk(items, size) {
-  const chunks = [];
+function chunk<T>(items: T[], size: number): T[][] {
+  const chunks: T[][] = [];
   for (let index = 0; index < items.length; index += size) {
     chunks.push(items.slice(index, index + size));
   }
@@ -738,7 +774,7 @@ function chunk(items, size) {
 }
 
 // Fetches JSON with cache, retries, throttling, and a little patience when Scryfall has a mood.
-async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
+async function fetchJsonWithRetry(url: string, options: RequestInit = {}, attempts = 4): Promise<FetchResult> {
   throwIfAborted();
   const cached = readCachedResponse(url, options);
   if (cached) return cached;
@@ -896,13 +932,13 @@ async function fetchRecentCaseSets() {
     .filter((set) => !set.digital)
     .filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type))
     .filter((set) => set.released_at && new Date(`${set.released_at}T00:00:00`) <= today)
-    .sort((a, b) => new Date(b.released_at) - new Date(a.released_at))
+    .sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime())
     .slice(0, 5)
     .map((set, index) => ({ code: set.code, index, name: set.name }));
 }
 
 // Figures out whether a card gets CHECK CASE  (or the gentler CASE? nudge.)
-function caseNoteForItem(item, recentSets) {
+function caseNoteForItem(item: PullItem, recentSets: ScryfallSetSummary[]) {
   const prints = item.prints || [];
   if (!prints.length) return "";
 
@@ -1442,7 +1478,13 @@ async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage
 }
 
 // Reusable little icon button so the toolbar does not turn into copy-paste soup.
-function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }) {
+type IconButtonProps = {
+  children: ReactNode;
+  title: string;
+  variant?: "primary" | "secondary" | "danger";
+} & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "disabled" | "onClick">;
+
+function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }: IconButtonProps) {
   return (
     <button className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
       {children}
