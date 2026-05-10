@@ -64,6 +64,17 @@ function maskedEmail(value) {
   return value.replace(/^(.{2}).*(@.*)$/, "$1***$2");
 }
 
+function errorDetails(error) {
+  return [
+    error.stack || error.message || String(error),
+    error.code ? `Code: ${error.code}` : "",
+    error.responseStatus ? `IMAP status: ${error.responseStatus}` : "",
+    error.responseText ? `IMAP response: ${error.responseText}` : "",
+    error.executedCommand ? `IMAP command: ${error.executedCommand}` : "",
+    error.serverResponseCode ? `Server response code: ${error.serverResponseCode}` : "",
+  ].filter(Boolean).join("\n");
+}
+
 async function inspectMailbox(config, processedIds, dryRun) {
   console.log(`Checking ${maskedEmail(config.imap.user)} on ${config.imap.host}:${config.imap.port}, mailbox "${config.imap.mailbox}".`);
 
@@ -186,7 +197,7 @@ async function main() {
     try {
       await runOnce(config, dryRun);
     } catch (error) {
-      console.error(error.stack || error.message || error);
+      console.error(errorDetails(error));
     }
 
     if (runOnlyOnce) break;
