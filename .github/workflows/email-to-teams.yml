@@ -1,0 +1,51 @@
+name: Email pull lists to Teams
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Print payload instead of posting to Teams"
+        required: true
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+  # Enable this after the manual workflow works with repo secrets.
+  # schedule:
+  #   - cron: "*/5 * * * *"
+
+jobs:
+  email-to-teams:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/test/email-to-teams
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tools/test/email-to-teams/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check mailbox and post matching pull lists
+        run: npm run once
+        env:
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_PORT: ${{ secrets.IMAP_PORT }}
+          IMAP_SECURE: ${{ secrets.IMAP_SECURE }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          IMAP_MAILBOX: ${{ vars.IMAP_MAILBOX || 'INBOX' }}
+          TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          SUBJECT_FILTER: ${{ vars.SUBJECT_FILTER || 'pull list' }}
+          DRY_RUN: ${{ inputs.dry_run || 'false' }}
+          MARK_PROCESSED_SEEN: "true"

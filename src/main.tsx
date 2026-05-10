@@ -27,7 +27,10 @@ const SCRYFALL_MIN_INTERVAL_MS = 120;
 const CAREFUL_SCRYFALL_MIN_INTERVAL_MS = 500;
 const CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1000;
 const CACHE_PREFIX = "rrg-scryfall-cache:";
+const BUFFER_MARKER = ".";
 const STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
+const EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+const PHONE_PATTERN = /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/;
 let scryfallRequestGate = Promise.resolve();
 let lastScryfallRequestAt = 0;
 let activeScryfallSignal: AbortSignal | null = null;
@@ -313,28 +316,54 @@ function formatPhoneNumber(value) {
 // Cleans contact details without wrapping emails or phone numbers in extra nonsense.
 function normalizeContactValue(value) {
   const trimmed = value.trim();
-  if (/(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(trimmed)) {
+  if (PHONE_PATTERN.test(trimmed)) {
     return formatPhoneNumber(trimmed);
   }
   return trimmed;
+}
+
+function contactParts(value) {
+  const parts = [];
+  const phone = value.match(PHONE_PATTERN)?.[0] || "";
+  const email = value.match(EMAIL_PATTERN)?.[0] || "";
+  const facebook = /\bfacebook\b|\bfb\b/i.test(value) ? "facebook" : "";
+
+  if (phone) parts.push(formatPhoneNumber(phone));
+  if (email) parts.push(email.trim());
+  if (facebook) parts.push(facebook);
+  if (!parts.length && value.trim()) parts.push(normalizeContactValue(value));
+
+  return parts;
+}
+
+function mergeContactValues(...values) {
+  const orderedParts = values.flatMap((value) => contactParts(value || ""));
+  return Array.from(new Set(orderedParts)).join(" / ");
+}
+
+function splitNameAndContact(value, extraContact = "") {
+  const email = value.match(EMAIL_PATTERN)?.[0] || "";
+  const phone = value.match(PHONE_PATTERN)?.[0] || "";
+  const facebook = /\bfacebook\b|\bfb\b/i.test(value) ? "facebook" : "";
+  const contact = mergeContactValues(phone, email, facebook, extraContact);
+  const name = [phone, email].reduce(
+    (current, part) => part ? current.replace(part, "") : current,
+    value,
+  ).replace(/\bfacebook\b|\bfb\b/i, "").replace(/\s+/g, " ").trim();
+
+  return { name, contact };
 }
 
 // Pulls a customer name/contact out of header-ish lines, emails, phones, and Facebook mentions.
 function extractContact(line) {
   const headerFromMatch = line.match(/\bpull\s+list\s+from\s+(.+?)(?:\s+on\s+facebook|\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|$)/i);
   if (headerFromMatch) {
-    return {
-      name: headerFromMatch[1].trim(),
-      contact: /\bfacebook\b/i.test(line) ? "facebook" : "",
-    };
+    return splitNameAndContact(headerFromMatch[1], /\bfacebook\b|\bfb\b/i.test(line) ? "facebook" : "");
   }
 
   const headerForMatch = line.match(/\bpull\s+list\s+for\s+(.+)$/i);
   if (headerForMatch) {
-    return {
-      name: headerForMatch[1].trim(),
-      contact: "",
-    };
+    return splitNameAndContact(headerForMatch[1]);
   }
 
   const bracketMatch = line.match(/^([^<]+)<([^>]+)>$/);
@@ -345,17 +374,9 @@ function extractContact(line) {
     };
   }
 
-  const email = line.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
-  const phone = line.match(/(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/)?.[0] || "";
-  const facebook = /\bfacebook\b|\bfb\b/i.test(line) ? "facebook" : "";
-  const contact = email || phone || facebook;
-
-  if (!contact) return { name: line.trim(), contact: "" };
-
-  return {
-    name: line.replace(contact, "").replace(/\s+/g, " ").trim(),
-    contact: normalizeContactValue(contact),
-  };
+  const parsed = splitNameAndContact(line);
+  if (!parsed.contact) return { name: line.trim(), contact: "" };
+  return parsed;
 }
 
 // Spots divider lines from pasted emails so they do not pretend to be cards.
@@ -376,8 +397,8 @@ function isLikelyNoteLine(line) {
 
 // Checks whether a line smells like customer info instead of expensive cardboard.
 function hasContactOrHeader(line) {
-  return /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i.test(line)
-    || /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/.test(line)
+  return EMAIL_PATTERN.test(line)
+    || PHONE_PATTERN.test(line)
     || /\bpull\s+list\s+(from|for)\b/i.test(line)
     || /\bfacebook\b|\bfb\b/i.test(line);
 }
@@ -398,7 +419,7 @@ function parseCustomerAndCards(text) {
     if (hasContactOrHeader(line)) {
       const parsed = extractContact(line);
       customer.name = customer.name || parsed.name;
-      customer.contact = customer.contact || parsed.contact;
+      customer.contact = mergeContactValues(customer.contact, parsed.contact);
       continue;
     }
 
@@ -1157,7 +1178,7 @@ function formatCardLine(item, useCheckboxes) {
 // Formats contact info -  right now Facebook gets parentheses, phone/email do not.
 function formatContactLine(contact) {
   if (!contact) return "";
-  const normalized = normalizeContactValue(contact);
+  const normalized = mergeContactValues(contact);
   if (/^facebook$/i.test(normalized)) return "(Facebook)";
   return normalized;
 }
@@ -1248,7 +1269,7 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
   const high = nonBasics.filter((item) => rarityBucket(item) === "high").sort(sortByName);
   const both = nonBasics.filter((item) => rarityBucket(item) === "both").sort(sortByName);
   const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
-  const lines = ["", "", "", ""];
+  const lines = [BUFFER_MARKER, "", "", ""];
 
   if (customer.name) {
     lines.push(formatCustomerName(customer.name));
@@ -1302,7 +1323,7 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
     needsReview.sort(sortByName).forEach((item) => lines.push(formatCardLine(item, useCheckboxes)));
   }
 
-  lines.push("", "", "", "", "", "");
+  lines.push("", "", "", "", "", BUFFER_MARKER);
   return lines.join("\n");
 }
 
