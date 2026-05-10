@@ -39,7 +39,13 @@ function looksLikePullList(parsed, emailSummary, subjectFilter) {
   return /\b(mtg|magic|pull\s*list|red\s*raccoon|scryfall)\b/.test(searchableText);
 }
 
+function maskedEmail(value) {
+  return value.replace(/^(.{2}).*(@.*)$/, "$1***$2");
+}
+
 async function inspectMailbox(config, processedIds, dryRun) {
+  console.log(`Checking ${maskedEmail(config.imap.user)} on ${config.imap.host}:${config.imap.port}, mailbox "${config.imap.mailbox}".`);
+
   const client = new ImapFlow({
     host: config.imap.host,
     port: config.imap.port,
@@ -60,7 +66,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
   try {
     const lock = await client.getMailboxLock(config.imap.mailbox);
     try {
-      const unseen = await client.search({ seen: false });
+      const unseen = await client.search({ unseen: true });
       let processedCount = 0;
       console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s).`);
       if (!unseen.length) return processedCount;
