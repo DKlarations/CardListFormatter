@@ -19,6 +19,14 @@ function messageKey(message, parsed) {
   return parsed.messageId || `${message.uid}:${parsed.date?.toISOString() || parsed.subject || "no-subject"}`;
 }
 
+function messageSortTime(candidate) {
+  return (
+    candidate.parsed.date?.getTime()
+    || candidate.message.internalDate?.getTime()
+    || 0
+  );
+}
+
 function subjectMatches(parsed, subjectFilter) {
   if (!subjectFilter) return true;
   return (parsed.subject || "").toLowerCase().includes(subjectFilter);
@@ -84,6 +92,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
       let processedCount = 0;
       console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s) since ${since.toISOString().slice(0, 10)}.`);
       if (!unseen.length) return processedCount;
+      const candidates = [];
 
       for (const uid of unseen) {
         const message = await client.fetchOne(uid, {
@@ -115,6 +124,12 @@ async function inspectMailbox(config, processedIds, dryRun) {
           continue;
         }
 
+        candidates.push({ message, parsed, key, formatted });
+      }
+
+      candidates.sort((a, b) => messageSortTime(a) - messageSortTime(b));
+
+      for (const { message, key, formatted } of candidates) {
         const payload = makeTeamsPayload(formatted);
 
         if (dryRun) {
@@ -125,8 +140,14 @@ async function inspectMailbox(config, processedIds, dryRun) {
           console.log(`Posted "${formatted.subject}" to Teams.`);
 
           if (config.markProcessedSeen) {
-            await client.messageFlagsAdd(message.uid, ["\\Seen"], { uid: true });
-            console.log(`Marked "${formatted.subject}" as read.`);
+            const updated = await client.messageFlagsAdd(message.uid, ["\\Seen"], { uid: true });
+            const verified = await client.fetchOne(message.uid, { uid: true, flags: true }, { uid: true });
+            const isSeen = verified?.flags?.has("\\Seen") || verified?.flags?.has("\\seen");
+            console.log(
+              isSeen
+                ? `Marked "${formatted.subject}" as read.`
+                : `Tried to mark "${formatted.subject}" as read, but verification did not show \\Seen. STORE result: ${updated}`,
+            );
           }
         }
 
