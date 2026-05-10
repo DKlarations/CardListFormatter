@@ -31,12 +31,12 @@ function page(title: string, message: string, autoClose = false) {
     ? `<script>
       window.setTimeout(() => {
         window.close();
-      }, 1200);
+      }, 15000);
 
       window.setTimeout(() => {
         const fallback = document.querySelector("[data-fallback]");
         if (fallback) fallback.hidden = false;
-      }, 1800);
+      }, 15500);
     </script>`
     : "";
 
@@ -162,7 +162,7 @@ export async function GET(request: Request) {
   try {
     const result = await dispatchWorkflow();
     if (result.ok) {
-      return htmlResponse(page("Email Check Started", "Email check started. This tab will try to close automatically.", true));
+      return htmlResponse(page("Email Check Started", "Email check started. This tab will try to close automatically in 15 seconds.", true));
     }
 
     return htmlResponse(page("Email Check Failed", result.message), result.status);
