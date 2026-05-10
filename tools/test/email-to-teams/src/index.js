@@ -80,7 +80,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
     const lock = await client.getMailboxLock(config.imap.mailbox);
     try {
       const since = cutoffDate(config.maxEmailAgeDays);
-      const unseen = await client.search({ unseen: true, since });
+      const unseen = await client.search({ seen: false, since }, { uid: true });
       let processedCount = 0;
       console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s) since ${since.toISOString().slice(0, 10)}.`);
       if (!unseen.length) return processedCount;
