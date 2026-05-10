@@ -57,9 +57,13 @@ export function emailBodyText(parsed) {
 }
 
 export function makeTeamsPayload(formatted) {
-  const cardText = formatted.text.length > 12000
-    ? `${formatted.text.slice(0, 12000)}\n\n[Message truncated for Teams card size.]`
-    : formatted.text;
+  const formatterLinkText = formatted.formatterUrl
+    ? `\n\nOpen in Formatter:\n${formatted.formatterUrl}`
+    : "";
+  const fullText = `${formatted.text}${formatterLinkText}`;
+  const cardText = fullText.length > 12000
+    ? `${fullText.slice(0, 12000)}\n\n[Message truncated for Teams card size.]`
+    : fullText;
 
   return {
     type: "message",

@@ -36,6 +36,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Show workflow commit
+        run: echo "Running workflow from $GITHUB_SHA"
+
       - name: Check mailbox and post matching pull lists
         run: npm run once
         env:
