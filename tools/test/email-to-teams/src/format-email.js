@@ -35,8 +35,6 @@ export function formatEmailForTeams(parsed) {
   const receivedAt = parsed.date ? parsed.date.toLocaleString() : new Date().toLocaleString();
   const body = emailBodyText(parsed);
   const text = [
-    `Pull list email received`,
-    ``,
     `From: ${from}`,
     `Subject: ${subject}`,
     `Received: ${receivedAt}`,
@@ -76,7 +74,7 @@ export function makeTeamsPayload(formatted) {
           body: [
             {
               type: "TextBlock",
-              text: "RRG Pull List Formatter",
+              text: "New Pull List Received:",
               weight: "Bolder",
               size: "Medium",
             },
