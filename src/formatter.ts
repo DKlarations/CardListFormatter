@@ -342,8 +342,10 @@ function mergeContactValues(...values) {
 
 function cleanCustomerName(value) {
   return value
-    .replace(/^["']|["']$/g, "")
+    .replace(/[<>]/g, "")
     .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["']|["']$/g, "")
     .trim();
 }
 
