@@ -33,6 +33,12 @@ function formatMessage(parsed, config) {
   };
 }
 
+function formatDateForLog(value) {
+  if (!value) return "unknown date";
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? "unknown date" : date.toISOString();
+}
+
 function looksLikePullList(parsed, emailSummary, subjectFilter) {
   if (subjectMatches(parsed, subjectFilter)) return true;
   const searchableText = `${parsed.subject || ""}\n${emailSummary.body}`.toLowerCase();
@@ -80,7 +86,12 @@ async function inspectMailbox(config, processedIds, dryRun) {
       if (!unseen.length) return processedCount;
 
       for (const uid of unseen) {
-        const message = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
+        const message = await client.fetchOne(uid, {
+          uid: true,
+          source: true,
+          envelope: true,
+          internalDate: true,
+        }, { uid: true });
         if (!message?.source) {
           console.log(`Skipping UID ${uid}: no message source returned.`);
           continue;
@@ -89,7 +100,10 @@ async function inspectMailbox(config, processedIds, dryRun) {
         const parsed = await simpleParser(message.source);
         const key = messageKey(message, parsed);
         const formatted = formatMessage(parsed, config);
-        console.log(`Candidate UID ${message.uid}: "${formatted.subject}" from ${formatted.from}.`);
+        console.log(
+          `Candidate UID ${message.uid}: "${formatted.subject}" from ${formatted.from}. `
+          + `Parsed date: ${formatDateForLog(parsed.date)}. Internal date: ${formatDateForLog(message.internalDate)}.`,
+        );
 
         if (processedIds.has(key)) {
           console.log(`Skipping "${formatted.subject}": already processed in this run store.`);

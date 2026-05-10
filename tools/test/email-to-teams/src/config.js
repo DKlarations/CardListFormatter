@@ -31,7 +31,7 @@ export function readConfig() {
     pollIntervalSeconds: envNumber("POLL_INTERVAL_SECONDS", 60),
     processedStore: path.resolve(env("PROCESSED_STORE", "./data/processed-messages.json")),
     subjectFilter: env("SUBJECT_FILTER").trim().toLowerCase(),
-    maxEmailAgeDays: envNumber("MAX_EMAIL_AGE_DAYS", 2),
+    maxEmailAgeDays: envNumber("MAX_EMAIL_AGE_DAYS", 1),
     dryRun: envBoolean("DRY_RUN", true),
     markProcessedSeen: envBoolean("MARK_PROCESSED_SEEN", false),
     formatterBaseUrl: env("FORMATTER_BASE_URL", "https://card-list-formatter.vercel.app/"),
