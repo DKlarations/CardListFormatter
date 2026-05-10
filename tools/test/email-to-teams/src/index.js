@@ -74,6 +74,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
 
           if (config.markProcessedSeen) {
             await client.messageFlagsAdd(message.uid, ["\\Seen"], { uid: true });
+            console.log(`Marked "${formatted.subject}" as read.`);
           }
         }
 
