@@ -11,9 +11,8 @@ on:
         options:
           - "false"
           - "true"
-  # Enable this after the manual workflow works with repo secrets.
-  # schedule:
-  #   - cron: "*/5 * * * *"
+  schedule:
+    - cron: "*/15 * * * *"
 
 jobs:
   email-to-teams:
