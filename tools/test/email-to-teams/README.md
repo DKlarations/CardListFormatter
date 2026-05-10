@@ -73,11 +73,10 @@ After the manual workflow works, uncomment the `schedule` block in `.github/work
 
 - `DRY_RUN=true` prints the Teams payload instead of sending it.
 - `MARK_PROCESSED_SEEN=true` marks an email read after a successful Teams post.
-- `FORMAT_WITH_APP_FORMATTER=true` runs the email body through the same Scryfall-backed formatter used by the browser app.
 - `FORMATTER_BASE_URL=https://card-list-formatter.vercel.app/` controls the Teams button link target.
 - Processed email IDs are stored in `data/processed-messages.json`.
 - `SUBJECT_FILTER` is optional. Leave it blank to inspect all unseen/unprocessed inbox messages.
-- GitHub Actions sets `FORMAT_WITH_APP_FORMATTER=true`, so the Teams post should contain the formatted pull list rather than raw email text.
 - Teams cards include an `Open in Formatter` button with a compressed `#input=` link that preloads the email body into the browser app.
+- The Teams post keeps the original cleaned email content; the formatter link is just for opening that same text in the browser app.
 - For Gmail/Outlook, use an app password or OAuth-compatible mailbox setup. Do not put real credentials in git.
 - Teams cannot silently print from a channel message. The likely next step is posting a card with an "Open printable version" link.
