@@ -34,6 +34,7 @@ export function readConfig() {
     dryRun: envBoolean("DRY_RUN", true),
     markProcessedSeen: envBoolean("MARK_PROCESSED_SEEN", false),
     formatWithAppFormatter: envBoolean("FORMAT_WITH_APP_FORMATTER", true),
+    formatterBaseUrl: env("FORMATTER_BASE_URL", "https://card-list-formatter.vercel.app/"),
   };
 }
 

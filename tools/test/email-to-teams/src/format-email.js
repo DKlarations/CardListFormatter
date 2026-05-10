@@ -84,6 +84,15 @@ export function makeTeamsPayload(formatted) {
               wrap: true,
             },
           ],
+          actions: formatted.formatterUrl
+            ? [
+                {
+                  type: "Action.OpenUrl",
+                  title: "Open in Formatter",
+                  url: formatted.formatterUrl,
+                },
+              ]
+            : [],
         },
       },
     ],

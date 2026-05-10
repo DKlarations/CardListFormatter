@@ -27,6 +27,7 @@ import {
   resolveCardNames,
   safeFileName,
 } from "./formatter";
+import { decodeInputHash } from "./share-link";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
 
@@ -47,7 +48,10 @@ function IconButton({ children, onClick, title, disabled = false, variant = "sec
 
 // Main app brain: state, actions, and the actual UI all live here for now.
 function App() {
-  const [input, setInput] = useState(() => createSampleList());
+  const [input, setInput] = useState(() => {
+    const sharedInput = decodeInputHash(window.location.hash);
+    return sharedInput || createSampleList();
+  });
   const [resolvedItems, setResolvedItems] = useState([]);
   const [processedCustomer, setProcessedCustomer] = useState(null);
   const [processedAt, setProcessedAt] = useState(null);
@@ -55,7 +59,9 @@ function App() {
   const [caseCheck, setCaseCheck] = useState(false);
   const [carefulMode, setCarefulMode] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [message, setMessage] = useState("Paste a customer list, then process.");
+  const [message, setMessage] = useState(() => (
+    decodeInputHash(window.location.hash) ? "Input loaded from Teams link. Process when ready." : "Paste a customer list, then process."
+  ));
   const [reliabilityNote, setReliabilityNote] = useState("");
   const abortControllerRef = useRef(null);
 

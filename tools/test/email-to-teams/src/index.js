@@ -6,6 +6,7 @@ import { readConfig, validateConfig } from "./config.js";
 import { formatEmailForTeams, makeTeamsPayload } from "./format-email.js";
 import { loadProcessedStore, saveProcessedStore } from "./processed-store.js";
 import { postToTeams } from "./teams.js";
+import { formatterLinkForInput } from "./share-link.js";
 
 function hasFlag(name) {
   return process.argv.includes(name);
@@ -28,7 +29,10 @@ async function formatMessage(parsed, config) {
   const emailSummary = formatEmailForTeams(parsed);
 
   if (!config.formatWithAppFormatter) {
-    return emailSummary;
+    return {
+      ...emailSummary,
+      formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.body),
+    };
   }
 
   const result = await processPullListText(emailSummary.body, {
@@ -49,6 +53,7 @@ async function formatMessage(parsed, config) {
       "",
       result.output,
     ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n"),
+    formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.body),
   };
 }
 
