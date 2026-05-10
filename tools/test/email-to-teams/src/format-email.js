@@ -29,6 +29,18 @@ function trimQuotedReply(text) {
   return text.slice(0, Math.min(...markerIndexes)).trim();
 }
 
+function senderForFormatter(parsed) {
+  const sender = parsed.from?.value?.[0];
+  if (sender?.name && sender?.address) return `${sender.name}<${sender.address}>`;
+  if (sender?.address) return sender.address;
+  return parsed.from?.text || "";
+}
+
+function formatterInput(parsed, body) {
+  const sender = senderForFormatter(parsed);
+  return [sender, body].filter(Boolean).join("\n\n");
+}
+
 export function formatEmailForTeams(parsed) {
   const subject = parsed.subject || "(no subject)";
   const from = parsed.from?.text || "unknown sender";
@@ -40,6 +52,7 @@ export function formatEmailForTeams(parsed) {
     from,
     receivedAt,
     body,
+    formatterInput: formatterInput(parsed, body),
     text: [
       `Pull list email received`,
       ``,

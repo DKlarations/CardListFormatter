@@ -37,7 +37,7 @@ function formatMessage(parsed, config) {
 
   return {
     ...emailSummary,
-    formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.body),
+    formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.formatterInput),
   };
 }
 
