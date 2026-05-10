@@ -340,6 +340,13 @@ function mergeContactValues(...values) {
   return Array.from(new Set(orderedParts)).join(" / ");
 }
 
+function cleanCustomerName(value) {
+  return value
+    .replace(/^["']|["']$/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function splitNameAndContact(value, extraContact = "") {
   const email = value.match(EMAIL_PATTERN)?.[0] || "";
   const phone = value.match(PHONE_PATTERN)?.[0] || "";
@@ -350,11 +357,16 @@ function splitNameAndContact(value, extraContact = "") {
     value,
   ).replace(/\bfacebook\b|\bfb\b/i, "").replace(/\s+/g, " ").trim();
 
-  return { name, contact };
+  return { name: cleanCustomerName(name), contact };
 }
 
 // Pulls a customer name/contact out of header-ish lines, emails, phones, and Facebook mentions.
 function extractContact(line) {
+  const emailFromMatch = line.match(/^from:\s*(.+)$/i);
+  if (emailFromMatch) {
+    return splitNameAndContact(emailFromMatch[1]);
+  }
+
   const headerFromMatch = line.match(/\bpull\s+list\s+from\s+(.+?)(?:\s+on\s+facebook|\s+\d{1,2}[./-]\d{1,2}[./-]\d{2,4}|$)/i);
   if (headerFromMatch) {
     return splitNameAndContact(headerFromMatch[1], /\bfacebook\b|\bfb\b/i.test(line) ? "facebook" : "");
@@ -368,7 +380,7 @@ function extractContact(line) {
   const bracketMatch = line.match(/^([^<]+)<([^>]+)>$/);
   if (bracketMatch) {
     return {
-      name: bracketMatch[1].trim(),
+      name: cleanCustomerName(bracketMatch[1]),
       contact: normalizeContactValue(bracketMatch[2]),
     };
   }
@@ -402,6 +414,15 @@ function hasContactOrHeader(line) {
     || /\bfacebook\b|\bfb\b/i.test(line);
 }
 
+function isFromHeaderLine(line) {
+  return /^from:\s*/i.test(line);
+}
+
+function isIgnoredEmailMetadataLine(line) {
+  return /^pull list email received$/i.test(line)
+    || /^(subject|received):\s*/i.test(line);
+}
+
 // Splits the big paste into customer info and possible card lines; first pass, broad net.
 function parseCustomerAndCards(text) {
   const lines = text
@@ -410,10 +431,20 @@ function parseCustomerAndCards(text) {
     .filter(Boolean);
 
   const customer = { name: "", contact: "" };
+  const emailHeaderContact = { name: "", contact: "" };
   const cardLines = [];
 
   for (const line of lines) {
     if (isSeparatorLine(line) || STORE_EMAIL_PATTERN.test(line)) continue;
+
+    if (isFromHeaderLine(line)) {
+      const parsed = extractContact(line);
+      emailHeaderContact.name = emailHeaderContact.name || parsed.name;
+      emailHeaderContact.contact = mergeContactValues(emailHeaderContact.contact, parsed.contact);
+      continue;
+    }
+
+    if (isIgnoredEmailMetadataLine(line)) continue;
 
     if (hasContactOrHeader(line)) {
       const parsed = extractContact(line);
@@ -425,6 +456,9 @@ function parseCustomerAndCards(text) {
     if (isLikelyNoteLine(line)) continue;
     cardLines.push(line);
   }
+
+  customer.name = customer.name || emailHeaderContact.name;
+  customer.contact = mergeContactValues(customer.contact, emailHeaderContact.contact);
 
   return { customer, cardLines };
 }
