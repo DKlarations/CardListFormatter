@@ -24,9 +24,21 @@ function escapeHtml(value: string) {
     .replace(/"/g, "&quot;");
 }
 
-function page(title: string, message: string) {
+function page(title: string, message: string, autoClose = false) {
   const safeTitle = escapeHtml(title);
   const safeMessage = escapeHtml(message);
+  const autoCloseScript = autoClose
+    ? `<script>
+      window.setTimeout(() => {
+        window.close();
+      }, 1200);
+
+      window.setTimeout(() => {
+        const fallback = document.querySelector("[data-fallback]");
+        if (fallback) fallback.hidden = false;
+      }, 1800);
+    </script>`
+    : "";
 
   return `<!doctype html>
 <html lang="en">
@@ -41,17 +53,19 @@ function page(title: string, message: string) {
         display: grid;
         place-items: center;
         font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-        background: #f6f3ed;
-        color: #1f2933;
+        background:
+          linear-gradient(180deg, rgba(61, 129, 190, 0.08), transparent 320px),
+          #101b2a;
+        color: #f3f7fb;
       }
 
       main {
         width: min(520px, calc(100vw - 32px));
         padding: 28px;
-        border: 1px solid #d8d2c8;
+        border: 1px solid rgba(255, 255, 255, 0.13);
         border-radius: 8px;
-        background: #fffdf8;
-        box-shadow: 0 18px 48px rgb(31 41 51 / 12%);
+        background: #172638;
+        box-shadow: 0 18px 48px rgb(0 0 0 / 28%);
       }
 
       h1 {
@@ -62,6 +76,20 @@ function page(title: string, message: string) {
       p {
         margin: 0;
         line-height: 1.5;
+        color: #d6e1ed;
+      }
+
+      button {
+        margin-top: 20px;
+        min-height: 40px;
+        padding: 0 14px;
+        border: 1px solid #499bd0;
+        border-radius: 8px;
+        color: #ffffff;
+        background: #2779b8;
+        font: inherit;
+        font-weight: 800;
+        cursor: pointer;
       }
     </style>
   </head>
@@ -69,7 +97,10 @@ function page(title: string, message: string) {
     <main>
       <h1>${safeTitle}</h1>
       <p>${safeMessage}</p>
+      <p data-fallback hidden>If this tab stays open, you can close it now.</p>
+      <button type="button" onclick="window.close()">Close tab</button>
     </main>
+    ${autoCloseScript}
   </body>
 </html>`;
 }
@@ -131,7 +162,7 @@ export async function GET(request: Request) {
   try {
     const result = await dispatchWorkflow();
     if (result.ok) {
-      return htmlResponse(page("Email Check Started", result.message));
+      return htmlResponse(page("Email Check Started", "Email check started. This tab will try to close automatically.", true));
     }
 
     return htmlResponse(page("Email Check Failed", result.message), result.status);
