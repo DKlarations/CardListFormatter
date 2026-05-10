@@ -50,6 +50,7 @@ jobs:
           IMAP_MAILBOX: ${{ vars.IMAP_MAILBOX || 'INBOX' }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
           SUBJECT_FILTER: ${{ vars.SUBJECT_FILTER || 'pull list' }}
+          MAX_EMAIL_AGE_DAYS: ${{ vars.MAX_EMAIL_AGE_DAYS || '2' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           MARK_PROCESSED_SEEN: "true"
           FORMATTER_BASE_URL: "https://card-list-formatter.vercel.app/"

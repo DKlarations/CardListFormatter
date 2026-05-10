@@ -39,6 +39,13 @@ function looksLikePullList(parsed, emailSummary, subjectFilter) {
   return /\b(mtg|magic|pull\s*list|red\s*raccoon|scryfall)\b/.test(searchableText);
 }
 
+function cutoffDate(maxEmailAgeDays) {
+  const date = new Date();
+  date.setDate(date.getDate() - maxEmailAgeDays);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+
 function maskedEmail(value) {
   return value.replace(/^(.{2}).*(@.*)$/, "$1***$2");
 }
@@ -66,9 +73,10 @@ async function inspectMailbox(config, processedIds, dryRun) {
   try {
     const lock = await client.getMailboxLock(config.imap.mailbox);
     try {
-      const unseen = await client.search({ unseen: true });
+      const since = cutoffDate(config.maxEmailAgeDays);
+      const unseen = await client.search({ unseen: true, since });
       let processedCount = 0;
-      console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s).`);
+      console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s) since ${since.toISOString().slice(0, 10)}.`);
       if (!unseen.length) return processedCount;
 
       for (const uid of unseen) {
@@ -81,6 +89,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
         const parsed = await simpleParser(message.source);
         const key = messageKey(message, parsed);
         const formatted = formatMessage(parsed, config);
+        console.log(`Candidate UID ${message.uid}: "${formatted.subject}" from ${formatted.from}.`);
 
         if (processedIds.has(key)) {
           console.log(`Skipping "${formatted.subject}": already processed in this run store.`);
