@@ -48,6 +48,7 @@ IMAP_SECURE
 IMAP_USER
 IMAP_PASSWORD
 TEAMS_WEBHOOK_URL
+CHECK_EMAIL_NOW_URL
 ```
 
 Optional GitHub repository variables:
@@ -67,13 +68,41 @@ Start with `dry_run=true` if you want to inspect the payload in the action log. 
 
 The GitHub workflow uses `MARK_PROCESSED_SEEN=true`, so successfully posted emails are marked read. That is what prevents repeat posts across separate GitHub runners.
 
-After the manual workflow works, uncomment the `schedule` block in `.github/workflows/email-to-teams.yml` to poll every five minutes.
+The scheduled workflow polls every 15 minutes.
+
+## Check Email Now Button
+
+The Teams card can include a `Check Email Now` button. The button opens a Vercel endpoint that triggers this GitHub Action immediately.
+
+Add these Vercel environment variables:
+
+```text
+CHECK_EMAIL_NOW_SECRET
+GITHUB_WORKFLOW_TOKEN
+```
+
+Optional Vercel environment variables:
+
+```text
+GITHUB_WORKFLOW_REPOSITORY=DKlarations/CardListFormatter
+GITHUB_WORKFLOW_ID=email-to-teams.yml
+GITHUB_WORKFLOW_REF=main
+```
+
+Create `CHECK_EMAIL_NOW_URL` as a GitHub repository secret with this shape:
+
+```text
+https://card-list-formatter.vercel.app/api/check-email-now?secret=YOUR_CHECK_EMAIL_NOW_SECRET
+```
+
+`GITHUB_WORKFLOW_TOKEN` should be a GitHub token that can trigger Actions workflow dispatches for this repository. Keep it only in Vercel environment variables, not in GitHub Actions or Teams card URLs.
 
 ## Notes
 
 - `DRY_RUN=true` prints the Teams payload instead of sending it.
 - `MARK_PROCESSED_SEEN=true` marks an email read after a successful Teams post.
 - `FORMATTER_BASE_URL=https://card-list-formatter.vercel.app/` controls the Teams button link target.
+- `CHECK_EMAIL_NOW_URL` controls the optional Teams button for manually triggering the email check workflow.
 - Processed email IDs are stored in `data/processed-messages.json`.
 - `SUBJECT_FILTER` is optional. Leave it blank to inspect all unseen/unprocessed inbox messages.
 - Teams cards include an `Open in Formatter` button with a compressed `#input=` link that preloads the email body into the browser app.

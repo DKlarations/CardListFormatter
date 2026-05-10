@@ -35,6 +35,7 @@ export function readConfig() {
     dryRun: envBoolean("DRY_RUN", true),
     markProcessedSeen: envBoolean("MARK_PROCESSED_SEEN", false),
     formatterBaseUrl: env("FORMATTER_BASE_URL", "https://card-list-formatter.vercel.app/"),
+    checkEmailNowUrl: env("CHECK_EMAIL_NOW_URL"),
   };
 }
 

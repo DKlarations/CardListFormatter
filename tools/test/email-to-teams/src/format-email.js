@@ -29,6 +29,28 @@ function trimQuotedReply(text) {
   return text.slice(0, Math.min(...markerIndexes)).trim();
 }
 
+function cardActions(formatted) {
+  const actions = [];
+
+  if (formatted.formatterUrl) {
+    actions.push({
+      type: "Action.OpenUrl",
+      title: "Open in Formatter",
+      url: formatted.formatterUrl,
+    });
+  }
+
+  if (formatted.checkEmailNowUrl) {
+    actions.push({
+      type: "Action.OpenUrl",
+      title: "Check Email Now",
+      url: formatted.checkEmailNowUrl,
+    });
+  }
+
+  return actions;
+}
+
 export function formatEmailForTeams(parsed) {
   const subject = parsed.subject || "(no subject)";
   const from = parsed.from?.text || "unknown sender";
@@ -84,15 +106,7 @@ export function makeTeamsPayload(formatted) {
               wrap: true,
             },
           ],
-          actions: formatted.formatterUrl
-            ? [
-                {
-                  type: "Action.OpenUrl",
-                  title: "Open in Formatter",
-                  url: formatted.formatterUrl,
-                },
-              ]
-            : [],
+          actions: cardActions(formatted),
         },
       },
     ],

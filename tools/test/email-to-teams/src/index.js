@@ -38,6 +38,7 @@ function formatMessage(parsed, config) {
   return {
     ...emailSummary,
     formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.formatterInput),
+    checkEmailNowUrl: config.checkEmailNowUrl,
   };
 }
 
