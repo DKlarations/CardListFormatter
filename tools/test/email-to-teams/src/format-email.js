@@ -33,10 +33,13 @@ export function formatEmailForTeams(parsed) {
   const subject = parsed.subject || "(no subject)";
   const from = parsed.from?.text || "unknown sender";
   const receivedAt = parsed.date ? parsed.date.toLocaleString() : new Date().toLocaleString();
-  const body = trimQuotedReply(plainTextFromMessage(parsed));
+  const body = emailBodyText(parsed);
 
   return {
     subject,
+    from,
+    receivedAt,
+    body,
     text: [
       `Pull list email received`,
       ``,
@@ -47,6 +50,10 @@ export function formatEmailForTeams(parsed) {
       body || "(No readable body text found.)",
     ].join("\n"),
   };
+}
+
+export function emailBodyText(parsed) {
+  return trimQuotedReply(plainTextFromMessage(parsed));
 }
 
 export function makeTeamsPayload(formatted) {

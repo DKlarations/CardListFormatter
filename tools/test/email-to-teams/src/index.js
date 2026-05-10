@@ -1,6 +1,7 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import process from "node:process";
+import { processPullListText } from "../../../../src/formatter.ts";
 import { readConfig, validateConfig } from "./config.js";
 import { formatEmailForTeams, makeTeamsPayload } from "./format-email.js";
 import { loadProcessedStore, saveProcessedStore } from "./processed-store.js";
@@ -21,6 +22,34 @@ function messageKey(message, parsed) {
 function subjectMatches(parsed, subjectFilter) {
   if (!subjectFilter) return true;
   return (parsed.subject || "").toLowerCase().includes(subjectFilter);
+}
+
+async function formatMessage(parsed, config) {
+  const emailSummary = formatEmailForTeams(parsed);
+
+  if (!config.formatWithAppFormatter) {
+    return emailSummary;
+  }
+
+  const result = await processPullListText(emailSummary.body, {
+    useCheckboxes: true,
+    carefulMode: true,
+    setMessage: (message) => console.log(`Formatter: ${message}`),
+  });
+
+  return {
+    subject: emailSummary.subject,
+    text: [
+      "Pull list formatted from email",
+      "",
+      `From: ${emailSummary.from}`,
+      `Subject: ${emailSummary.subject}`,
+      `Received: ${emailSummary.receivedAt}`,
+      result.reliabilityNote ? `Note: ${result.reliabilityNote}` : "",
+      "",
+      result.output,
+    ].filter((line, index, lines) => line || lines[index - 1] !== "").join("\n"),
+  };
 }
 
 async function inspectMailbox(config, processedIds, dryRun) {
@@ -52,7 +81,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
           continue;
         }
 
-        const formatted = formatEmailForTeams(parsed);
+        const formatted = await formatMessage(parsed, config);
         const payload = makeTeamsPayload(formatted);
 
         if (dryRun) {

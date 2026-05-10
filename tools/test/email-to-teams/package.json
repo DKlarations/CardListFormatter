@@ -4,14 +4,15 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
-    "once": "node src/index.js --once",
-    "watch": "node src/index.js",
-    "dry-run": "node src/index.js --once --dry-run",
+    "once": "tsx src/index.js --once",
+    "watch": "tsx src/index.js",
+    "dry-run": "tsx src/index.js --once --dry-run",
     "check": "node --check src/index.js && node --check src/config.js && node --check src/format-email.js && node --check src/processed-store.js && node --check src/teams.js"
   },
   "dependencies": {
     "dotenv": "^16.4.7",
     "imapflow": "^1.0.191",
-    "mailparser": "^3.7.2"
+    "mailparser": "^3.7.2",
+    "tsx": "^4.19.2"
   }
 }

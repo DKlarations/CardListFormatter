@@ -49,3 +49,4 @@ jobs:
           SUBJECT_FILTER: ${{ vars.SUBJECT_FILTER || 'pull list' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
           MARK_PROCESSED_SEEN: "true"
+          FORMAT_WITH_APP_FORMATTER: "true"
