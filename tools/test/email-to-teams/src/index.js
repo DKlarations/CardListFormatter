@@ -33,6 +33,12 @@ function formatMessage(parsed, config) {
   };
 }
 
+function looksLikePullList(parsed, emailSummary, subjectFilter) {
+  if (subjectMatches(parsed, subjectFilter)) return true;
+  const searchableText = `${parsed.subject || ""}\n${emailSummary.body}`.toLowerCase();
+  return /\b(mtg|magic|pull\s*list|red\s*raccoon|scryfall)\b/.test(searchableText);
+}
+
 async function inspectMailbox(config, processedIds, dryRun) {
   const client = new ImapFlow({
     host: config.imap.host,
@@ -56,20 +62,30 @@ async function inspectMailbox(config, processedIds, dryRun) {
     try {
       const unseen = await client.search({ seen: false });
       let processedCount = 0;
+      console.log(`Mailbox "${config.imap.mailbox}" has ${unseen.length} unread email(s).`);
       if (!unseen.length) return processedCount;
 
       for (const uid of unseen) {
         const message = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
-        if (!message?.source) continue;
-
-        const parsed = await simpleParser(message.source);
-        const key = messageKey(message, parsed);
-
-        if (processedIds.has(key) || !subjectMatches(parsed, config.subjectFilter)) {
+        if (!message?.source) {
+          console.log(`Skipping UID ${uid}: no message source returned.`);
           continue;
         }
 
+        const parsed = await simpleParser(message.source);
+        const key = messageKey(message, parsed);
         const formatted = formatMessage(parsed, config);
+
+        if (processedIds.has(key)) {
+          console.log(`Skipping "${formatted.subject}": already processed in this run store.`);
+          continue;
+        }
+
+        if (!looksLikePullList(parsed, formatted, config.subjectFilter)) {
+          console.log(`Skipping "${formatted.subject}": does not match subject/body pull-list filters.`);
+          continue;
+        }
+
         const payload = makeTeamsPayload(formatted);
 
         if (dryRun) {
