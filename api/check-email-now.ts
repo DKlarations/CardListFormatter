@@ -99,12 +99,7 @@ async function dispatchWorkflow() {
         "user-agent": "rrg-pull-list-formatter",
         "x-github-api-version": "2022-11-28",
       },
-      body: JSON.stringify({
-        ref,
-        inputs: {
-          dry_run: "false",
-        },
-      }),
+      body: JSON.stringify({ ref }),
     },
   );
 

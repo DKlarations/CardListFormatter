@@ -64,7 +64,7 @@ Then run the workflow manually from GitHub Actions:
 Actions -> Email pull lists to Teams -> Run workflow
 ```
 
-Start with `dry_run=true` if you want to inspect the payload in the action log. Use `dry_run=false` to post to Teams.
+Running the workflow manually checks the mailbox and posts matching unread pull lists to Teams.
 
 The GitHub workflow uses `MARK_PROCESSED_SEEN=true`, so successfully posted emails are marked read. That is what prevents repeat posts across separate GitHub runners.
 
@@ -99,7 +99,7 @@ https://card-list-formatter.vercel.app/api/check-email-now?secret=YOUR_CHECK_EMA
 
 ## Notes
 
-- `DRY_RUN=true` prints the Teams payload instead of sending it.
+- The local `npm run dry-run` command still prints the Teams payload instead of sending it.
 - `MARK_PROCESSED_SEEN=true` marks an email read after a successful Teams post.
 - `FORMATTER_BASE_URL=https://card-list-formatter.vercel.app/` controls the Teams button link target.
 - `CHECK_EMAIL_NOW_URL` controls the optional Teams button for manually triggering the email check workflow.
