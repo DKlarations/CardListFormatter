@@ -39,7 +39,7 @@ jobs:
           IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
           IMAP_MAILBOX: ${{ vars.IMAP_MAILBOX || 'INBOX' }}
           TEAMS_WEBHOOK_URL: ${{ secrets.TEAMS_WEBHOOK_URL }}
-          SUBJECT_FILTER: ${{ vars.SUBJECT_FILTER || 'pull list' }}
+          SUBJECT_FILTER: ""
           MAX_EMAIL_AGE_DAYS: ${{ vars.MAX_EMAIL_AGE_DAYS || '7' }}
           DRY_RUN: "false"
           MARK_PROCESSED_SEEN: "true"

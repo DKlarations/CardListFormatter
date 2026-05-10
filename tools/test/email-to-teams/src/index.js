@@ -28,8 +28,17 @@ function messageSortTime(candidate) {
 }
 
 function subjectMatches(parsed, subjectFilter) {
-  if (!subjectFilter) return true;
+  if (!subjectFilter) return false;
   return (parsed.subject || "").toLowerCase().includes(subjectFilter);
+}
+
+function likelyCardLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 120) return false;
+  return /^\d+\s*x?\s+\S+/i.test(trimmed)
+    || /\b(?:foil|token|mythic|rare|uncommon|common)\b/i.test(trimmed)
+    || /\((?:m|r|u|c)\)\s*$/i.test(trimmed)
+    || /\b\d+\/\d+\b.*\btoken\b/i.test(trimmed);
 }
 
 function formatMessage(parsed, config) {
@@ -51,7 +60,17 @@ function formatDateForLog(value) {
 function looksLikePullList(parsed, emailSummary, subjectFilter) {
   if (subjectMatches(parsed, subjectFilter)) return true;
   const searchableText = `${parsed.subject || ""}\n${emailSummary.body}`.toLowerCase();
-  return /\b(mtg|magic|pull\s*list|red\s*raccoon|scryfall)\b/.test(searchableText);
+  if (/\b(mtg|magic|pull\s*list|red\s*raccoon|scryfall)\b/.test(searchableText)) return true;
+
+  const bodyLines = emailSummary.body
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const cardHintLines = bodyLines.filter(likelyCardLine);
+  const shortListLines = bodyLines.filter((line) => line.length <= 80 && !/[.!?]$/.test(line));
+
+  return cardHintLines.length >= 2
+    || (/\bcards?\b/.test(searchableText) && shortListLines.length >= 4);
 }
 
 function cutoffDate(maxEmailAgeDays) {

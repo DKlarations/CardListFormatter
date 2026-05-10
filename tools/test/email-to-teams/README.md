@@ -55,7 +55,6 @@ Optional GitHub repository variables:
 
 ```text
 IMAP_MAILBOX=INBOX
-SUBJECT_FILTER=pull list
 ```
 
 Then run the workflow manually from GitHub Actions:
@@ -104,7 +103,7 @@ https://card-list-formatter.vercel.app/api/check-email-now?secret=YOUR_CHECK_EMA
 - `FORMATTER_BASE_URL=https://card-list-formatter.vercel.app/` controls the Teams button link target.
 - `CHECK_EMAIL_NOW_URL` controls the optional Teams button for manually triggering the email check workflow.
 - Processed email IDs are stored in `data/processed-messages.json`.
-- `SUBJECT_FILTER` is optional. Leave it blank to inspect all unseen/unprocessed inbox messages.
+- The GitHub workflow currently leaves `SUBJECT_FILTER` blank, so it uses pull-list content heuristics without requiring specific subject text.
 - Teams cards include an `Open in Formatter` button with a compressed `#input=` link that preloads the email body into the browser app.
 - The Teams post keeps the original cleaned email content; the formatter link is just for opening that same text in the browser app.
 - For Gmail/Outlook, use an app password or OAuth-compatible mailbox setup. Do not put real credentials in git.
