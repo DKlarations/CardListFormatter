@@ -42,7 +42,11 @@ async function inspectMailbox(config, processedIds, dryRun) {
       user: config.imap.user,
       pass: config.imap.password,
     },
+    disableAutoIdle: true,
     logger: false,
+  });
+  client.on("error", (error) => {
+    console.warn(`IMAP warning: ${error.message || error}`);
   });
 
   await client.connect();
@@ -54,7 +58,10 @@ async function inspectMailbox(config, processedIds, dryRun) {
       let processedCount = 0;
       if (!unseen.length) return processedCount;
 
-      for await (const message of client.fetch(unseen, { uid: true, source: true })) {
+      for (const uid of unseen) {
+        const message = await client.fetchOne(uid, { uid: true, source: true }, { uid: true });
+        if (!message?.source) continue;
+
         const parsed = await simpleParser(message.source);
         const key = messageKey(message, parsed);
 
@@ -87,7 +94,11 @@ async function inspectMailbox(config, processedIds, dryRun) {
       lock.release();
     }
   } finally {
-    await client.logout();
+    if (!client.closed) {
+      await client.logout().catch((error) => {
+        console.warn(`IMAP logout warning: ${error.message || error}`);
+      });
+    }
   }
 }
 
