@@ -349,14 +349,19 @@ function cleanCustomerName(value) {
     .trim();
 }
 
+function stripFieldLabel(value) {
+  return value.replace(/^(?:name|customer|phone|email|e-mail|contact):\s*/i, "").trim();
+}
+
 function splitNameAndContact(value, extraContact = "") {
+  const cleanedValue = stripFieldLabel(value);
   const email = value.match(EMAIL_PATTERN)?.[0] || "";
   const phone = value.match(PHONE_PATTERN)?.[0] || "";
   const facebook = /\bfacebook\b|\bfb\b/i.test(value) ? "facebook" : "";
   const contact = mergeContactValues(phone, email, facebook, extraContact);
   const name = [phone, email].reduce(
     (current, part) => part ? current.replace(part, "") : current,
-    value,
+    cleanedValue,
   ).replace(/\bfacebook\b|\bfb\b/i, "").replace(/\s+/g, " ").trim();
 
   return { name: cleanCustomerName(name), contact };
@@ -364,6 +369,16 @@ function splitNameAndContact(value, extraContact = "") {
 
 // Pulls a customer name/contact out of header-ish lines, emails, phones, and Facebook mentions.
 function extractContact(line) {
+  const labeledNameMatch = line.match(/^(?:name|customer):\s*(.+)$/i);
+  if (labeledNameMatch) {
+    return { name: cleanCustomerName(labeledNameMatch[1]), contact: "" };
+  }
+
+  const labeledContactMatch = line.match(/^(?:phone|email|e-mail|contact):\s*(.+)$/i);
+  if (labeledContactMatch) {
+    return { name: "", contact: mergeContactValues(labeledContactMatch[1]) };
+  }
+
   const emailFromMatch = line.match(/^from:\s*(.+)$/i);
   if (emailFromMatch) {
     return splitNameAndContact(emailFromMatch[1]);
@@ -402,16 +417,19 @@ function isLikelyNoteLine(line) {
   const normalized = normalizeName(line);
   if (!normalized) return true;
   if (STORE_EMAIL_PATTERN.test(line)) return true;
+  if (/\bdeck\s*list\b/i.test(line) || /decklist$/i.test(line)) return true;
+  if (/^(prices?\s+are|i used\b|i don'?t\b|i do not\b)/i.test(line)) return true;
   if (/^(hello|hi|hey|thanks|thank you|just one of each|i will|i'm|im|these are|please|mtg pull list from|mtg pull list for)\b/i.test(line)) {
     return true;
   }
-  return /[!?]$/.test(line) && normalized.split(" ").length > 4;
+  return /[.!?]$/.test(line) && normalized.split(" ").length > 4;
 }
 
 // Checks whether a line smells like customer info instead of expensive cardboard.
 function hasContactOrHeader(line) {
   return EMAIL_PATTERN.test(line)
     || PHONE_PATTERN.test(line)
+    || /^(?:name|customer|phone|email|e-mail|contact):\s*/i.test(line)
     || /\bpull\s+list\s+(from|for)\b/i.test(line)
     || /\bfacebook\b|\bfb\b/i.test(line);
 }
@@ -481,6 +499,63 @@ function parseRarities(value) {
     .split(/[,/]+|\band\b/i)
     .map((part) => parseRarity(part.trim()))
     .filter(Boolean);
+}
+
+function parseMetadataRarities(value) {
+  const matches = value.match(/\b(?:mythic rare|mythic|rare|uncommon|common|mr|unc|uc|com)\b/ig) || [];
+  return matches.map((part) => parseRarity(part)).filter(Boolean);
+}
+
+function splitCommaFields(value) {
+  const fields = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (const character of value) {
+    if (character === "\"") {
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (character === "," && !inQuotes) {
+      fields.push(current.trim());
+      current = "";
+      continue;
+    }
+
+    current += character;
+  }
+
+  fields.push(current.trim());
+  return fields.filter(Boolean);
+}
+
+function looksLikeCsvMetadata(value) {
+  const normalized = normalizeName(value);
+  return Boolean(
+    parseMetadataRarities(value).length
+      || SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(value))
+      || /^\$?\d+(?:\.\d{1,2})?$/.test(value.trim())
+      || /^(?:[A-Z0-9]{2,5}|[WUBRG]{1,5}|colorless|doesn'?t matter|does not matter)$/i.test(value.trim())
+      || normalized === "cheapest you have",
+  );
+}
+
+function applyCommaMetadata(line, statedRarities, specialRequests) {
+  const fields = splitCommaFields(line);
+  if (fields.length < 2) return line;
+
+  const metadata = fields.slice(1);
+  const metadataScore = metadata.filter(looksLikeCsvMetadata).length;
+  const isBasicLandNote = BASIC_LAND_NAMES.has(fields[0]);
+  if (!isBasicLandNote && (fields.length < 3 || metadataScore < 2)) return line;
+
+  metadata.forEach((field) => {
+    statedRarities.push(...parseMetadataRarities(field));
+    specialRequests.push(...extractSpecialRequests(field));
+  });
+
+  return fields[0].trim();
 }
 
 // Builds the regex chunk for rarity labels that may appear after card names. Hopefully this uncompasses all the options, but stuff could break it.
@@ -565,6 +640,8 @@ function cleanCardName(value) {
     .replace(/\([^)]*\)\s*\d*$/g, "")
     .replace(/\[[^\]]+\]\s*$/g, "")
     .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["']|["']$/g, "")
     .trim();
 }
 
@@ -755,6 +832,7 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
   const specialRequests = extractSpecialRequests(line);
   const statedRarities = [];
   line = stripReviewParentheticals(line, statedRarities, specialRequests).trim();
+  line = applyCommaMetadata(line, statedRarities, specialRequests).trim();
 
   line = stripTrailingDescriptors(line, statedRarities);
 
