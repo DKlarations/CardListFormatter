@@ -35,7 +35,7 @@ function cardActions(formatted) {
   if (formatted.formatterUrl) {
     actions.push({
       type: "Action.OpenUrl",
-      title: "Open in Formatter",
+      title: formatted.formatterActionTitle || "Open Formatted List",
       url: formatted.formatterUrl,
     });
   }

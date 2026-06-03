@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Check,
@@ -11,6 +11,7 @@ import {
   Printer,
   RefreshCw,
   Search,
+  Send,
   Sparkles,
   Trash2,
 } from "lucide-react";
@@ -27,7 +28,7 @@ import {
   resolveCardNames,
   safeFileName,
 } from "./formatter";
-import { decodeInputHash } from "./share-link";
+import { decodeFormatterHash } from "./share-link";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
 
@@ -38,6 +39,11 @@ type IconButtonProps = {
   variant?: "primary" | "secondary" | "danger";
 } & Pick<ButtonHTMLAttributes<HTMLButtonElement>, "disabled" | "onClick">;
 
+const sharedFormatterState = decodeFormatterHash(window.location.hash);
+const sharedListId = new URLSearchParams(window.location.search).get("list") || "";
+const isTeamsTestPage = window.location.pathname === "/teams-test";
+const PRODUCTION_ORIGIN = "https://card-list-formatter.vercel.app";
+
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }: IconButtonProps) {
   return (
     <button className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
@@ -46,34 +52,206 @@ function IconButton({ children, onClick, title, disabled = false, variant = "sec
   );
 }
 
+function TeamsTestPage() {
+  const [text, setText] = useState("");
+  const [isSending, setIsSending] = useState(false);
+  const [message, setMessage] = useState("Paste test text, then send.");
+  const [formatterUrl, setFormatterUrl] = useState("");
+
+  async function sendTestPost() {
+    if (!text.trim()) {
+      setMessage("No test text entered.");
+      return;
+    }
+
+    setIsSending(true);
+    setFormatterUrl("");
+    setMessage("Processing and sending test post...");
+
+    try {
+      const apiOrigin = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
+        ? PRODUCTION_ORIGIN
+        : window.location.origin;
+      const response = await fetch(`${apiOrigin}/api/send-test-teams`, {
+        // Vite dev serves the page locally, but Vercel serves the API route.
+        // Use the deployed API for temporary manual testing from localhost.
+        ...(
+          apiOrigin === window.location.origin
+            ? {}
+            : { mode: "cors" as RequestMode }
+        ),
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ text }),
+      });
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        throw new Error(result.error || `Test post failed (${response.status}).`);
+      }
+
+      setFormatterUrl(result.formatterUrl || "");
+      setMessage(`Test post sent. Saved list ${result.id}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Test post failed.");
+    } finally {
+      setIsSending(false);
+    }
+  }
+
+  return (
+    <main className="app-shell">
+      <section className="formatter test-page">
+        <header className="app-header">
+          <div className="logo-slot">
+            <img src={rrgLogo} alt="Red Raccoon Games logo" />
+          </div>
+          <div>
+            <div className="title-row">
+              <h1>Teams Test Post</h1>
+              <span>v0.2.5</span>
+            </div>
+          </div>
+          <div className="logo-slot logo-slot-right" aria-hidden="true">
+            <img src={rrgLogo} alt="" />
+          </div>
+        </header>
+
+        <section className="input-section test-input-section">
+          <div className="section-heading">
+            <div>
+              <h2>Test Email Text</h2>
+              <p>This posts to Teams using the formatter email flow.</p>
+            </div>
+            <div className="actions">
+              <IconButton onClick={() => setText("")} title="Clear test text" disabled={isSending}>
+                <Trash2 size={18} />
+              </IconButton>
+              <IconButton onClick={sendTestPost} title="Send test post to Teams" disabled={isSending} variant="primary">
+                {isSending ? <Loader2 size={18} className="spin" /> : <Send size={18} />}
+                <span>Send</span>
+              </IconButton>
+            </div>
+          </div>
+
+          <textarea
+            className="input-box test-input-box"
+            value={text}
+            onChange={(event) => setText(event.target.value)}
+            spellCheck="false"
+            aria-label="Test pull list text"
+            placeholder="Paste a test pull list here."
+          />
+        </section>
+
+        <footer className="status-bar" aria-live="polite">
+          <strong>{message}</strong>
+          {formatterUrl && (
+            <a className="status-link" href={formatterUrl} target="_blank" rel="noreferrer">
+              Open saved list
+            </a>
+          )}
+        </footer>
+      </section>
+    </main>
+  );
+}
+
 // Main app brain: state, actions, and the actual UI all live here for now.
 function App() {
   const [input, setInput] = useState(() => {
-    const sharedInput = decodeInputHash(window.location.hash);
+    const sharedInput = sharedFormatterState.input;
     return sharedInput || createSampleList();
   });
   const [resolvedItems, setResolvedItems] = useState([]);
-  const [processedCustomer, setProcessedCustomer] = useState(null);
-  const [processedAt, setProcessedAt] = useState(null);
+  const [processedCustomer, setProcessedCustomer] = useState(() => (
+    sharedFormatterState.customer?.name || sharedFormatterState.customer?.contact
+      ? sharedFormatterState.customer
+      : null
+  ));
+  const [processedAt, setProcessedAt] = useState(() => sharedFormatterState.processedAt || null);
+  const [preloadedOutput, setPreloadedOutput] = useState(() => sharedFormatterState.output || "");
+  const [preloadedStats, setPreloadedStats] = useState(() => sharedFormatterState.stats || null);
   const [useCheckboxes, setUseCheckboxes] = useState(true);
   const [caseCheck, setCaseCheck] = useState(false);
   const [carefulMode, setCarefulMode] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState(() => (
-    decodeInputHash(window.location.hash) ? "Input loaded from Teams link. Process when ready." : "Paste a customer list, then process."
+    sharedFormatterState.output
+      ? "Formatted list loaded from Teams."
+      : sharedListId
+        ? "Loading saved formatted list..."
+      : sharedFormatterState.input
+        ? "Input loaded from Teams link. Process when ready."
+        : "Paste a customer list, then process."
   ));
-  const [reliabilityNote, setReliabilityNote] = useState("");
+  const [reliabilityNote, setReliabilityNote] = useState(() => sharedFormatterState.reliabilityNote || "");
   const abortControllerRef = useRef(null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
   const outputCustomer = processedCustomer || parsed.customer;
   const output = useMemo(
-    () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes, processedAt) : ""),
-    [outputCustomer, resolvedItems, useCheckboxes, processedAt],
+    () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes, processedAt) : preloadedOutput),
+    [outputCustomer, resolvedItems, useCheckboxes, processedAt, preloadedOutput],
   );
   const totalQuantity = parsed.cards.reduce((sum, item) => sum + item.quantity, 0);
-  const needsReview = resolvedItems.filter((item) => item.status !== "found").length;
-  const printFallbacks = resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length;
+  const needsReview = resolvedItems.length
+    ? resolvedItems.filter((item) => item.status !== "found").length
+    : preloadedStats?.needsReviewCount || 0;
+  const resolvedCount = resolvedItems.length
+    ? resolvedItems.length - needsReview
+    : preloadedStats?.resolvedCount || 0;
+  const printFallbacks = resolvedItems.length
+    ? resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length
+    : preloadedStats?.printFallbackCount || 0;
+
+  useEffect(() => {
+    if (!sharedListId || sharedFormatterState.output) return;
+
+    let ignore = false;
+
+    async function loadSavedFormattedList() {
+      try {
+        const response = await fetch(`/api/formatted-lists?id=${encodeURIComponent(sharedListId)}`);
+        const saved = await response.json().catch(() => ({}));
+
+        if (ignore) return;
+
+        if (!response.ok || !saved.output) {
+          setMessage(
+            sharedFormatterState.input
+              ? "Saved formatted list expired. Input loaded from Teams link; process when ready."
+              : "Saved formatted list expired.",
+          );
+          return;
+        }
+
+        if (saved.input) setInput(saved.input);
+        setProcessedCustomer(saved.customer || null);
+        setProcessedAt(saved.processedAt || null);
+        setPreloadedOutput(saved.output);
+        setPreloadedStats(saved.stats || null);
+        setReliabilityNote(saved.reliabilityNote || "");
+        setResolvedItems([]);
+        setMessage("Formatted list loaded from Teams.");
+      } catch (error) {
+        if (ignore) return;
+        setMessage(
+          sharedFormatterState.input
+            ? "Could not load saved formatted list. Input loaded from Teams link; process when ready."
+            : "Could not load saved formatted list.",
+        );
+      }
+    }
+
+    loadSavedFormattedList();
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
 
   // Runs the full formatter pipeline from raw paste to sorted, printable output.
   async function processList() {
@@ -101,6 +279,8 @@ function App() {
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
       setResolvedItems(inferred.items);
+      setPreloadedOutput("");
+      setPreloadedStats(null);
       setProcessedAt(new Date().toISOString());
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
       setReliabilityNote(reliabilityMessage(inferred.items));
@@ -225,6 +405,8 @@ function App() {
     setResolvedItems([]);
     setProcessedCustomer(null);
     setProcessedAt(null);
+    setPreloadedOutput("");
+    setPreloadedStats(null);
     setReliabilityNote("");
     setMessage("Input changed. Process again when ready.");
   }
@@ -350,7 +532,7 @@ function App() {
           {reliabilityNote && <em>{reliabilityNote}</em>}
           <div className="status-counts">
             <span><Clipboard size={17} /> {parsed.cards.length} parsed</span>
-            <span><Check size={17} /> {resolvedItems.length - needsReview} resolved</span>
+            <span><Check size={17} /> {resolvedCount} resolved</span>
             <IconButton onClick={retryNeedsReview} title="Retry Needs Review items" disabled={!needsReview || isProcessing}>
               <RefreshCw size={18} />
             </IconButton>
@@ -364,4 +546,4 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+createRoot(document.getElementById("root")).render(isTeamsTestPage ? <TeamsTestPage /> : <App />);

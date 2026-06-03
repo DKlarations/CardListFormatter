@@ -1,0 +1,8 @@
+{
+  "rewrites": [
+    {
+      "source": "/teams-test",
+      "destination": "/index.html"
+    }
+  ]
+}

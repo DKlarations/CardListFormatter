@@ -238,6 +238,28 @@ h2 {
   min-height: 290px;
 }
 
+.test-input-section {
+  grid-template-rows: auto minmax(420px, 1fr);
+}
+
+.test-input-box {
+  min-height: 420px;
+}
+
+.status-link {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 12px;
+  border: 1px solid rgba(73, 155, 208, 0.55);
+  border-radius: 8px;
+  color: #dff1ff;
+  background: #142235;
+  font-size: 0.9rem;
+  font-weight: 800;
+  text-decoration: none;
+}
+
 .output-box {
   min-height: 340px;
   color: #111820;

@@ -49,6 +49,7 @@ IMAP_USER
 IMAP_PASSWORD
 TEAMS_WEBHOOK_URL
 CHECK_EMAIL_NOW_URL
+FORMATTED_LIST_WRITE_SECRET
 ```
 
 Optional GitHub repository variables:
@@ -78,6 +79,10 @@ Add these Vercel environment variables:
 ```text
 CHECK_EMAIL_NOW_SECRET
 GITHUB_WORKFLOW_TOKEN
+FORMATTED_LIST_WRITE_SECRET
+TEAMS_WEBHOOK_URL
+UPSTASH_REDIS_REST_URL
+UPSTASH_REDIS_REST_TOKEN
 ```
 
 Optional Vercel environment variables:
@@ -102,9 +107,11 @@ https://card-list-formatter.vercel.app/api/check-email-now?secret=YOUR_CHECK_EMA
 - `MARK_PROCESSED_SEEN=true` marks an email read after a successful Teams post.
 - `FORMATTER_BASE_URL=https://card-list-formatter.vercel.app/` controls the Teams button link target.
 - `CHECK_EMAIL_NOW_URL` controls the optional Teams button for manually triggering the email check workflow.
+- `/teams-test` opens a temporary public manual Teams test page. It uses `FORMATTED_LIST_WRITE_SECRET` and `TEAMS_WEBHOOK_URL` on the server.
 - Processed email IDs are stored in `data/processed-messages.json`.
 - The GitHub workflow currently leaves `SUBJECT_FILTER` blank, so it uses pull-list content heuristics without requiring specific subject text.
-- Teams cards include an `Open in Formatter` button with a compressed `#input=` link that preloads the email body into the browser app.
-- The Teams post keeps the original cleaned email content; the formatter link is just for opening that same text in the browser app.
+- Teams cards include an `Open Formatted List` button that saves the processed result server-side, then opens a short `?list=MMDDYYYY-random` link.
+- Saved formatted lists expire after 30 days. The Teams link also includes a compressed `#input=` fallback, so expired links still open the original email text and can be processed manually.
+- The Teams post keeps the original cleaned email content; the formatter work happens before posting so the button opens the finished list without waiting while the saved result exists.
 - For Gmail/Outlook, use an app password or OAuth-compatible mailbox setup. Do not put real credentials in git.
 - Teams cannot silently print from a channel message. The likely next step is posting a card with an "Open printable version" link.

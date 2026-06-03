@@ -45,3 +45,4 @@ jobs:
           MARK_PROCESSED_SEEN: "true"
           FORMATTER_BASE_URL: "https://card-list-formatter.vercel.app/"
           CHECK_EMAIL_NOW_URL: ${{ secrets.CHECK_EMAIL_NOW_URL }}
+          FORMATTED_LIST_WRITE_SECRET: ${{ secrets.FORMATTED_LIST_WRITE_SECRET }}

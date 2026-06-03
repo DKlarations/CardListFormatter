@@ -1,11 +1,13 @@
 import { ImapFlow } from "imapflow";
 import { simpleParser } from "mailparser";
 import process from "node:process";
+import { processPullListText } from "../../../../src/formatter.ts";
 import { readConfig, validateConfig } from "./config.js";
 import { formatEmailForTeams, makeTeamsPayload } from "./format-email.js";
+import { baseListIdForDate, saveFormattedList } from "./formatted-list-store.js";
 import { loadProcessedStore, saveProcessedStore } from "./processed-store.js";
 import { postToTeams } from "./teams.js";
-import { formatterLinkForInput } from "./share-link.js";
+import { formatterLinkForFormattedOutput, formatterLinkForInput, formatterLinkForSavedList } from "./share-link.js";
 
 function hasFlag(name) {
   return process.argv.includes(name);
@@ -49,6 +51,65 @@ function formatMessage(parsed, config) {
     formatterUrl: formatterLinkForInput(config.formatterBaseUrl, emailSummary.formatterInput),
     checkEmailNowUrl: config.checkEmailNowUrl,
   };
+}
+
+function processedStats(processed) {
+  return {
+    resolvedCount: processed.items.filter((item) => item.status === "found").length,
+    needsReviewCount: processed.items.filter((item) => item.status !== "found").length,
+    printFallbackCount: processed.items.filter((item) => item.status === "found" && item.printLookupFailed).length,
+  };
+}
+
+function formattedStateForProcessed(formatted, processed) {
+  return {
+    input: formatted.formatterInput,
+    output: processed.output,
+    processedAt: processed.processedAt,
+    reliabilityNote: processed.reliabilityNote,
+    customer: processed.customer,
+    stats: processedStats(processed),
+  };
+}
+
+async function addPreloadedFormattedLink(formatted, config) {
+  try {
+    console.log(`Formatting "${formatted.subject}" before posting to Teams...`);
+    const processed = await processPullListText(formatted.formatterInput, {
+      useCheckboxes: true,
+      setMessage: (message) => console.log(`Formatter: ${message}`),
+    });
+    const formattedState = formattedStateForProcessed(formatted, processed);
+    let formatterUrl = formatterLinkForFormattedOutput(config.formatterBaseUrl, formattedState);
+
+    try {
+      const saved = await saveFormattedList(
+        config,
+        baseListIdForDate(processed.processedAt || formatted.receivedAt),
+        formattedState,
+      );
+      formatterUrl = formatterLinkForSavedList(config.formatterBaseUrl, saved.id, formatted.formatterInput);
+      console.log(`Saved formatted list as "${saved.id}" for ${Math.round(saved.expiresInSeconds / 86400)} day(s).`);
+    } catch (saveError) {
+      console.warn(`Formatted list save failed; using compressed fallback link: ${saveError.message || saveError}`);
+    }
+
+    console.log(
+      `Formatted "${formatted.subject}". Formatter link is ${formatterUrl.length.toLocaleString()} character(s).`,
+    );
+
+    return {
+      ...formatted,
+      formatterUrl,
+      formatterActionTitle: "Open Formatted List",
+    };
+  } catch (error) {
+    console.warn(`Formatter preload failed for "${formatted.subject}": ${error.message || error}`);
+    return {
+      ...formatted,
+      formatterActionTitle: "Open in Formatter",
+    };
+  }
 }
 
 function formatDateForLog(value) {
@@ -161,14 +222,15 @@ async function inspectMailbox(config, processedIds, dryRun) {
       candidates.sort((a, b) => messageSortTime(a) - messageSortTime(b));
 
       for (const { message, key, formatted } of candidates) {
-        const payload = makeTeamsPayload(formatted);
+        const preloadedFormatted = await addPreloadedFormattedLink(formatted, config);
+        const payload = makeTeamsPayload(preloadedFormatted);
 
         if (dryRun) {
           console.log("DRY RUN: would post to Teams:");
           console.log(JSON.stringify(payload, null, 2));
         } else {
           await postToTeams(config.teamsWebhookUrl, payload);
-          console.log(`Posted "${formatted.subject}" to Teams.`);
+          console.log(`Posted "${preloadedFormatted.subject}" to Teams.`);
 
           if (config.markProcessedSeen) {
             const updated = await client.messageFlagsAdd(message.uid, ["\\Seen"], { uid: true });
@@ -176,8 +238,8 @@ async function inspectMailbox(config, processedIds, dryRun) {
             const isSeen = verified?.flags?.has("\\Seen") || verified?.flags?.has("\\seen");
             console.log(
               isSeen
-                ? `Marked "${formatted.subject}" as read.`
-                : `Tried to mark "${formatted.subject}" as read, but verification did not show \\Seen. STORE result: ${updated}`,
+                ? `Marked "${preloadedFormatted.subject}" as read.`
+                : `Tried to mark "${preloadedFormatted.subject}" as read, but verification did not show \\Seen. STORE result: ${updated}`,
             );
           }
         }
