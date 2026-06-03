@@ -27,7 +27,14 @@ function env(name: string, fallback = "") {
 
 function getRedis() {
   if (!redis) {
-    redis = Redis.fromEnv();
+    const url = env("UPSTASH_REDIS_REST_URL", env("lists_REDIS_URL"));
+    const token = env("UPSTASH_REDIS_REST_TOKEN", env("lists_KV_REST_API_TOKEN"));
+
+    if (!url || !token) {
+      throw new Error("Redis environment variables are not configured.");
+    }
+
+    redis = new Redis({ url, token });
   }
   return redis;
 }

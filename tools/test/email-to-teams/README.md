@@ -85,6 +85,13 @@ UPSTASH_REDIS_REST_URL
 UPSTASH_REDIS_REST_TOKEN
 ```
 
+If Vercel created prefixed names for the Redis store, these are also supported:
+
+```text
+lists_REDIS_URL
+lists_KV_REST_API_TOKEN
+```
+
 Optional Vercel environment variables:
 
 ```text
