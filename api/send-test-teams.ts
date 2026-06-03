@@ -1,5 +1,5 @@
 import LZString from "lz-string";
-import { processPullListText } from "../src/formatter.ts";
+import { processPullListText } from "./server-formatter.mjs";
 
 const FALLBACK_HASH_PREFIX = "input=";
 
