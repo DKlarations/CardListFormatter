@@ -1,4 +1,5 @@
 import LZString from "lz-string";
+import { processPullListText } from "../src/formatter.ts";
 
 const FALLBACK_HASH_PREFIX = "input=";
 
@@ -169,7 +170,6 @@ export async function POST(request: Request) {
       rawText,
     ].join("\n");
 
-    const { processPullListText } = await import("../src/formatter.ts");
     const processed = await processPullListText(cardText, {
       useCheckboxes: true,
     });
