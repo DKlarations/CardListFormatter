@@ -169,7 +169,7 @@ export async function POST(request: Request) {
       rawText,
     ].join("\n");
 
-    const { processPullListText } = await import("../src/formatter");
+    const { processPullListText } = await import("../src/formatter.ts");
     const processed = await processPullListText(cardText, {
       useCheckboxes: true,
     });
