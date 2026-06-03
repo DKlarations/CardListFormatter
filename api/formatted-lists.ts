@@ -27,7 +27,7 @@ function env(name: string, fallback = "") {
 
 function getRedis() {
   if (!redis) {
-    const url = env("UPSTASH_REDIS_REST_URL", env("lists_REDIS_URL"));
+    const url = restUrlFromEnv(env("UPSTASH_REDIS_REST_URL", env("lists_REDIS_URL")));
     const token = env("UPSTASH_REDIS_REST_TOKEN", env("lists_KV_REST_API_TOKEN"));
 
     if (!url || !token) {
@@ -37,6 +37,17 @@ function getRedis() {
     redis = new Redis({ url, token });
   }
   return redis;
+}
+
+function restUrlFromEnv(value: string) {
+  if (!value.startsWith("rediss://")) return value;
+
+  try {
+    const parsed = new URL(value);
+    return `https://${parsed.hostname}`;
+  } catch {
+    return value;
+  }
 }
 
 function jsonResponse(body: unknown, status = 200) {
