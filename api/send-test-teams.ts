@@ -1,6 +1,4 @@
-import { randomBytes } from "node:crypto";
 import LZString from "lz-string";
-import { processPullListText } from "../src/formatter";
 
 const FALLBACK_HASH_PREFIX = "input=";
 
@@ -23,8 +21,7 @@ function jsonResponse(body: unknown, status = 200) {
 
 function randomSuffix(length = 6) {
   const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  const bytes = randomBytes(length);
-  return Array.from(bytes, (byte) => alphabet[byte % alphabet.length]).join("");
+  return Array.from({ length }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
 }
 
 function dateStamp(value = new Date()) {
@@ -172,6 +169,7 @@ export async function POST(request: Request) {
       rawText,
     ].join("\n");
 
+    const { processPullListText } = await import("../src/formatter");
     const processed = await processPullListText(cardText, {
       useCheckboxes: true,
     });
