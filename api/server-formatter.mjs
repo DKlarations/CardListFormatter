@@ -926,6 +926,7 @@ function formatCustomerName(name) {
 function formatTimestamp(value) {
   const date = value ? new Date(value) : /* @__PURE__ */ new Date();
   return new Intl.DateTimeFormat(void 0, {
+    timeZone: "America/Chicago",
     month: "numeric",
     day: "numeric",
     year: "numeric",

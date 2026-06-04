@@ -1321,6 +1321,7 @@ function formatCustomerName(name) {
 function formatTimestamp(value) {
   const date = value ? new Date(value) : new Date();
   return new Intl.DateTimeFormat(undefined, {
+    timeZone: "America/Chicago",
     month: "numeric",
     day: "numeric",
     year: "numeric",
