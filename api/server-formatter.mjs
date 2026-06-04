@@ -303,11 +303,12 @@ function isLikelyNoteLine(line) {
   if (!normalized) return true;
   if (STORE_EMAIL_PATTERN.test(line)) return true;
   if (/\bdeck\s*list\b/i.test(line) || /decklist$/i.test(line)) return true;
-  if (/^(prices?\s+are|i used\b|i don'?t\b|i do not\b)/i.test(line)) return true;
-  if (/^(hello|hi|hey|thanks|thank you|just one of each|i will|i'm|im|these are|please|mtg pull list from|mtg pull list for)\b/i.test(line)) {
+  if (/^(prices?\s+are|i used\b|i don'?t\b|i do not\b|i placed\b)/i.test(line)) return true;
+  if (/^(hello|hi|hey|thanks|thank you|just one of each|i will|i'm|im|these are|please|once again|mtg pull list from|mtg pull list for)\b/i.test(line)) {
     return true;
   }
-  return /[.!?]$/.test(line) && normalized.split(" ").length > 4;
+  if (/[.!?]/.test(line) && normalized.split(" ").length > 4) return true;
+  return false;
 }
 function hasContactOrHeader(line) {
   return EMAIL_PATTERN.test(line) || PHONE_PATTERN.test(line) || /^(?:name|customer|phone|email|e-mail|contact):\s*/i.test(line) || /\bpull\s+list\s+(from|for)\b/i.test(line) || /\bfacebook\b|\bfb\b/i.test(line);
@@ -342,7 +343,7 @@ function parseCustomerAndCards(text) {
     cardLines.push(line);
   }
   customer.name = customer.name || emailHeaderContact.name;
-  customer.contact = mergeContactValues(customer.contact, emailHeaderContact.contact);
+  customer.contact = customer.contact || emailHeaderContact.contact;
   return { customer, cardLines };
 }
 function parseRarity(value) {
@@ -556,7 +557,7 @@ function parseCardLine(rawLine, index) {
   let line = rawLine.trim().replace(/^[-•]\s*/, "");
   if (!line || /^(\/\/|#)/.test(line)) return null;
   const quantityMatch = line.match(/^(\d+)\s*x?\s+(.+)$/i);
-  const quantity = quantityMatch ? Number(quantityMatch[1]) : 1;
+  let quantity = quantityMatch ? Number(quantityMatch[1]) : 1;
   line = quantityMatch ? quantityMatch[2].trim() : line;
   const manaMatch = line.match(/^(white|blue|black|red|green)\s+mana$/i);
   if (manaMatch) {
@@ -576,6 +577,14 @@ function parseCardLine(rawLine, index) {
   const statedRarities = [];
   line = stripReviewParentheticals(line, statedRarities, specialRequests).trim();
   line = applyCommaMetadata(line, statedRarities, specialRequests).trim();
+  const trailingQuantityMatch = line.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\s*$/i);
+  if (trailingQuantityMatch) {
+    const trailingQuantity = Number(trailingQuantityMatch[1] || trailingQuantityMatch[2]);
+    if (Number.isFinite(trailingQuantity) && trailingQuantity > 0) {
+      quantity = trailingQuantity;
+      line = line.slice(0, trailingQuantityMatch.index).trim();
+    }
+  }
   line = stripTrailingDescriptors(line, statedRarities);
   const trailingRaritiesMatch = line.match(new RegExp(`\\s+(${rarityPattern()}(?:\\s*(?:/|,|and)\\s*${rarityPattern()})*)$`, "i"));
   if (trailingRaritiesMatch) {
