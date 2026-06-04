@@ -52,7 +52,27 @@ function processedStats(processed: any) {
   };
 }
 
-function makeTeamsPayload(text: string, formatterUrl: string) {
+function cardActions(formatterUrl: string, checkEmailNowUrl: string) {
+  const actions = [
+    {
+      type: "Action.OpenUrl",
+      title: "Open Formatted List",
+      url: formatterUrl,
+    },
+  ];
+
+  if (checkEmailNowUrl) {
+    actions.push({
+      type: "Action.OpenUrl",
+      title: "Check Email Now",
+      url: checkEmailNowUrl,
+    });
+  }
+
+  return actions;
+}
+
+function makeTeamsPayload(text: string, formatterUrl: string, checkEmailNowUrl: string) {
   const cardText = text.length > 12000
     ? `${text.slice(0, 12000)}\n\n[Message truncated for Teams card size.]`
     : text;
@@ -80,13 +100,7 @@ function makeTeamsPayload(text: string, formatterUrl: string) {
               wrap: true,
             },
           ],
-          actions: [
-            {
-              type: "Action.OpenUrl",
-              title: "Open Formatted List",
-              url: formatterUrl,
-            },
-          ],
+          actions: cardActions(formatterUrl, checkEmailNowUrl),
         },
       },
     ],
@@ -145,6 +159,7 @@ export async function POST(request: Request) {
   const configuredSecret = env("FORMATTED_LIST_WRITE_SECRET");
   const teamsWebhookUrl = env("TEAMS_WEBHOOK_URL");
   const formatterBaseUrl = env("FORMATTER_BASE_URL", new URL(request.url).origin);
+  const checkEmailNowUrl = env("CHECK_EMAIL_NOW_URL");
 
   if (!configuredSecret) {
     return jsonResponse({ error: "FORMATTED_LIST_WRITE_SECRET is not configured in Vercel." }, 500);
@@ -183,7 +198,7 @@ export async function POST(request: Request) {
     };
     const saved = await saveFormattedList(request, configuredSecret, formattedState);
     const formatterUrl = formattedListUrl(formatterBaseUrl, saved.id, cardText);
-    await postToTeams(teamsWebhookUrl, makeTeamsPayload(cardText, formatterUrl));
+    await postToTeams(teamsWebhookUrl, makeTeamsPayload(cardText, formatterUrl, checkEmailNowUrl));
 
     return jsonResponse({
       ok: true,
