@@ -111,7 +111,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.3.0</span>
+              <span>v0.3.1</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -436,7 +436,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.3.0</span>
+              <span>v0.3.1</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
