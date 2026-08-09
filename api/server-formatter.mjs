@@ -3,6 +3,7 @@ var SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 var SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
 var SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search";
 var SCRYFALL_SETS_URL = "https://api.scryfall.com/sets";
+var PRODUCTION_ORIGIN = "https://card-list-formatter.vercel.app";
 var BATCH_SIZE = 50;
 var PRINT_FACT_CONCURRENCY = 5;
 var SCRYFALL_MIN_INTERVAL_MS = 120;
@@ -17,6 +18,8 @@ var scryfallRequestGate = Promise.resolve();
 var lastScryfallRequestAt = 0;
 var activeScryfallSignal = null;
 var activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+var mtgjsonIndexPromise = null;
+var mtgjsonIndexUrl = "";
 var SAMPLE_CUSTOMER_NAMES = [
   "Mark Rosewater",
   "Bill Rose",
@@ -706,6 +709,127 @@ function chunk(items, size) {
   }
   return chunks;
 }
+function runtimeEnv(name) {
+  return typeof process !== "undefined" ? process.env?.[name] || "" : "";
+}
+function isServerRuntime() {
+  return typeof window === "undefined";
+}
+function defaultMtgjsonManifestUrl() {
+  if (typeof window !== "undefined") {
+    const isLocalhost = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
+    const origin = isLocalhost ? PRODUCTION_ORIGIN : window.location.origin;
+    return `${origin}/api/mtgjson-index`;
+  }
+  return new URL("/api/mtgjson-index", runtimeEnv("FORMATTER_BASE_URL") || PRODUCTION_ORIGIN).toString();
+}
+function scryfallRequestHeaders(headersInit) {
+  const headers = new Headers(headersInit || {});
+  if (isServerRuntime() && !headers.has("user-agent")) {
+    headers.set("user-agent", "rrg-pull-list-formatter/0.3.0");
+  }
+  return headers;
+}
+async function fetchJsonDirect(url) {
+  throwIfAborted();
+  const response = await fetch(url, {
+    headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
+    signal: activeScryfallSignal || void 0
+  });
+  if (!response.ok) {
+    throw new Error(`MTGJSON index request failed (${response.status}).`);
+  }
+  return response.json();
+}
+async function loadMtgjsonIndex(manifestUrl = "") {
+  const resolvedManifestUrl = manifestUrl || defaultMtgjsonManifestUrl();
+  if (mtgjsonIndexPromise && mtgjsonIndexUrl === resolvedManifestUrl) return mtgjsonIndexPromise;
+  mtgjsonIndexUrl = resolvedManifestUrl;
+  mtgjsonIndexPromise = (async () => {
+    const manifest = await fetchJsonDirect(resolvedManifestUrl);
+    const indexUrl = manifest?.indexUrl || manifest?.versionedUrl || "";
+    if (!indexUrl) throw new Error("MTGJSON index manifest did not include an index URL.");
+    return fetchJsonDirect(indexUrl);
+  })().catch((error) => {
+    mtgjsonIndexPromise = null;
+    throw error;
+  });
+  return mtgjsonIndexPromise;
+}
+function mtgjsonAliasKey(value) {
+  const normalized = normalizeName(value);
+  const compact = compactName(value);
+  return [normalized, compact].filter(Boolean);
+}
+function findMtgjsonCard(index, inputName) {
+  if (!index?.cards || !index.aliases) return null;
+  for (const key of mtgjsonAliasKey(inputName)) {
+    if (index.ambiguousAliases?.[key]?.length) return { card: null, ambiguous: true };
+    const cardKey = index.aliases[key];
+    const card = cardKey ? index.cards[cardKey] : null;
+    if (card) return { card, ambiguous: false };
+  }
+  return null;
+}
+function mtgjsonCardShape(card, item) {
+  const rarity = item.statedRarities?.[0] || "";
+  return {
+    name: card.name,
+    rarity,
+    type_line: card.type || card.types?.join(" ") || "",
+    games: ["paper"],
+    digital: false,
+    set_type: "mtgjson",
+    scryfall_oracle_id: card.scryfallOracleId || "",
+    mtgjson: card
+  };
+}
+function resolveItemWithMtgjsonCard(item, card) {
+  const rarities = item.statedRarities?.length ? item.statedRarities : [];
+  return {
+    ...item,
+    card: mtgjsonCardShape(card, item),
+    status: "found",
+    lookupSource: "mtgjson",
+    raritySource: rarities.length ? "input" : "",
+    isBasicLand: BASIC_LAND_NAMES.has(card.name),
+    correction: normalizeName(card.name) !== normalizeName(item.inputName),
+    rarities,
+    nonSecretRarities: rarities,
+    eligibleRarityChecked: Boolean(rarities.length),
+    mtgjsonCard: card,
+    skipScryfallEnrichment: Boolean(rarities.length && !hasSpecialPrintRequest(item))
+  };
+}
+async function resolveExactWithMtgjson(items, setMessage, options) {
+  if (!items.length) return { resolved: [], missing: items };
+  setMessage("Loading MTGJSON card index...");
+  const index = await loadMtgjsonIndex(options.mtgjsonManifestUrl);
+  const resolved = [];
+  const missing = [];
+  for (const item of items) {
+    const result = findMtgjsonCard(index, item.inputName);
+    if (result?.ambiguous) {
+      missing.push({ ...item, note: "Ambiguous MTGJSON exact match" });
+      continue;
+    }
+    if (!result?.card) {
+      missing.push(item);
+      continue;
+    }
+    if (!item.statedRarities?.length && options.useScryfall !== false) {
+      missing.push({
+        ...item,
+        mtgjsonCard: result.card,
+        mtgjsonExactName: result.card.name
+      });
+      continue;
+    }
+    resolved.push(resolveItemWithMtgjsonCard(item, result.card));
+  }
+  setMessage(`MTGJSON matched ${resolved.length} card${resolved.length === 1 ? "" : "s"} exactly.`);
+  return { resolved, missing };
+}
 async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
   throwIfAborted();
   const cached = readCachedResponse(url, options);
@@ -720,6 +844,7 @@ async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
       throwIfAborted();
       const response = await fetch(url, {
         ...options,
+        headers: scryfallRequestHeaders(options.headers),
         signal: options.signal || activeScryfallSignal || void 0
       });
       lastStatus = response.status;
@@ -750,7 +875,7 @@ async function fetchCollection(items) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      identifiers: items.map((item) => ({ name: item.inputName }))
+      identifiers: items.map((item) => ({ name: item.mtgjsonExactName || item.inputName }))
     })
   });
 }
@@ -892,7 +1017,7 @@ function mergeResolvedCards(batch, result) {
     if (item.presetStatus === "review") {
       return { ...item, status: "review" };
     }
-    const card = byName.get(normalizeName(item.inputName));
+    const card = byName.get(normalizeName(item.mtgjsonExactName || item.inputName));
     if (card) {
       return {
         ...item,
@@ -926,7 +1051,7 @@ async function resolveExactBatch(batch, batchNumber, setMessage) {
   const resolved = [];
   for (const [index, item] of batch.entries()) {
     setMessage(`Exact retry ${index + 1} of ${batch.length}: "${item.inputName}"...`);
-    const result = await fetchNamedCardResult(item.inputName, "exact");
+    const result = await fetchNamedCardResult(item.mtgjsonExactName || item.inputName, "exact");
     if (result.ok) {
       resolved.push(resolveItemWithCard(item, result.data));
     } else {
@@ -1011,6 +1136,7 @@ function isBoundaryNameFragment(item, expectedIndex) {
 }
 function inferBoundaryCustomer(customer, items, cardLineCount) {
   if (customer.name) return { customer, items };
+  if (!items.some((item) => item.status === "found")) return { customer, items };
   const candidate = items.find((item) => isBoundaryNameCandidate(item, cardLineCount));
   if (candidate) {
     return {
@@ -1103,7 +1229,7 @@ function safeFileName(customer, processedAtValue) {
   const namePart = base.replace(/[^A-Za-z0-9]+/g, "-").replace(/^-|-$/g, "") || "pull-list";
   return `${namePart}-${datePart}.txt`;
 }
-async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
+async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions = {}) {
   if (item.status !== "found") return item;
   if (item.isToken) {
     return {
@@ -1130,8 +1256,49 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
       alternateTitle: ""
     };
   }
-  const facts = await fetchPrintFacts(item.card);
-  const enrichedItem = { ...item, ...facts };
+  if (providerOptions.useScryfall === false) {
+    if (!item.nonSecretRarities?.length && !item.rarities?.length) {
+      return {
+        ...item,
+        status: "review",
+        note: item.note || "Scryfall disabled; rarity not verified"
+      };
+    }
+    return {
+      ...item,
+      caseNote: "",
+      alternateTitle: "",
+      lessVerified: true
+    };
+  }
+  if (item.skipScryfallEnrichment && !caseCheck) {
+    return {
+      ...item,
+      caseNote: "",
+      alternateTitle: "",
+      lessVerified: true
+    };
+  }
+  let itemForFacts = item;
+  if (item.lookupSource === "mtgjson" && !item.card?.prints_search_uri) {
+    const exactResult = await fetchNamedCardResult(item.card?.name || item.inputName, "exact");
+    if (exactResult.ok) {
+      itemForFacts = {
+        ...resolveItemWithCard(item, exactResult.data),
+        lookupSource: "mtgjson+scryfall",
+        mtgjsonCard: item.mtgjsonCard
+      };
+    } else if (hasSpecialPrintRequest(item) || caseCheck) {
+      return {
+        ...item,
+        status: hasSpecialPrintRequest(item) ? "review" : item.status,
+        note: hasSpecialPrintRequest(item) ? "Special version not verified" : item.note,
+        printLookupFailed: true
+      };
+    }
+  }
+  const facts = await fetchPrintFacts(itemForFacts.card);
+  const enrichedItem = { ...itemForFacts, ...facts };
   const notPlayablePaper = !facts.printLookupFailed && !hasPlayablePaperPrint(facts.prints);
   const specialRequestMissing = hasSpecialPrintRequest(item) && !facts.printLookupFailed && !facts.prints?.some((print) => printMatchesSpecialRequests(print, item));
   const ambiguousNonPlayable = notPlayablePaper && await hasAmbiguousPlayableName(item.inputName);
@@ -1140,10 +1307,10 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets) {
     status: specialRequestMissing || notPlayablePaper ? "review" : item.status,
     caseNote: caseCheck ? caseNoteForItem(enrichedItem, recentCaseSets) : "",
     alternateTitle: requestedFlavorName(item, facts.prints),
-    note: specialRequestMissing ? specialRequestReviewNote(item) : notPlayablePaper ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card" : item.note
+    note: specialRequestMissing ? specialRequestReviewNote(item) : notPlayablePaper ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card" : itemForFacts.note
   };
 }
-async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage) {
+async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage, providerOptions = {}) {
   const retriedItems = [...items];
   const failedIndexes = retriedItems.map((item, index) => ({ item, index })).filter(({ item }) => item.status === "found" && item.printLookupFailed);
   for (const [retryIndex, { item, index }] of failedIndexes.entries()) {
@@ -1152,15 +1319,46 @@ async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delay
     const retriedItem = await enrichResolvedItem(
       { ...item, printLookupFailed: false },
       caseCheck,
-      recentCaseSets
+      recentCaseSets,
+      providerOptions
     );
     retriedItems[index] = { ...retriedItem, printHistoryRetried: true };
   }
   return retriedItems;
 }
-async function resolveCardNames(items, setMessage, carefulMode) {
+async function resolveCardNames(items, setMessage, carefulMode, providerOptions = {}) {
+  const useMtgjson = providerOptions.useMtgjson !== false;
+  const useScryfall = providerOptions.useScryfall !== false;
   const firstPass = items.filter((item) => item.status === "found" || item.status === "review");
-  const lookupItems = items.filter((item) => item.status !== "found" && item.status !== "review");
+  let lookupItems = items.filter((item) => item.status !== "found" && item.status !== "review");
+  if (useMtgjson) {
+    try {
+      const mtgjsonResolved = await resolveExactWithMtgjson(lookupItems, setMessage, {
+        ...providerOptions,
+        useScryfall
+      });
+      firstPass.push(...mtgjsonResolved.resolved);
+      lookupItems = mtgjsonResolved.missing;
+    } catch (error) {
+      setMessage(`MTGJSON index unavailable; ${useScryfall ? "falling back to Scryfall" : "unable to verify exact names"}.`);
+      if (!useScryfall) {
+        firstPass.push(...lookupItems.map((item) => ({
+          ...item,
+          status: "review",
+          note: "MTGJSON unavailable and Scryfall disabled"
+        })));
+        lookupItems = [];
+      }
+    }
+  }
+  if (!useScryfall) {
+    firstPass.push(...lookupItems.map((item) => ({
+      ...item,
+      status: "review",
+      note: item.note || "No MTGJSON exact match; Scryfall disabled"
+    })));
+    return firstPass;
+  }
   const exactBatches = chunk(lookupItems, carefulMode ? 1 : BATCH_SIZE);
   for (const [batchIndex, batch] of exactBatches.entries()) {
     firstPass.push(...await resolveExactBatch(batch, batchIndex + 1, setMessage));
@@ -1187,16 +1385,16 @@ async function resolveCardNames(items, setMessage, carefulMode) {
   }
   return fuzzyResolved;
 }
-async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode) {
+async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode, providerOptions = {}) {
   let withRarities = [];
   const concurrency = carefulMode ? 1 : PRINT_FACT_CONCURRENCY;
   const printGroups = chunk(items, concurrency);
   for (const [groupIndex, group] of printGroups.entries()) {
     const starting = groupIndex * concurrency + 1;
     const ending = Math.min(starting + group.length - 1, items.length);
-    setMessage(`Working through Scryfall print history ${starting}-${ending} of ${items.length}...`);
+    setMessage(providerOptions.useScryfall === false ? `Preparing MTGJSON-only output ${starting}-${ending} of ${items.length}...` : `Working through Scryfall print history ${starting}-${ending} of ${items.length}...`);
     const enrichedGroup = await Promise.all(
-      group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets))
+      group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions))
     );
     withRarities.push(...enrichedGroup);
     await sleep(carefulMode ? 500 : 250);
@@ -1207,7 +1405,8 @@ async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage
     recentCaseSets,
     500,
     "Second pass",
-    setMessage
+    setMessage,
+    providerOptions
   );
   withRarities = await retryFailedPrintHistories(
     withRarities,
@@ -1215,22 +1414,30 @@ async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage
     recentCaseSets,
     2e3,
     "Third pass",
-    setMessage
+    setMessage,
+    providerOptions
   );
   return withRarities;
 }
-function reliabilityMessage(items) {
+function reliabilityMessage(items, options = {}) {
+  const notes = [];
   const retryCount = items.filter((item) => item.printHistoryRetried).length;
   const fallbackCount = items.filter((item) => item.status === "found" && item.printLookupFailed).length;
-  if (fallbackCount) return `${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`;
-  if (retryCount) return `Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`;
-  return "";
+  const mtgjsonOnlyCount = items.filter((item) => item.status === "found" && item.lookupSource === "mtgjson").length;
+  if (options.useScryfall === false) notes.push("Scryfall off: output is less verified.");
+  if (mtgjsonOnlyCount) notes.push(`${mtgjsonOnlyCount} card${mtgjsonOnlyCount === 1 ? "" : "s"} matched by MTGJSON only.`);
+  if (fallbackCount) notes.push(`${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`);
+  if (retryCount) notes.push(`Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`);
+  return notes.join(" ");
 }
 async function processPullListText(text, options = {}) {
   const {
     useCheckboxes = true,
     caseCheck = false,
     carefulMode = false,
+    useMtgjson = true,
+    useScryfall = true,
+    mtgjsonManifestUrl = "",
     processedAt = (/* @__PURE__ */ new Date()).toISOString(),
     setMessage = () => {
     }
@@ -1239,12 +1446,13 @@ async function processPullListText(text, options = {}) {
   beginScryfallRun(null, carefulMode);
   try {
     let recentCaseSets = [];
-    if (caseCheck) {
+    if (caseCheck && useScryfall) {
       setMessage("Checking recent set list for case rules...");
       recentCaseSets = await fetchRecentCaseSets();
     }
-    const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode);
-    const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck, recentCaseSets, setMessage, carefulMode);
+    const providerOptions = { useMtgjson, useScryfall, mtgjsonManifestUrl };
+    const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
+    const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
     const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
     return {
       parsed,
@@ -1252,7 +1460,7 @@ async function processPullListText(text, options = {}) {
       items: inferred.items,
       processedAt,
       output: formatOutput(inferred.customer, inferred.items, useCheckboxes, processedAt),
-      reliabilityNote: reliabilityMessage(inferred.items)
+      reliabilityNote: reliabilityMessage(inferred.items, providerOptions)
     };
   } finally {
     endScryfallRun();

@@ -177,6 +177,8 @@ function App() {
   const [useCheckboxes, setUseCheckboxes] = useState(true);
   const [caseCheck, setCaseCheck] = useState(false);
   const [carefulMode, setCarefulMode] = useState(false);
+  const [useMtgjson, setUseMtgjson] = useState(true);
+  const [useScryfall, setUseScryfall] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState(() => (
     sharedFormatterState.output
@@ -260,21 +262,27 @@ function App() {
       return;
     }
 
+    if (!useMtgjson && !useScryfall) {
+      setMessage("Turn on MTGJSON or Scryfall before processing.");
+      return;
+    }
+
     setIsProcessing(true);
     setReliabilityNote("");
-    setMessage(`Checking ${parsed.cards.length} unique card names with Scryfall...`);
+    setMessage(`Checking ${parsed.cards.length} unique card names...`);
     abortControllerRef.current = new AbortController();
     beginScryfallRun(abortControllerRef.current.signal, carefulMode);
 
     try {
       let recentCaseSets = [];
-      if (caseCheck) {
+      if (caseCheck && useScryfall) {
         setMessage("Checking recent set list for case rules...");
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode);
-      const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck, recentCaseSets, setMessage, carefulMode);
+      const providerOptions = { useMtgjson, useScryfall };
+      const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
+      const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
 
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
@@ -283,7 +291,7 @@ function App() {
       setPreloadedStats(null);
       setProcessedAt(new Date().toISOString());
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
-      setReliabilityNote(reliabilityMessage(inferred.items));
+      setReliabilityNote(reliabilityMessage(inferred.items, providerOptions));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : "List formatted.");
     } catch (error) {
       setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while processing.");
@@ -302,6 +310,11 @@ function App() {
 
     if (!reviewEntries.length || isProcessing) return;
 
+    if (!useMtgjson && !useScryfall) {
+      setMessage("Turn on MTGJSON or Scryfall before retrying.");
+      return;
+    }
+
     setIsProcessing(true);
     setReliabilityNote("");
     setMessage(`Retrying ${reviewEntries.length} review item${reviewEntries.length === 1 ? "" : "s"}...`);
@@ -310,17 +323,19 @@ function App() {
 
     try {
       let recentCaseSets = [];
-      if (caseCheck) {
+      if (caseCheck && useScryfall) {
         setMessage("Checking recent set list for case rules...");
         recentCaseSets = await fetchRecentCaseSets();
       }
 
+      const providerOptions = { useMtgjson, useScryfall };
       const namesResolved = await resolveCardNames(
         reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
         setMessage,
         carefulMode,
+        providerOptions,
       );
-      const retried = await enrichPrintHistories(namesResolved, caseCheck, recentCaseSets, setMessage, carefulMode);
+      const retried = await enrichPrintHistories(namesResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
       const nextItems = [...resolvedItems];
       reviewEntries.forEach(({ index }, retryIndex) => {
         nextItems[index] = retried[retryIndex] || nextItems[index];
@@ -328,7 +343,7 @@ function App() {
 
       setResolvedItems(nextItems);
       const reviewCount = nextItems.filter((item) => item.status !== "found").length;
-      setReliabilityNote(reliabilityMessage(nextItems));
+      setReliabilityNote(reliabilityMessage(nextItems, providerOptions));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
     } catch (error) {
       setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while retrying.");
@@ -433,10 +448,45 @@ function App() {
           <div className="section-heading">
             <h2>Input Text</h2>
             <div className="actions">
-              <label className="checkbox-option help-option" title="Still working on this!">
+              <label className="checkbox-option" title="Use the local MTGJSON index for fast exact matches.">
+                <input
+                  type="checkbox"
+                  checked={useMtgjson}
+                  onChange={(event) => {
+                    setUseMtgjson(event.target.checked);
+                    setResolvedItems([]);
+                    setProcessedCustomer(null);
+                    setProcessedAt(null);
+                    setReliabilityNote("");
+                    setMessage("MTGJSON setting changed. Process again when ready.");
+                  }}
+                />
+                MTGJSON
+              </label>
+              <label className="checkbox-option" title="Use Scryfall for misses, fuzzy matches, special versions, and richer verification.">
+                <input
+                  type="checkbox"
+                  checked={useScryfall}
+                  onChange={(event) => {
+                    const enabled = event.target.checked;
+                    setUseScryfall(enabled);
+                    if (!enabled) setCaseCheck(false);
+                    setResolvedItems([]);
+                    setProcessedCustomer(null);
+                    setProcessedAt(null);
+                    setReliabilityNote("");
+                    setMessage(enabled
+                      ? "Scryfall enabled. Process again when ready."
+                      : "Scryfall disabled. Output will be less verified.");
+                  }}
+                />
+                Scryfall
+              </label>
+              <label className="checkbox-option help-option" title={useScryfall ? "Still working on this!" : "Case Check requires Scryfall."}>
                 <input
                   type="checkbox"
                   checked={caseCheck}
+                  disabled={!useScryfall}
                   onChange={(event) => {
                     setCaseCheck(event.target.checked);
                     setResolvedItems([]);
