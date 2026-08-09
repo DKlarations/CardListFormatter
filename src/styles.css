@@ -309,8 +309,39 @@ h2 {
   overflow-wrap: anywhere;
 }
 
-.work-note {
+.footer-note-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: -12px;
+}
+
+.quiet-diagnostics-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+  padding: 0 2px;
+  color: #7f92a6;
+  cursor: pointer;
+  opacity: 0.38;
+}
+
+.quiet-diagnostics-toggle:hover,
+.quiet-diagnostics-toggle:has(input:checked) {
+  opacity: 0.85;
+}
+
+.quiet-diagnostics-toggle input {
+  width: 11px;
+  height: 11px;
+  margin: 0;
+  accent-color: #5aa7d8;
+}
+
+.work-note {
+  margin: 0;
   color: #8fa2b5;
   font-size: 0.66rem;
   text-align: right;

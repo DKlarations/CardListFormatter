@@ -548,14 +548,6 @@ function App() {
                 />
                 Careful Mode
               </label>
-              <label className="checkbox-option" title="Show parser and lookup diagnostics.">
-                <input
-                  type="checkbox"
-                  checked={showDiagnostics}
-                  onChange={(event) => setShowDiagnostics(event.target.checked)}
-                />
-                Diagnostics
-              </label>
               <span className="checkbox-option disabled-option" title="Coming Soon">
                 <Sparkles size={16} />
                 Smart Cleanup
@@ -671,7 +663,18 @@ function App() {
           </div>
         </footer>
 
-        <p className="work-note">Updated 8/9/26, Continue to let me know if and when this breaks! -Derek</p>
+        <div className="footer-note-row">
+          <label className="quiet-diagnostics-toggle" title="Show diagnostics">
+            <input
+              type="checkbox"
+              checked={showDiagnostics}
+              aria-label="Show diagnostics"
+              onChange={(event) => setShowDiagnostics(event.target.checked)}
+            />
+            <Bug size={12} />
+          </label>
+          <p className="work-note">Updated 8/9/26, Continue to let me know if and when this breaks! -Derek</p>
+        </div>
       </section>
     </main>
   );
