@@ -380,42 +380,86 @@ function splitCommaFields(value) {
   fields.push(current.trim());
   return fields.filter(Boolean);
 }
-function looksLikeCsvMetadata(value) {
-  const normalized = normalizeName(value);
+function quantityFromMetadataField(value) {
+  const trimmed = value.trim();
+  const explicitMatch = trimmed.match(/\b(?:quantity|qty)\s*[:=]?\s*(\d+)\b/i);
+  const shorthandMatch = trimmed.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\b/i);
+  const plainMatch = trimmed.match(/^\d+$/);
+  const quantity = Number(explicitMatch?.[1] || shorthandMatch?.[1] || shorthandMatch?.[2] || plainMatch?.[0] || 0);
+  return Number.isFinite(quantity) && quantity > 0 ? quantity : 0;
+}
+function stripQuantityMetadata(value) {
+  return value.replace(/\b(?:quantity|qty)\s*[:=]?\s*\d+\b.*$/i, " ").replace(/\b(?:x\s*\d+|\d+\s*x)\b/ig, " ").replace(/\s+/g, " ").trim();
+}
+function looksLikeListMetadata(value) {
+  const withoutQuantity = stripQuantityMetadata(value);
+  if (!withoutQuantity) return Boolean(quantityFromMetadataField(value));
+  const normalized = normalizeName(withoutQuantity);
+  const trimmed = withoutQuantity.trim();
   return Boolean(
-    parseMetadataRarities(value).length || SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(value)) || /^\$?\d+(?:\.\d{1,2})?$/.test(value.trim()) || /^(?:[A-Z0-9]{2,5}|[WUBRG]{1,5}|colorless|doesn'?t matter|does not matter)$/i.test(value.trim()) || normalized === "cheapest you have"
+    parseMetadataRarities(withoutQuantity).length || SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(withoutQuantity)) || /^[<>]?\$?\d+(?:\.\d{1,2})?$/.test(trimmed) || /^[A-Z0-9]{2,6}$/.test(trimmed) || /^(?:yes|no|y|n)$/i.test(trimmed) || /^(?:[WUBRG]{1,5}|colorless|land|doesn'?t matter|does not matter)$/i.test(trimmed) || /^(?:white|blue|black|red|green|colorless|land)(\/(?:white|blue|black|red|green|colorless|land))*$/i.test(trimmed) || normalized === "cheapest you have"
   );
 }
 function applyCommaMetadata(line, statedRarities, specialRequests) {
   const fields = splitCommaFields(line);
-  if (fields.length < 2) return line;
-  const metadata = fields.slice(1);
-  const metadataScore = metadata.filter(looksLikeCsvMetadata).length;
+  if (fields.length < 2) return { line, quantity: 0 };
+  let metadataStart = fields.length;
+  for (let index = fields.length - 1; index >= 1; index -= 1) {
+    if (!looksLikeListMetadata(fields[index])) break;
+    metadataStart = index;
+  }
+  const metadata = fields.slice(metadataStart);
+  const nameFields = fields.slice(0, metadataStart);
+  const metadataScore = metadata.filter(looksLikeListMetadata).length;
   const isBasicLandNote = BASIC_LAND_NAMES.has(fields[0]);
-  if (!isBasicLandNote && (fields.length < 3 || metadataScore < 2)) return line;
+  if (!metadata.length || !nameFields.length) return { line, quantity: 0 };
+  if (!isBasicLandNote && metadataScore !== metadata.length) return { line, quantity: 0 };
+  let quantity = 0;
   metadata.forEach((field) => {
     statedRarities.push(...parseMetadataRarities(field));
     specialRequests.push(...extractSpecialRequests(field));
+    quantity = quantityFromMetadataField(field) || quantity;
   });
-  return fields[0].trim();
+  return { line: nameFields.join(", ").trim(), quantity };
 }
 function rarityPattern() {
   return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
+}
+function splitTableFields(line) {
+  return line.split(/\t+|\s{2,}/).map((field) => field.trim()).filter(Boolean);
 }
 function isQuantityOnlyLine(line) {
   return /^\d+\s*x?$/i.test(line.trim());
 }
 function isTableHeaderLine(line) {
-  return ["qty", "quantity", "card name", "card", "rarity"].includes(normalizeName(line));
+  const normalized = normalizeName(line);
+  if (["qty", "quantity", "card name", "card", "rarity"].includes(normalized)) return true;
+  const fields = splitTableFields(line).map((field) => normalizeName(field));
+  return fields.includes("card name") && fields.includes("rarity") && fields.includes("quantity");
 }
 function isStandaloneRarityLine(line) {
   return Boolean(parseRarity(line));
+}
+function normalizeHorizontalTableRow(line) {
+  const fields = splitTableFields(line);
+  if (fields.length < 3 || isTableHeaderLine(line)) return "";
+  if (!parseRarity(fields[1])) return "";
+  const lastField = fields[fields.length - 1] || "";
+  const hasQuantityColumn = Boolean(quantityFromMetadataField(lastField));
+  const metadataCount = fields.slice(1).filter(looksLikeListMetadata).length;
+  if (!hasQuantityColumn && metadataCount < 2) return "";
+  return fields.join(", ");
 }
 function normalizeCopiedTableLines(lines) {
   const normalized = [];
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
     if (isTableHeaderLine(line)) continue;
+    const horizontalTableRow = normalizeHorizontalTableRow(line);
+    if (horizontalTableRow) {
+      normalized.push(horizontalTableRow);
+      continue;
+    }
     if (isQuantityOnlyLine(line) && lines[index + 1] && lines[index + 2] && !isTableHeaderLine(lines[index + 1]) && isStandaloneRarityLine(lines[index + 2])) {
       normalized.push(`${line} ${lines[index + 1]} ${lines[index + 2]}`);
       index += 2;
@@ -524,6 +568,17 @@ function requestedFlavorName(item, prints = []) {
   const match = flavorNames.find((flavorName) => normalizeName(flavorName) === inputNormalized || compactName(flavorName) === inputCompact);
   return match || "";
 }
+function pullTrailingParentheticalQuantity(line) {
+  const match = line.match(/\s*\((\d+)\)\s*$/);
+  const quantity = Number(match?.[1] || 0);
+  if (!match || !Number.isFinite(quantity) || quantity <= 0) {
+    return { line, quantity: 0 };
+  }
+  return {
+    line: line.slice(0, match.index).trim(),
+    quantity
+  };
+}
 function stripReviewParentheticals(line, statedRarities, specialRequests) {
   return line.replace(/\(([^)]*)\)/g, (match, content) => {
     const rarities = parseRarities(content);
@@ -575,8 +630,13 @@ function parseCardLine(rawLine, index) {
   }
   const specialRequests = extractSpecialRequests(line);
   const statedRarities = [];
+  const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
+  line = parentheticalQuantity.line;
+  quantity = parentheticalQuantity.quantity || quantity;
   line = stripReviewParentheticals(line, statedRarities, specialRequests).trim();
-  line = applyCommaMetadata(line, statedRarities, specialRequests).trim();
+  const commaMetadata = applyCommaMetadata(line, statedRarities, specialRequests);
+  line = commaMetadata.line.trim();
+  quantity = commaMetadata.quantity || quantity;
   const trailingQuantityMatch = line.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\s*$/i);
   if (trailingQuantityMatch) {
     const trailingQuantity = Number(trailingQuantityMatch[1] || trailingQuantityMatch[2]);

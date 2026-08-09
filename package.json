@@ -1,7 +1,7 @@
 {
   "name": "rrg-pull-list-formatter",
   "private": true,
-  "version": "0.2.5",
+  "version": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -12,7 +12,9 @@
   },
   "dependencies": {
     "@upstash/redis": "^1.38.0",
+    "@vercel/blob": "^2.7.0",
     "@vitejs/plugin-react": "^5.1.0",
+    "fflate": "^0.8.3",
     "lucide-react": "^0.555.0",
     "lz-string": "^1.5.0",
     "react": "^19.2.0",

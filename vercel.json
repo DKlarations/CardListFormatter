@@ -1,4 +1,15 @@
 {
+  "functions": {
+    "api/refresh-mtgjson-index.ts": {
+      "maxDuration": 300
+    }
+  },
+  "crons": [
+    {
+      "path": "/api/refresh-mtgjson-index",
+      "schedule": "0 5 * * 1"
+    }
+  ],
   "rewrites": [
     {
       "source": "/teams-test",

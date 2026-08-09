@@ -111,7 +111,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.2.5</span>
+              <span>v0.3.0</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -421,7 +421,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.2.5</span>
+              <span>v0.3.0</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -540,7 +540,7 @@ function App() {
           </div>
         </footer>
 
-        <p className="work-note">Still working on this, let me know if you come across any weirdness! -Derek</p>
+        <p className="work-note">Updated 8/9/26, Continue to let me know if and when this breaks! -Derek</p>
       </section>
     </main>
   );
