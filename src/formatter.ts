@@ -541,6 +541,13 @@ function parseMetadataRarities(value) {
   return matches.map((part) => parseRarity(part)).filter(Boolean);
 }
 
+function descriptorRarities(value) {
+  return Array.from(new Set([
+    ...parseRarities(value),
+    ...parseMetadataRarities(value),
+  ]));
+}
+
 function splitCommaFields(value) {
   const fields = [];
   let current = "";
@@ -710,12 +717,18 @@ function normalizeCopiedTableLines(lines) {
 // Decides whether a trailing chunk is metadata, not part of a hyphenated card name.
 function isDescriptor(part) {
   const normalized = normalizeName(part);
-  if (parseRarities(normalized).length) return true;
+  if (descriptorRarities(part).length) return true;
   if (SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(part))) return true;
   if (CARD_HINTS.has(normalized)) return true;
   if (/^[wubrg]$/i.test(part)) return true;
   if (/^(white|blue|black|red|green|colorless)(\/(white|blue|black|red|green|colorless))*$/i.test(part)) return true;
   return false;
+}
+
+function isTrailingWordDescriptor(part) {
+  const normalized = normalizeName(part);
+  return CARD_HINTS.has(normalized)
+    || /^(white|blue|black|red|green|colorless|land)(\/(white|blue|black|red|green|colorless|land))*$/i.test(part);
 }
 
 // Collects asks like FOIL, FULL ART, BORDERLESS, and other picky-printing business.
@@ -739,6 +752,7 @@ function cleanCardName(value) {
     .replace(/[•*]/g, "")
     .replace(/\([^)]*\)\s*\d*$/g, "")
     .replace(/\[[^\]]+\]\s*$/g, "")
+    .replace(/\s+[:;=8xX][-']?[)(DPp]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/^["']|["']$/g, "")
@@ -900,15 +914,21 @@ function stripTrailingDescriptors(line, statedRarities) {
   while (remaining) {
     const spacedDescriptorMatch = remaining.match(/^(.*?)\s{2,}(.+)$/);
     if (spacedDescriptorMatch && isDescriptor(spacedDescriptorMatch[2])) {
-      statedRarities.push(...parseRarities(spacedDescriptorMatch[2]));
+      statedRarities.push(...descriptorRarities(spacedDescriptorMatch[2]));
       remaining = spacedDescriptorMatch[1].trim();
       continue;
     }
 
     const hyphenDescriptorMatch = remaining.match(/^(.*)\s*[-–—]\s*([^-–—]+)$/);
     if (hyphenDescriptorMatch && isDescriptor(hyphenDescriptorMatch[2])) {
-      statedRarities.push(...parseRarities(hyphenDescriptorMatch[2]));
+      statedRarities.push(...descriptorRarities(hyphenDescriptorMatch[2]));
       remaining = hyphenDescriptorMatch[1].trim();
+      continue;
+    }
+
+    const wordDescriptorMatch = remaining.match(/^(.*?)\s+([A-Za-z/]+)$/);
+    if (wordDescriptorMatch && isTrailingWordDescriptor(wordDescriptorMatch[2])) {
+      remaining = wordDescriptorMatch[1].trim();
       continue;
     }
 
@@ -1098,11 +1118,30 @@ function mtgjsonAliasKey(value: string) {
   return [normalized, compact].filter(Boolean);
 }
 
+function chooseExactMtgjsonCandidate(index: MtgjsonCardIndex, inputName: string, cardKeys: string[]) {
+  const inputNormalized = normalizeName(inputName);
+  const inputCompact = compactName(inputName);
+  const matches = cardKeys
+    .map((cardKey) => index.cards?.[cardKey] || null)
+    .filter(Boolean)
+    .filter((card) => (
+      normalizeName(card.name) === inputNormalized
+        || compactName(card.name) === inputCompact
+        || normalizeName(card.asciiName || "") === inputNormalized
+        || compactName(card.asciiName || "") === inputCompact
+    ));
+
+  return matches.length === 1 ? matches[0] : null;
+}
+
 function findMtgjsonCard(index: MtgjsonCardIndex | null, inputName: string) {
   if (!index?.cards || !index.aliases) return null;
 
   for (const key of mtgjsonAliasKey(inputName)) {
-    if (index.ambiguousAliases?.[key]?.length) return { card: null, ambiguous: true };
+    if (index.ambiguousAliases?.[key]?.length) {
+      const card = chooseExactMtgjsonCandidate(index, inputName, index.ambiguousAliases[key]);
+      return card ? { card, ambiguous: false } : { card: null, ambiguous: true };
+    }
     const cardKey = index.aliases[key];
     const card = cardKey ? index.cards[cardKey] : null;
     if (card) return { card, ambiguous: false };
@@ -1596,6 +1635,7 @@ function formatTimestamp(value) {
 // Spots a likely customer name accidentally parsed as the first/last card line.
 function isBoundaryNameCandidate(item, cardLineCount) {
   if (!item || item.status === "found") return false;
+  if (item.card || item.lookupSource || item.mtgjsonCard) return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
   if (item.index > 1 && item.index < cardLineCount - 2) return false;
 
@@ -1608,6 +1648,7 @@ function isBoundaryNameCandidate(item, cardLineCount) {
 // Helps combine two loose name fragments like first-name / last-name lines.
 function isBoundaryNameFragment(item, expectedIndex) {
   if (!item || item.status === "found" || item.index !== expectedIndex) return false;
+  if (item.card || item.lookupSource || item.mtgjsonCard) return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
   if (/\d|@|[!?]/.test(item.inputName)) return false;
   return /^[A-Za-z.'-]+$/.test(item.inputName.trim());

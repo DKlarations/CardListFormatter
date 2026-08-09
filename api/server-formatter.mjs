@@ -364,6 +364,12 @@ function parseMetadataRarities(value) {
   const matches = value.match(/\b(?:mythic rare|mythic|rare|uncommon|common|mr|unc|uc|com)\b/ig) || [];
   return matches.map((part) => parseRarity(part)).filter(Boolean);
 }
+function descriptorRarities(value) {
+  return Array.from(/* @__PURE__ */ new Set([
+    ...parseRarities(value),
+    ...parseMetadataRarities(value)
+  ]));
+}
 function splitCommaFields(value) {
   const fields = [];
   let current = "";
@@ -475,12 +481,16 @@ function normalizeCopiedTableLines(lines) {
 }
 function isDescriptor(part) {
   const normalized = normalizeName(part);
-  if (parseRarities(normalized).length) return true;
+  if (descriptorRarities(part).length) return true;
   if (SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(part))) return true;
   if (CARD_HINTS.has(normalized)) return true;
   if (/^[wubrg]$/i.test(part)) return true;
   if (/^(white|blue|black|red|green|colorless)(\/(white|blue|black|red|green|colorless))*$/i.test(part)) return true;
   return false;
+}
+function isTrailingWordDescriptor(part) {
+  const normalized = normalizeName(part);
+  return CARD_HINTS.has(normalized) || /^(white|blue|black|red|green|colorless|land)(\/(white|blue|black|red|green|colorless|land))*$/i.test(part);
 }
 function extractSpecialRequests(value) {
   return SPECIAL_REQUEST_PATTERNS.filter(({ pattern }) => pattern.test(value)).map(({ label }) => label);
@@ -492,7 +502,7 @@ function stripSpecialRequests(value) {
   );
 }
 function cleanCardName(value) {
-  return value.replace(/[•*]/g, "").replace(/\([^)]*\)\s*\d*$/g, "").replace(/\[[^\]]+\]\s*$/g, "").replace(/\s+/g, " ").trim().replace(/^["']|["']$/g, "").trim();
+  return value.replace(/[•*]/g, "").replace(/\([^)]*\)\s*\d*$/g, "").replace(/\[[^\]]+\]\s*$/g, "").replace(/\s+[:;=8xX][-']?[)(DPp]\s*$/g, "").replace(/\s+/g, " ").trim().replace(/^["']|["']$/g, "").trim();
 }
 function cleanLookupName(value) {
   return cleanCardName(stripSpecialRequests(value));
@@ -597,14 +607,19 @@ function stripTrailingDescriptors(line, statedRarities) {
   while (remaining) {
     const spacedDescriptorMatch = remaining.match(/^(.*?)\s{2,}(.+)$/);
     if (spacedDescriptorMatch && isDescriptor(spacedDescriptorMatch[2])) {
-      statedRarities.push(...parseRarities(spacedDescriptorMatch[2]));
+      statedRarities.push(...descriptorRarities(spacedDescriptorMatch[2]));
       remaining = spacedDescriptorMatch[1].trim();
       continue;
     }
     const hyphenDescriptorMatch = remaining.match(/^(.*)\s*[-–—]\s*([^-–—]+)$/);
     if (hyphenDescriptorMatch && isDescriptor(hyphenDescriptorMatch[2])) {
-      statedRarities.push(...parseRarities(hyphenDescriptorMatch[2]));
+      statedRarities.push(...descriptorRarities(hyphenDescriptorMatch[2]));
       remaining = hyphenDescriptorMatch[1].trim();
+      continue;
+    }
+    const wordDescriptorMatch = remaining.match(/^(.*?)\s+([A-Za-z/]+)$/);
+    if (wordDescriptorMatch && isTrailingWordDescriptor(wordDescriptorMatch[2])) {
+      remaining = wordDescriptorMatch[1].trim();
       continue;
     }
     break;
@@ -761,10 +776,19 @@ function mtgjsonAliasKey(value) {
   const compact = compactName(value);
   return [normalized, compact].filter(Boolean);
 }
+function chooseExactMtgjsonCandidate(index, inputName, cardKeys) {
+  const inputNormalized = normalizeName(inputName);
+  const inputCompact = compactName(inputName);
+  const matches = cardKeys.map((cardKey) => index.cards?.[cardKey] || null).filter(Boolean).filter((card) => normalizeName(card.name) === inputNormalized || compactName(card.name) === inputCompact || normalizeName(card.asciiName || "") === inputNormalized || compactName(card.asciiName || "") === inputCompact);
+  return matches.length === 1 ? matches[0] : null;
+}
 function findMtgjsonCard(index, inputName) {
   if (!index?.cards || !index.aliases) return null;
   for (const key of mtgjsonAliasKey(inputName)) {
-    if (index.ambiguousAliases?.[key]?.length) return { card: null, ambiguous: true };
+    if (index.ambiguousAliases?.[key]?.length) {
+      const card2 = chooseExactMtgjsonCandidate(index, inputName, index.ambiguousAliases[key]);
+      return card2 ? { card: card2, ambiguous: false } : { card: null, ambiguous: true };
+    }
     const cardKey = index.aliases[key];
     const card = cardKey ? index.cards[cardKey] : null;
     if (card) return { card, ambiguous: false };
@@ -1121,6 +1145,7 @@ function formatTimestamp(value) {
 }
 function isBoundaryNameCandidate(item, cardLineCount) {
   if (!item || item.status === "found") return false;
+  if (item.card || item.lookupSource || item.mtgjsonCard) return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
   if (item.index > 1 && item.index < cardLineCount - 2) return false;
   const words = item.inputName.trim().split(/\s+/);
@@ -1130,6 +1155,7 @@ function isBoundaryNameCandidate(item, cardLineCount) {
 }
 function isBoundaryNameFragment(item, expectedIndex) {
   if (!item || item.status === "found" || item.index !== expectedIndex) return false;
+  if (item.card || item.lookupSource || item.mtgjsonCard) return false;
   if (item.quantity !== 1 || item.statedRarities?.length || item.specialRequests?.length) return false;
   if (/\d|@|[!?]/.test(item.inputName)) return false;
   return /^[A-Za-z.'-]+$/.test(item.inputName.trim());
