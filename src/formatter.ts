@@ -1077,7 +1077,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit: HeadersInit | undefined) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.3.1");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.3.2");
   }
   return headers;
 }
