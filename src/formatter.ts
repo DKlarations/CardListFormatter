@@ -79,6 +79,8 @@ type MtgjsonIndexedCard = {
   scryfallOracleId?: string;
   subtypes?: string[];
   supertypes?: string[];
+  rarities?: string[];
+  nonSecretRarities?: string[];
   type?: string;
   types?: string[];
 };
@@ -1150,8 +1152,13 @@ function findMtgjsonCard(index: MtgjsonCardIndex | null, inputName: string) {
   return null;
 }
 
+function mtgjsonCardRarities(card: MtgjsonIndexedCard) {
+  const sourceRarities = card.nonSecretRarities?.length ? card.nonSecretRarities : card.rarities || [];
+  return Array.from(new Set(sourceRarities.map((rarity) => parseRarity(rarity)).filter(Boolean)));
+}
+
 function mtgjsonCardShape(card: MtgjsonIndexedCard, item: PullItem) {
-  const rarity = item.statedRarities?.[0] || "";
+  const rarity = item.statedRarities?.[0] || mtgjsonCardRarities(card)[0] || "";
   return {
     name: card.name,
     rarity,
@@ -1165,13 +1172,15 @@ function mtgjsonCardShape(card: MtgjsonIndexedCard, item: PullItem) {
 }
 
 function resolveItemWithMtgjsonCard(item: PullItem, card: MtgjsonIndexedCard) {
-  const rarities = item.statedRarities?.length ? item.statedRarities : [];
+  const inputRarities = item.statedRarities?.length ? item.statedRarities : [];
+  const providerRarities = mtgjsonCardRarities(card);
+  const rarities = providerRarities.length ? providerRarities : inputRarities;
   return {
     ...item,
     card: mtgjsonCardShape(card, item),
     status: "found",
     lookupSource: "mtgjson",
-    raritySource: rarities.length ? "input" : "",
+    raritySource: inputRarities.length ? "input" : providerRarities.length ? "mtgjson" : "",
     isBasicLand: BASIC_LAND_NAMES.has(card.name),
     correction: normalizeName(card.name) !== normalizeName(item.inputName),
     rarities,
@@ -1202,7 +1211,7 @@ async function resolveExactWithMtgjson(items: PullItem[], setMessage, options: P
       continue;
     }
 
-    if (!item.statedRarities?.length && options.useScryfall !== false) {
+    if (!item.statedRarities?.length && !mtgjsonCardRarities(result.card).length && options.useScryfall !== false) {
       missing.push({
         ...item,
         mtgjsonCard: result.card,

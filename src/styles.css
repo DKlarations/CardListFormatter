@@ -119,7 +119,8 @@ h2 {
 }
 
 .input-section,
-.output-section {
+.output-section,
+.diagnostics-section {
   display: grid;
   grid-template-rows: auto minmax(250px, 1fr);
   overflow: hidden;
@@ -131,6 +132,11 @@ h2 {
 
 .output-section {
   grid-template-rows: auto minmax(300px, 1fr);
+}
+
+.diagnostics-section {
+  grid-template-rows: auto minmax(0, auto);
+  background: #111d2c;
 }
 
 .section-heading {
@@ -264,6 +270,43 @@ h2 {
   min-height: 340px;
   color: #111820;
   background: #fbfcfe;
+}
+
+.diagnostics-table-wrap {
+  max-height: 360px;
+  overflow: auto;
+  background: #0c1522;
+}
+
+.diagnostics-table {
+  width: 100%;
+  border-collapse: collapse;
+  color: #dce7f2;
+  font-size: 0.82rem;
+}
+
+.diagnostics-table th,
+.diagnostics-table td {
+  max-width: 240px;
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  text-align: left;
+  vertical-align: top;
+}
+
+.diagnostics-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  color: #ffffff;
+  background: #1c3046;
+  font-size: 0.74rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.diagnostics-table td {
+  overflow-wrap: anywhere;
 }
 
 .work-note {

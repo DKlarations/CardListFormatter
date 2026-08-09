@@ -795,8 +795,12 @@ function findMtgjsonCard(index, inputName) {
   }
   return null;
 }
+function mtgjsonCardRarities(card) {
+  const sourceRarities = card.nonSecretRarities?.length ? card.nonSecretRarities : card.rarities || [];
+  return Array.from(new Set(sourceRarities.map((rarity) => parseRarity(rarity)).filter(Boolean)));
+}
 function mtgjsonCardShape(card, item) {
-  const rarity = item.statedRarities?.[0] || "";
+  const rarity = item.statedRarities?.[0] || mtgjsonCardRarities(card)[0] || "";
   return {
     name: card.name,
     rarity,
@@ -809,13 +813,15 @@ function mtgjsonCardShape(card, item) {
   };
 }
 function resolveItemWithMtgjsonCard(item, card) {
-  const rarities = item.statedRarities?.length ? item.statedRarities : [];
+  const inputRarities = item.statedRarities?.length ? item.statedRarities : [];
+  const providerRarities = mtgjsonCardRarities(card);
+  const rarities = providerRarities.length ? providerRarities : inputRarities;
   return {
     ...item,
     card: mtgjsonCardShape(card, item),
     status: "found",
     lookupSource: "mtgjson",
-    raritySource: rarities.length ? "input" : "",
+    raritySource: inputRarities.length ? "input" : providerRarities.length ? "mtgjson" : "",
     isBasicLand: BASIC_LAND_NAMES.has(card.name),
     correction: normalizeName(card.name) !== normalizeName(item.inputName),
     rarities,
@@ -841,7 +847,7 @@ async function resolveExactWithMtgjson(items, setMessage, options) {
       missing.push(item);
       continue;
     }
-    if (!item.statedRarities?.length && options.useScryfall !== false) {
+    if (!item.statedRarities?.length && !mtgjsonCardRarities(result.card).length && options.useScryfall !== false) {
       missing.push({
         ...item,
         mtgjsonCard: result.card,

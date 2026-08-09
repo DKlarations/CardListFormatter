@@ -6,6 +6,7 @@ import {
   CircleX,
   Clipboard,
   Copy,
+  Bug,
   Download,
   Loader2,
   Printer,
@@ -50,6 +51,38 @@ function IconButton({ children, onClick, title, disabled = false, variant = "sec
       {children}
     </button>
   );
+}
+
+function joinValues(values) {
+  return values?.length ? values.join(", ") : "";
+}
+
+function diagnosticRows(parsedCards, resolvedItems) {
+  const sourceItems = resolvedItems.length ? resolvedItems : parsedCards;
+
+  return sourceItems.map((item) => {
+    const mtgjsonRarities = item.mtgjsonCard?.nonSecretRarities?.length
+      ? item.mtgjsonCard.nonSecretRarities
+      : item.mtgjsonCard?.rarities || [];
+    const resolvedRarities = item.nonSecretRarities?.length ? item.nonSecretRarities : item.rarities || [];
+    const rarityParts = [
+      item.statedRarities?.length ? `typed: ${joinValues(item.statedRarities)}` : "",
+      mtgjsonRarities.length ? `mtgjson: ${joinValues(mtgjsonRarities)}` : "",
+      resolvedRarities.length ? `using: ${joinValues(resolvedRarities)}` : "",
+    ].filter(Boolean);
+
+    return {
+      key: `${item.index}-${item.inputName}`,
+      raw: item.originals?.join(" | ") || item.original || "",
+      parsed: `${item.quantity || 1} ${item.inputName}`,
+      provider: item.lookupSource || (item.status === "found" ? "preset" : "not run"),
+      matched: item.card?.name || item.mtgjsonExactName || item.mtgjsonCard?.name || "",
+      rarity: rarityParts.join(" / ") || "none",
+      result: item.status
+        ? `${item.status}${item.note ? `: ${item.note}` : ""}`
+        : "parsed",
+    };
+  });
 }
 
 function TeamsTestPage() {
@@ -179,6 +212,7 @@ function App() {
   const [carefulMode, setCarefulMode] = useState(false);
   const [useMtgjson, setUseMtgjson] = useState(false);
   const [useScryfall, setUseScryfall] = useState(true);
+  const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [message, setMessage] = useState(() => (
     sharedFormatterState.output
@@ -208,6 +242,7 @@ function App() {
   const printFallbacks = resolvedItems.length
     ? resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length
     : preloadedStats?.printFallbackCount || 0;
+  const rows = useMemo(() => diagnosticRows(parsed.cards, resolvedItems), [parsed.cards, resolvedItems]);
 
   useEffect(() => {
     if (!sharedListId || sharedFormatterState.output) return;
@@ -513,6 +548,14 @@ function App() {
                 />
                 Careful Mode
               </label>
+              <label className="checkbox-option" title="Show parser and lookup diagnostics.">
+                <input
+                  type="checkbox"
+                  checked={showDiagnostics}
+                  onChange={(event) => setShowDiagnostics(event.target.checked)}
+                />
+                Diagnostics
+              </label>
               <span className="checkbox-option disabled-option" title="Coming Soon">
                 <Sparkles size={16} />
                 Smart Cleanup
@@ -571,6 +614,44 @@ function App() {
             onFocus={(event) => event.target.select()}
           />
         </section>
+
+        {showDiagnostics && (
+          <section className="diagnostics-section">
+            <div className="section-heading">
+              <div>
+                <h2>Diagnostics</h2>
+                <p>{rows.length} line{rows.length === 1 ? "" : "s"}</p>
+              </div>
+              <Bug size={19} />
+            </div>
+            <div className="diagnostics-table-wrap">
+              <table className="diagnostics-table">
+                <thead>
+                  <tr>
+                    <th>Raw</th>
+                    <th>Parsed</th>
+                    <th>Provider</th>
+                    <th>Matched</th>
+                    <th>Rarity</th>
+                    <th>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => (
+                    <tr key={row.key}>
+                      <td>{row.raw}</td>
+                      <td>{row.parsed}</td>
+                      <td>{row.provider}</td>
+                      <td>{row.matched}</td>
+                      <td>{row.rarity}</td>
+                      <td>{row.result}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
 
         <footer className="status-bar" aria-live="polite">
           {isProcessing && (
