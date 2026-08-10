@@ -20,6 +20,10 @@ var activeScryfallSignal = null;
 var activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
 var mtgjsonIndexPromise = null;
 var mtgjsonIndexUrl = "";
+function clearMtgjsonIndexCache() {
+  mtgjsonIndexPromise = null;
+  mtgjsonIndexUrl = "";
+}
 var SAMPLE_CUSTOMER_NAMES = [
   "Mark Rosewater",
   "Bill Rose",
@@ -1565,6 +1569,7 @@ async function processPullListText(text, options = {}) {
 }
 export {
   beginScryfallRun,
+  clearMtgjsonIndexCache,
   createSampleList,
   endScryfallRun,
   enrichPrintHistories,

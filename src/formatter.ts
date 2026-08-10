@@ -96,6 +96,11 @@ type MtgjsonCardIndex = {
 let mtgjsonIndexPromise: Promise<MtgjsonCardIndex | null> | null = null;
 let mtgjsonIndexUrl = "";
 
+export function clearMtgjsonIndexCache() {
+  mtgjsonIndexPromise = null;
+  mtgjsonIndexUrl = "";
+}
+
 const SAMPLE_CUSTOMER_NAMES = [
   "Mark Rosewater",
   "Bill Rose",

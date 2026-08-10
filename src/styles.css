@@ -278,6 +278,19 @@ h2 {
   background: #0c1522;
 }
 
+.diagnostics-actions {
+  justify-content: flex-end;
+}
+
+.diagnostics-actions .icon-button {
+  min-width: 34px;
+  height: 34px;
+  padding: 0 9px;
+  color: #c9d8e5;
+  background: #142235;
+  font-size: 0.8rem;
+}
+
 .diagnostics-table {
   width: 100%;
   border-collapse: collapse;

@@ -6,6 +6,11 @@ const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
 const INDEX_PATHNAME = "mtgjson/card-index-latest.json";
 const MANIFEST_PATHNAME = "mtgjson/card-index-manifest.json";
 const INDEX_VERSION = 2;
+const CORS_HEADERS = {
+  "access-control-allow-origin": "*",
+  "access-control-allow-methods": "GET,OPTIONS",
+  "access-control-allow-headers": "authorization,content-type",
+};
 const REGULAR_RARITY_SET_TYPES = new Set([
   "core",
   "commander",
@@ -65,9 +70,17 @@ function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body, null, 2), {
     status,
     headers: {
+      ...CORS_HEADERS,
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",
     },
+  });
+}
+
+export function OPTIONS() {
+  return new Response(null, {
+    status: 204,
+    headers: CORS_HEADERS,
   });
 }
 

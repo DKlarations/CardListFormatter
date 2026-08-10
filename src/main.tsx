@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import {
   beginScryfallRun,
+  clearMtgjsonIndexCache,
   createSampleList,
   endScryfallRun,
   enrichPrintHistories,
@@ -214,6 +215,7 @@ function App() {
   const [useScryfall, setUseScryfall] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [isRefreshingMtgjson, setIsRefreshingMtgjson] = useState(false);
   const [message, setMessage] = useState(() => (
     sharedFormatterState.output
       ? "Formatted list loaded from Teams."
@@ -461,6 +463,48 @@ function App() {
     setMessage("Input changed. Process again when ready.");
   }
 
+  async function refreshMtgjsonIndex() {
+    if (isRefreshingMtgjson) return;
+
+    const secret = window.prompt("Enter the MTGJSON refresh secret.");
+    if (!secret?.trim()) {
+      setMessage("MTGJSON refresh canceled.");
+      return;
+    }
+
+    const apiOrigin = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
+      ? PRODUCTION_ORIGIN
+      : window.location.origin;
+
+    setIsRefreshingMtgjson(true);
+    setMessage("Refreshing MTGJSON index...");
+
+    try {
+      const response = await fetch(`${apiOrigin}/api/refresh-mtgjson-index`, {
+        headers: {
+          Authorization: `Bearer ${secret.trim()}`,
+          Accept: "application/json",
+        },
+      });
+      const result = await response.json().catch(() => ({}));
+
+      if (!response.ok || !result.ok) {
+        throw new Error(result.error || `MTGJSON refresh failed (${response.status}).`);
+      }
+
+      clearMtgjsonIndexCache();
+      const cardCount = Number(result.counts?.cards || 0).toLocaleString();
+      const failedSets = Number(result.source?.mtgjsonMeta?.failedSetCount || 0);
+      setMessage(failedSets
+        ? `MTGJSON refreshed: ${cardCount} cards; ${failedSets} set${failedSets === 1 ? "" : "s"} failed.`
+        : `MTGJSON refreshed: ${cardCount} cards.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "MTGJSON refresh failed.");
+    } finally {
+      setIsRefreshingMtgjson(false);
+    }
+  }
+
   return (
     <main className="app-shell">
       <section className="formatter">
@@ -614,7 +658,13 @@ function App() {
                 <h2>Diagnostics</h2>
                 <p>{rows.length} line{rows.length === 1 ? "" : "s"}</p>
               </div>
-              <Bug size={19} />
+              <div className="actions diagnostics-actions">
+                <IconButton onClick={refreshMtgjsonIndex} title="Refresh MTGJSON data" disabled={isRefreshingMtgjson || isProcessing}>
+                  {isRefreshingMtgjson ? <Loader2 size={16} className="spin" /> : <RefreshCw size={16} />}
+                  <span>MTGJSON</span>
+                </IconButton>
+                <Bug size={19} />
+              </div>
             </div>
             <div className="diagnostics-table-wrap">
               <table className="diagnostics-table">
