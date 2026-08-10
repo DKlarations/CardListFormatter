@@ -517,22 +517,6 @@ function App() {
                 />
                 Scryfall
               </label>
-              <label className="checkbox-option help-option" title={useScryfall ? "Still working on this!" : "Case Check requires Scryfall."}>
-                <input
-                  type="checkbox"
-                  checked={caseCheck}
-                  disabled={!useScryfall}
-                  onChange={(event) => {
-                    setCaseCheck(event.target.checked);
-                    setResolvedItems([]);
-                    setProcessedCustomer(null);
-                    setProcessedAt(null);
-                    setReliabilityNote("");
-                    setMessage("Case check setting changed. Process again when ready.");
-                  }}
-                />
-                Case Check
-              </label>
               <label className="checkbox-option" title="Use slower one-at-a-time Scryfall lookups.">
                 <input
                   type="checkbox"
@@ -585,6 +569,22 @@ function App() {
                   onChange={(event) => setUseCheckboxes(event.target.checked)}
                 />
                 Checkboxes
+              </label>
+              <label className="checkbox-option help-option" title={useScryfall ? "Still working on this!" : "Case Check requires Scryfall."}>
+                <input
+                  type="checkbox"
+                  checked={caseCheck}
+                  disabled={!useScryfall}
+                  onChange={(event) => {
+                    setCaseCheck(event.target.checked);
+                    setResolvedItems([]);
+                    setProcessedCustomer(null);
+                    setProcessedAt(null);
+                    setReliabilityNote("");
+                    setMessage("Case check setting changed. Process again when ready.");
+                  }}
+                />
+                Case Check
               </label>
               <IconButton onClick={copyOutput} title="Copy output" disabled={!output}>
                 <Copy size={18} />
