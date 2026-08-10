@@ -193,6 +193,69 @@ const BASIC_LANDS_BY_COLOR = {
 const BASIC_LAND_NAMES = new Set(Object.values(BASIC_LANDS_BY_COLOR));
 const BASIC_LAND_ORDER = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
 const CASE_RELEVANT_SET_TYPES = new Set(["core", "commander", "draft_innovation", "expansion", "masters"]);
+const RECENT_CASE_SET_COUNT = 3;
+const CHECK_CASE_RECENT_SET_COUNT = 2;
+const CASE_STAPLE_CARD_NAMES = new Set([
+  "Ancient Tomb",
+  "Arcane Signet",
+  "Arid Mesa",
+  "Blood Crypt",
+  "Bloodstained Mire",
+  "Boseiju, Who Endures",
+  "Bountiful Promenade",
+  "Breeding Pool",
+  "Cavern of Souls",
+  "City of Brass",
+  "Command Tower",
+  "Eiganjo, Seat of the Empire",
+  "Exotic Orchard",
+  "Flooded Strand",
+  "Gemstone Caverns",
+  "Godless Shrine",
+  "Hallowed Fountain",
+  "Indatha Triome",
+  "Jetmir's Garden",
+  "Ketria Triome",
+  "Luxury Suite",
+  "Mana Confluence",
+  "Marsh Flats",
+  "Misty Rainforest",
+  "Morphic Pool",
+  "Nykthos, Shrine to Nyx",
+  "Otawara, Soaring City",
+  "Overgrown Tomb",
+  "Polluted Delta",
+  "Prismatic Vista",
+  "Raffine's Tower",
+  "Raugrin Triome",
+  "Reflecting Pool",
+  "Rejuvenating Springs",
+  "Reliquary Tower",
+  "Sacred Foundry",
+  "Savai Triome",
+  "Scalding Tarn",
+  "Sea of Clouds",
+  "Sol Ring",
+  "Sokenzan, Crucible of Defiance",
+  "Spara's Headquarters",
+  "Spectator Seating",
+  "Steam Vents",
+  "Stomping Ground",
+  "Takenuma, Abandoned Mire",
+  "Temple Garden",
+  "Training Center",
+  "Undergrowth Stadium",
+  "Urborg, Tomb of Yawgmoth",
+  "Vault of Champions",
+  "Verdant Catacombs",
+  "Watery Grave",
+  "Windswept Heath",
+  "Wooded Foothills",
+  "Xander's Lounge",
+  "Yavimaya, Cradle of Growth",
+  "Zagoth Triome",
+  "Ziatora's Proving Ground",
+].map(normalizeName));
 const TOKEN_KEYWORD_PATTERNS: LabeledPattern[] = [
   ["Double Strike", /\bdouble\s+strike\b/i],
   ["First Strike", /\bfirst\s+strike\b/i],
@@ -1372,7 +1435,7 @@ function isLandCard(cardOrPrint) {
   return /\bLand\b/i.test(cardOrPrint?.type_line || "");
 }
 
-// Gets the five most recent case-relevant sets so the rules stay current over time. This will hopefully then future proof this thang.
+// Gets the three most recent case-relevant sets so the rules stay current over time. This will hopefully then future proof this thang.
 export async function fetchRecentCaseSets() {
   const result = await fetchJsonWithRetry(SCRYFALL_SETS_URL, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
@@ -1388,8 +1451,14 @@ export async function fetchRecentCaseSets() {
     .filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type))
     .filter((set) => set.released_at && new Date(`${set.released_at}T00:00:00`) <= today)
     .sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime())
-    .slice(0, 5)
+    .slice(0, RECENT_CASE_SET_COUNT)
     .map((set, index) => ({ code: set.code, index, name: set.name }));
+}
+
+function isCaseStapleCard(item: PullItem) {
+  return [item.card?.name, item.mtgjsonCard?.name, item.inputName]
+    .filter(Boolean)
+    .some((name) => CASE_STAPLE_CARD_NAMES.has(normalizeName(name)));
 }
 
 // Figures out whether a card gets CHECK CASE  (or the gentler CASE? nudge.)
@@ -1401,19 +1470,20 @@ function caseNoteForItem(item: PullItem, recentSets: ScryfallSetSummary[]) {
   const highRecentPrint = prints.find((print) => {
     const setIndex = recentIndexByCode.get(print.set);
     return setIndex !== undefined
-      && setIndex <= 1
+      && setIndex < CHECK_CASE_RECENT_SET_COUNT
       && (print.rarity === "rare" || print.rarity === "mythic")
       && isEligibleRarityPrint(print);
   });
 
   if (highRecentPrint) return "CHECK CASE";
+  if (isCaseStapleCard(item)) return "CASE?";
 
   const casePricePrints = prints.filter(isCasePricePrint);
   const midRecentPricePrint = casePricePrints.find((print) => {
     const setIndex = recentIndexByCode.get(print.set);
     return setIndex !== undefined
-      && setIndex >= 2
-      && setIndex <= 4
+      && setIndex >= CHECK_CASE_RECENT_SET_COUNT
+      && setIndex < RECENT_CASE_SET_COUNT
       && priceValue(print) >= 5;
   });
 

@@ -106,6 +106,69 @@ var BASIC_LANDS_BY_COLOR = {
 var BASIC_LAND_NAMES = new Set(Object.values(BASIC_LANDS_BY_COLOR));
 var BASIC_LAND_ORDER = ["Plains", "Island", "Swamp", "Mountain", "Forest"];
 var CASE_RELEVANT_SET_TYPES = /* @__PURE__ */ new Set(["core", "commander", "draft_innovation", "expansion", "masters"]);
+var RECENT_CASE_SET_COUNT = 3;
+var CHECK_CASE_RECENT_SET_COUNT = 2;
+var CASE_STAPLE_CARD_NAMES = new Set([
+  "Ancient Tomb",
+  "Arcane Signet",
+  "Arid Mesa",
+  "Blood Crypt",
+  "Bloodstained Mire",
+  "Boseiju, Who Endures",
+  "Bountiful Promenade",
+  "Breeding Pool",
+  "Cavern of Souls",
+  "City of Brass",
+  "Command Tower",
+  "Eiganjo, Seat of the Empire",
+  "Exotic Orchard",
+  "Flooded Strand",
+  "Gemstone Caverns",
+  "Godless Shrine",
+  "Hallowed Fountain",
+  "Indatha Triome",
+  "Jetmir's Garden",
+  "Ketria Triome",
+  "Luxury Suite",
+  "Mana Confluence",
+  "Marsh Flats",
+  "Misty Rainforest",
+  "Morphic Pool",
+  "Nykthos, Shrine to Nyx",
+  "Otawara, Soaring City",
+  "Overgrown Tomb",
+  "Polluted Delta",
+  "Prismatic Vista",
+  "Raffine's Tower",
+  "Raugrin Triome",
+  "Reflecting Pool",
+  "Rejuvenating Springs",
+  "Reliquary Tower",
+  "Sacred Foundry",
+  "Savai Triome",
+  "Scalding Tarn",
+  "Sea of Clouds",
+  "Sol Ring",
+  "Sokenzan, Crucible of Defiance",
+  "Spara's Headquarters",
+  "Spectator Seating",
+  "Steam Vents",
+  "Stomping Ground",
+  "Takenuma, Abandoned Mire",
+  "Temple Garden",
+  "Training Center",
+  "Undergrowth Stadium",
+  "Urborg, Tomb of Yawgmoth",
+  "Vault of Champions",
+  "Verdant Catacombs",
+  "Watery Grave",
+  "Windswept Heath",
+  "Wooded Foothills",
+  "Xander's Lounge",
+  "Yavimaya, Cradle of Growth",
+  "Zagoth Triome",
+  "Ziatora's Proving Ground"
+].map(normalizeName));
 var TOKEN_KEYWORD_PATTERNS = [
   ["Double Strike", /\bdouble\s+strike\b/i],
   ["First Strike", /\bfirst\s+strike\b/i],
@@ -972,7 +1035,10 @@ async function fetchRecentCaseSets() {
   if (!result.ok) return [];
   const today = /* @__PURE__ */ new Date();
   today.setHours(23, 59, 59, 999);
-  return (result.data.data || []).filter((set) => !set.digital).filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type)).filter((set) => set.released_at && /* @__PURE__ */ new Date(`${set.released_at}T00:00:00`) <= today).sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime()).slice(0, 5).map((set, index) => ({ code: set.code, index, name: set.name }));
+  return (result.data.data || []).filter((set) => !set.digital).filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type)).filter((set) => set.released_at && /* @__PURE__ */ new Date(`${set.released_at}T00:00:00`) <= today).sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime()).slice(0, RECENT_CASE_SET_COUNT).map((set, index) => ({ code: set.code, index, name: set.name }));
+}
+function isCaseStapleCard(item) {
+  return [item.card?.name, item.mtgjsonCard?.name, item.inputName].filter(Boolean).some((name) => CASE_STAPLE_CARD_NAMES.has(normalizeName(name)));
 }
 function caseNoteForItem(item, recentSets) {
   const prints = item.prints || [];
@@ -980,13 +1046,14 @@ function caseNoteForItem(item, recentSets) {
   const recentIndexByCode = new Map(recentSets.map((set) => [set.code, set.index]));
   const highRecentPrint = prints.find((print) => {
     const setIndex = recentIndexByCode.get(print.set);
-    return setIndex !== void 0 && setIndex <= 1 && (print.rarity === "rare" || print.rarity === "mythic") && isEligibleRarityPrint(print);
+    return setIndex !== void 0 && setIndex < CHECK_CASE_RECENT_SET_COUNT && (print.rarity === "rare" || print.rarity === "mythic") && isEligibleRarityPrint(print);
   });
   if (highRecentPrint) return "CHECK CASE";
+  if (isCaseStapleCard(item)) return "CASE?";
   const casePricePrints = prints.filter(isCasePricePrint);
   const midRecentPricePrint = casePricePrints.find((print) => {
     const setIndex = recentIndexByCode.get(print.set);
-    return setIndex !== void 0 && setIndex >= 2 && setIndex <= 4 && priceValue(print) >= 5;
+    return setIndex !== void 0 && setIndex >= CHECK_CASE_RECENT_SET_COUNT && setIndex < RECENT_CASE_SET_COUNT && priceValue(print) >= 5;
   });
   const highAnyPrint = casePricePrints.find((print) => priceValue(print) >= 50);
   const landCasePrint = casePricePrints.find((print) => isLandCard(print) && priceValue(print) >= 10);
