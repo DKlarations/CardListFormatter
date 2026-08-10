@@ -210,7 +210,7 @@ function App() {
   const [useCheckboxes, setUseCheckboxes] = useState(true);
   const [caseCheck, setCaseCheck] = useState(false);
   const [carefulMode, setCarefulMode] = useState(false);
-  const [useMtgjson, setUseMtgjson] = useState(false);
+  const [useMtgjson, setUseMtgjson] = useState(true);
   const [useScryfall, setUseScryfall] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);

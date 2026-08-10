@@ -2025,10 +2025,8 @@ export function reliabilityMessage(items, options: ProviderOptions = {}) {
   const notes = [];
   const retryCount = items.filter((item) => item.printHistoryRetried).length;
   const fallbackCount = items.filter((item) => item.status === "found" && item.printLookupFailed).length;
-  const mtgjsonOnlyCount = items.filter((item) => item.status === "found" && item.lookupSource === "mtgjson").length;
 
   if (options.useScryfall === false) notes.push("Scryfall off: output is less verified.");
-  if (mtgjsonOnlyCount) notes.push(`${mtgjsonOnlyCount} card${mtgjsonOnlyCount === 1 ? "" : "s"} matched by MTGJSON only.`);
   if (fallbackCount) notes.push(`${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`);
   if (retryCount) notes.push(`Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`);
   return notes.join(" ");
