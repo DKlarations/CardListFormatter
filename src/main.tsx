@@ -86,6 +86,31 @@ function diagnosticRows(parsedCards, resolvedItems) {
   });
 }
 
+function formatterApiOrigin() {
+  return window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
+    ? PRODUCTION_ORIGIN
+    : window.location.origin;
+}
+
+function formatMtgjsonManifestLabel(manifest) {
+  const generatedAt = manifest?.generatedAt || manifest?.source?.downloadedAt || "";
+  const date = generatedAt ? new Date(generatedAt) : null;
+  const updatedAt = date && !Number.isNaN(date.getTime())
+    ? new Intl.DateTimeFormat(undefined, {
+      timeZone: "America/Chicago",
+      month: "numeric",
+      day: "numeric",
+      year: "2-digit",
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date)
+    : "unknown";
+  const cardCount = Number(manifest?.counts?.cards || 0);
+  return cardCount
+    ? `MTGJSON updated ${updatedAt} - ${cardCount.toLocaleString()} cards`
+    : `MTGJSON updated ${updatedAt}`;
+}
+
 function TeamsTestPage() {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
@@ -216,6 +241,7 @@ function App() {
   const [showDiagnostics, setShowDiagnostics] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefreshingMtgjson, setIsRefreshingMtgjson] = useState(false);
+  const [mtgjsonUpdateLabel, setMtgjsonUpdateLabel] = useState("MTGJSON update unknown");
   const [message, setMessage] = useState(() => (
     sharedFormatterState.output
       ? "Formatted list loaded from Teams."
@@ -291,6 +317,38 @@ function App() {
       ignore = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!showDiagnostics) return;
+
+    let ignore = false;
+
+    async function loadMtgjsonManifest() {
+      try {
+        const response = await fetch(`${formatterApiOrigin()}/api/mtgjson-index`, {
+          headers: { Accept: "application/json" },
+        });
+        const manifest = await response.json().catch(() => ({}));
+
+        if (ignore) return;
+
+        if (!response.ok) {
+          setMtgjsonUpdateLabel(manifest.error || "MTGJSON update unavailable");
+          return;
+        }
+
+        setMtgjsonUpdateLabel(formatMtgjsonManifestLabel(manifest));
+      } catch {
+        if (!ignore) setMtgjsonUpdateLabel("MTGJSON update unavailable");
+      }
+    }
+
+    loadMtgjsonManifest();
+
+    return () => {
+      ignore = true;
+    };
+  }, [showDiagnostics]);
 
   // Runs the full formatter pipeline from raw paste to sorted, printable output.
   async function processList() {
@@ -472,15 +530,11 @@ function App() {
       return;
     }
 
-    const apiOrigin = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
-      ? PRODUCTION_ORIGIN
-      : window.location.origin;
-
     setIsRefreshingMtgjson(true);
     setMessage("Refreshing MTGJSON index...");
 
     try {
-      const response = await fetch(`${apiOrigin}/api/refresh-mtgjson-index`, {
+      const response = await fetch(`${formatterApiOrigin()}/api/refresh-mtgjson-index`, {
         headers: {
           Authorization: `Bearer ${secret.trim()}`,
           Accept: "application/json",
@@ -493,6 +547,7 @@ function App() {
       }
 
       clearMtgjsonIndexCache();
+      setMtgjsonUpdateLabel(formatMtgjsonManifestLabel(result));
       const cardCount = Number(result.counts?.cards || 0).toLocaleString();
       const failedSets = Number(result.source?.mtgjsonMeta?.failedSetCount || 0);
       setMessage(failedSets
@@ -657,6 +712,7 @@ function App() {
               <div>
                 <h2>Diagnostics</h2>
                 <p>{rows.length} line{rows.length === 1 ? "" : "s"}</p>
+                <p className="diagnostics-meta">{mtgjsonUpdateLabel}</p>
               </div>
               <div className="actions diagnostics-actions">
                 <IconButton onClick={refreshMtgjsonIndex} title="Refresh MTGJSON data" disabled={isRefreshingMtgjson || isProcessing}>

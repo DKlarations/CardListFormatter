@@ -291,6 +291,12 @@ h2 {
   font-size: 0.8rem;
 }
 
+.section-heading .diagnostics-meta {
+  margin-top: 2px;
+  color: #7f92a6;
+  font-size: 0.76rem;
+}
+
 .diagnostics-table {
   width: 100%;
   border-collapse: collapse;
