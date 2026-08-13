@@ -319,7 +319,7 @@ function cleanCustomerName(value) {
   return value.replace(/[<>]/g, "").replace(/\s+/g, " ").trim().replace(/^["']|["']$/g, "").trim();
 }
 function stripFieldLabel(value) {
-  return value.replace(/^(?:name|customer|phone|email|e-mail|contact):\s*/i, "").trim();
+  return value.replace(/^(?:name|customer|phone|email|e-mail|contact)(?:\s*:\s*|\s+-\s+)/i, "").trim();
 }
 function splitNameAndContact(value, extraContact = "") {
   const cleanedValue = stripFieldLabel(value);
@@ -334,11 +334,11 @@ function splitNameAndContact(value, extraContact = "") {
   return { name: cleanCustomerName(name), contact };
 }
 function extractContact(line) {
-  const labeledNameMatch = line.match(/^(?:name|customer):\s*(.+)$/i);
+  const labeledNameMatch = line.match(/^(?:name|customer)(?:\s*:\s*|\s+-\s+)(.+)$/i);
   if (labeledNameMatch) {
     return { name: cleanCustomerName(labeledNameMatch[1]), contact: "" };
   }
-  const labeledContactMatch = line.match(/^(?:phone|email|e-mail|contact):\s*(.+)$/i);
+  const labeledContactMatch = line.match(/^(?:phone|email|e-mail|contact)(?:\s*:\s*|\s+-\s+)(.+)$/i);
   if (labeledContactMatch) {
     return { name: "", contact: mergeContactValues(labeledContactMatch[1]) };
   }
@@ -377,11 +377,17 @@ function isLikelyNoteLine(line) {
   if (/^(hello|hi|hey|thanks|thank you|just one of each|i will|i'm|im|these are|please|once again|mtg pull list from|mtg pull list for)\b/i.test(line)) {
     return true;
   }
-  if (/[.!?]/.test(line) && normalized.split(" ").length > 4) return true;
+  if ((/[!?]/.test(line) || /\.\s*$/.test(line)) && normalized.split(" ").length > 4) return true;
   return false;
 }
+function isLabeledContactLine(line) {
+  return /^(?:name|customer|phone|email|e-mail|contact)(?:\s*:\s*|\s+-\s+)/i.test(line);
+}
+function isContactSectionHeading(line, nextLine = "") {
+  return /^(?:contact|contact information|customer information)$/i.test(line) && isLabeledContactLine(nextLine);
+}
 function hasContactOrHeader(line) {
-  return EMAIL_PATTERN.test(line) || PHONE_PATTERN.test(line) || /^(?:name|customer|phone|email|e-mail|contact):\s*/i.test(line) || /\bpull\s+list\s+(from|for)\b/i.test(line) || /\bfacebook\b|\bfb\b/i.test(line);
+  return EMAIL_PATTERN.test(line) || PHONE_PATTERN.test(line) || isLabeledContactLine(line) || /\bpull\s+list\s+(from|for)\b/i.test(line) || /\bfacebook\b|\bfb\b/i.test(line);
 }
 function isFromHeaderLine(line) {
   return /^from:\s*/i.test(line);
@@ -394,8 +400,10 @@ function parseCustomerAndCards(text) {
   const customer = { name: "", contact: "" };
   const emailHeaderContact = { name: "", contact: "" };
   const cardLines = [];
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (isSeparatorLine(line) || STORE_EMAIL_PATTERN.test(line)) continue;
+    if (isContactSectionHeading(line, lines[index + 1])) continue;
     if (isFromHeaderLine(line)) {
       const parsed = extractContact(line);
       emailHeaderContact.name = emailHeaderContact.name || parsed.name;
@@ -407,6 +415,10 @@ function parseCustomerAndCards(text) {
       const parsed = extractContact(line);
       customer.name = customer.name || parsed.name;
       customer.contact = mergeContactValues(customer.contact, parsed.contact);
+      continue;
+    }
+    if (parseStructuredPriceRow(line)) {
+      cardLines.push(line);
       continue;
     }
     if (isLikelyNoteLine(line)) continue;
@@ -500,6 +512,17 @@ function applyCommaMetadata(line, statedRarities, specialRequests) {
 }
 function rarityPattern() {
   return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
+}
+function parseStructuredPriceRow(line) {
+  const match = line.match(new RegExp(
+    `^(.*?)\\s+-\\s+(${rarityPattern()})\\s+-\\s+(\\$?\\d+(?:\\.\\d{1,2})?)\\s*-\\s+([A-Z0-9]{2,6}(?:\\s*\\/\\s*[A-Z0-9]{2,6})*)\\s+-\\s+((?:white|blue|black|red|green|colorless|land|[WUBRG]{1,5})(?:\\/(?:white|blue|black|red|green|colorless|land|[WUBRG]{1,5}))*)\\s*$`,
+    "i"
+  ));
+  if (!match) return null;
+  const name = match[1].trim();
+  const rarity = parseRarity(match[2]);
+  if (!name || !rarity) return null;
+  return { name, rarity };
 }
 function splitTableFields(line) {
   return line.split(/\t+|\s{2,}/).map((field) => field.trim()).filter(Boolean);
@@ -713,8 +736,13 @@ function parseCardLine(rawLine, index) {
       lookupKey: normalizeName(landName)
     };
   }
-  const specialRequests = extractSpecialRequests(line);
   const statedRarities = [];
+  const structuredPriceRow = parseStructuredPriceRow(line);
+  if (structuredPriceRow) {
+    line = structuredPriceRow.name;
+    statedRarities.push(structuredPriceRow.rarity);
+  }
+  const specialRequests = extractSpecialRequests(line);
   const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
   line = parentheticalQuantity.line;
   quantity = parentheticalQuantity.quantity || quantity;
@@ -808,7 +836,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.3.2");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.3.3");
   }
   return headers;
 }
