@@ -644,12 +644,12 @@ export default function PricingPanel({
           <div class="card-main">
             <strong>${row.quantity}</strong>
             <span class="card-name">${escapeHtml(row.cardName)}</span>
-            <span class="unit-price">$${unitPrice.toFixed(2)}${row.quantity > 1 ? " ea." : ""}</span>
+            <span class="unit-price">${row.quantity > 1 ? `$${unitPrice.toFixed(2)} ea.` : ""}</span>
           </div>
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
-            <span class="line-total">${row.quantity > 1 ? `$${lineTotal.toFixed(2)}` : ""}</span>
+            <span class="line-total">$${lineTotal.toFixed(2)}</span>
           </div>
         </div>`;
     }).join("");
