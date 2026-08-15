@@ -699,7 +699,6 @@ export default function PricingPanel({
       <div className="section-heading pricing-heading">
         <div>
           <h2>Pricing Assistant <span className="experimental-pill">Experimental</span></h2>
-          <p>{loadMessage}</p>
         </div>
         <div className="actions">
           <label className="pricing-median-toggle" title="Use TCGplayer Listed Median for nonfoil and the Near Mint comparison price for foil instead of MTGJSON retail pricing">
