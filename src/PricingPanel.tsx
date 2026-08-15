@@ -660,9 +660,9 @@ export default function PricingPanel({
         @page { size: 80mm auto; margin: 2mm; }
         * { box-sizing: border-box; }
         body { width: 76mm; margin: 0 auto; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; font-size: 9pt; }
-        .brand { padding: .5mm 0 1.5mm; border-bottom: 1px solid #111; text-align: center; }
-        .brand img { display: block; width: 20mm; height: 20mm; margin: 0 auto .5mm; object-fit: contain; }
-        .brand h1 { margin: 0; font-family: "Luckiest Guy", Arial, Helvetica, sans-serif; font-size: 14pt; font-weight: 400; letter-spacing: .3px; text-transform: uppercase; }
+        .brand { padding: .75mm 0 2mm; border-bottom: 1px solid #111; text-align: center; }
+        .brand img { display: block; width: 28mm; height: 28mm; margin: 0 auto .75mm; object-fit: contain; }
+        .brand h1 { margin: 0; font-family: "Luckiest Guy", Arial, Helvetica, sans-serif; font-size: 17pt; font-weight: 400; letter-spacing: .4px; text-transform: uppercase; }
         .customer { padding: 1.5mm 0; border-bottom: 1px dashed #777; line-height: 1.25; }
         .customer strong { display: block; font-size: 10pt; }
         .printed { color: #555; font-size: 7.5pt; }
