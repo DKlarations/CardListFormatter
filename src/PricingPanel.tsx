@@ -644,11 +644,11 @@ export default function PricingPanel({
           <div class="card-main">
             <strong>${row.quantity}</strong>
             <span class="card-name">${escapeHtml(row.cardName)}</span>
-            <span class="unit-price">${row.quantity > 1 ? `$${unitPrice.toFixed(2)} ea.` : ""}</span>
           </div>
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
+            <span class="unit-price">${row.quantity > 1 ? `$${unitPrice.toFixed(2)} ea.` : ""}</span>
             <span class="line-total">$${lineTotal.toFixed(2)}</span>
           </div>
         </div>`;
@@ -667,12 +667,12 @@ export default function PricingPanel({
         .customer strong { display: block; font-size: 10pt; }
         .printed { color: #555; font-size: 7.5pt; }
         .card-row { padding: 1.4mm 0; border-bottom: 1px dashed #aaa; break-inside: avoid; }
-        .card-main { display: grid; grid-template-columns: 5mm minmax(0, 1fr) 27mm; align-items: start; gap: .8mm; font-size: 9.5pt; line-height: 1.15; }
+        .card-main { display: grid; grid-template-columns: 5mm minmax(0, 1fr); align-items: start; gap: .8mm; font-size: 9.5pt; line-height: 1.15; }
         .card-main strong { color: #b4202a; font-size: 10.5pt; }
         .card-main .card-name { min-width: 0; }
-        .card-main .unit-price { white-space: nowrap; text-align: right; font-family: Consolas, monospace; font-size: 8pt; font-style: italic; font-weight: 700; }
-        .card-meta { display: grid; grid-template-columns: minmax(0, 1fr) 19mm 27mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
+        .card-meta { display: grid; grid-template-columns: 10mm minmax(0, 1fr) 19mm 16mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
         .card-meta .treatment { white-space: nowrap; text-align: left; }
+        .card-meta .unit-price { white-space: nowrap; text-align: right; font-style: italic; }
         .card-meta .line-total { white-space: nowrap; text-align: right; }
         .totals { margin-top: 2mm; padding: 2mm; border: 1.25px solid #111; border-top: 1mm solid #111; }
         .found { font-size: 8.5pt; font-weight: 700; }
