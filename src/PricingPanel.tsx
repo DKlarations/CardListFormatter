@@ -645,9 +645,9 @@ export default function PricingPanel({
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
-            <span class="line-price">${row.quantity > 1 ? "Total " : ""}$${lineTotal.toFixed(2)}</span>
+            <span class="line-price">$${lineTotal.toFixed(2)}</span>
           </div>
-          ${row.quantity > 1 ? `<div class="each-price">$${unitPrice.toFixed(2)} ea.</div>` : ""}
+          ${row.quantity > 1 ? `<div class="each-price">($${unitPrice.toFixed(2)} ea.)</div>` : ""}
         </div>`;
     }).join("");
     const absoluteLogoUrl = new URL(logoUrl, window.location.origin).href;
