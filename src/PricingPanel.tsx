@@ -644,12 +644,12 @@ export default function PricingPanel({
           <div class="card-main">
             <strong>${row.quantity}</strong>
             <span class="card-name">${escapeHtml(row.cardName)}</span>
-            <span class="line-price">$${lineTotal.toFixed(2)}</span>
+            <span class="unit-price">$${unitPrice.toFixed(2)}${row.quantity > 1 ? " ea." : ""}</span>
           </div>
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
-            <span class="each-price">${row.quantity > 1 ? `($${unitPrice.toFixed(2)} ea.)` : ""}</span>
+            <span class="line-total">${row.quantity > 1 ? `$${lineTotal.toFixed(2)}` : ""}</span>
           </div>
         </div>`;
     }).join("");
@@ -670,10 +670,10 @@ export default function PricingPanel({
         .card-main { display: grid; grid-template-columns: 5mm minmax(0, 1fr) 27mm; align-items: start; gap: .8mm; font-size: 9.5pt; line-height: 1.15; }
         .card-main strong { color: #b4202a; font-size: 10.5pt; }
         .card-main .card-name { min-width: 0; }
-        .card-main .line-price { white-space: nowrap; text-align: right; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; }
+        .card-main .unit-price { white-space: nowrap; text-align: right; font-family: Consolas, monospace; font-size: 8pt; font-style: italic; font-weight: 700; }
         .card-meta { display: grid; grid-template-columns: minmax(0, 1fr) 19mm 27mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
         .card-meta .treatment { white-space: nowrap; text-align: left; }
-        .card-meta .each-price { white-space: nowrap; text-align: right; }
+        .card-meta .line-total { white-space: nowrap; text-align: right; }
         .totals { margin-top: 2mm; padding: 2mm; border: 1.25px solid #111; border-top: 1mm solid #111; }
         .found { font-size: 8.5pt; font-weight: 700; }
         .total { display: flex; justify-content: space-between; margin-top: .8mm; font-size: 13pt; font-weight: 900; }
