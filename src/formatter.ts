@@ -67,6 +67,7 @@ type ProcessPullListOptions = {
 type ProviderOptions = {
   useMtgjson?: boolean;
   useScryfall?: boolean;
+  pricingMode?: boolean;
   mtgjsonManifestUrl?: string;
 };
 
@@ -1715,6 +1716,23 @@ function sortBasicLands(a, b) {
   return BASIC_LAND_ORDER.indexOf(displayName(a)) - BASIC_LAND_ORDER.indexOf(displayName(b));
 }
 
+// Gives interactive tools the exact same card order as the receipt output.
+export function sortItemsForOutput(items) {
+  const found = items.filter((item) => item.status === "found");
+  const needsReview = items.filter((item) => item.status !== "found").sort(sortByName);
+  const tokens = found.filter((item) => item.isToken).sort(sortByName);
+  const basics = found.filter((item) => item.isBasicLand).sort(sortBasicLands);
+  const nonBasics = found.filter((item) => !item.isBasicLand && !item.isToken);
+  const high = nonBasics.filter((item) => rarityBucket(item) === "high").sort(sortByName);
+  const both = nonBasics.filter((item) => rarityBucket(item) === "both").sort(sortByName);
+  const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
+  return [...high, ...both, ...low, ...tokens, ...basics, ...needsReview];
+}
+
+export function outputDisplayName(item) {
+  return displayName(item);
+}
+
 // Builds one printable output line with quantity, notes, case tags, and optional checkbox.
 function formatCardLine(item, useCheckboxes) {
   const specialNote = specialRequestNote(item);
@@ -1940,7 +1958,7 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
     };
   }
 
-  if (item.skipScryfallEnrichment && !caseCheck) {
+  if (item.skipScryfallEnrichment && !caseCheck && !providerOptions.pricingMode) {
     return {
       ...item,
       caseNote: "",

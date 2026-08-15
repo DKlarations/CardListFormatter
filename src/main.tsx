@@ -1,5 +1,5 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Check,
@@ -7,6 +7,7 @@ import {
   Clipboard,
   Copy,
   Bug,
+  DollarSign,
   Download,
   Loader2,
   Printer,
@@ -33,6 +34,8 @@ import {
 import { decodeFormatterHash } from "./share-link";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
+
+const PricingPanel = lazy(() => import("./PricingPanel"));
 
 // Reusable little icon button so the toolbar does not turn into copy-paste soup.
 type IconButtonProps = {
@@ -239,6 +242,8 @@ function App() {
   const [useMtgjson, setUseMtgjson] = useState(true);
   const [useScryfall, setUseScryfall] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
+  const [showPricing, setShowPricing] = useState(false);
+  const [hasOpenedPricing, setHasOpenedPricing] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefreshingMtgjson, setIsRefreshingMtgjson] = useState(false);
   const [mtgjsonUpdateLabel, setMtgjsonUpdateLabel] = useState("MTGJSON update unknown");
@@ -375,7 +380,7 @@ function App() {
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const providerOptions = { useMtgjson, useScryfall };
+      const providerOptions = { useMtgjson, useScryfall, pricingMode: showPricing };
       const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
       const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
 
@@ -423,7 +428,7 @@ function App() {
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const providerOptions = { useMtgjson, useScryfall };
+      const providerOptions = { useMtgjson, useScryfall, pricingMode: showPricing };
       const namesResolved = await resolveCardNames(
         reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
         setMessage,
@@ -570,7 +575,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.3.3</span>
+              <span>v0.4.0-exp</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -706,6 +711,20 @@ function App() {
           />
         </section>
 
+        {hasOpenedPricing && (
+          <Suspense fallback={showPricing ? <div className="pricing-loading-panel">Loading pricing assistant…</div> : null}>
+            <PricingPanel
+              visible={showPricing}
+              items={resolvedItems}
+              customer={outputCustomer || {}}
+              processedAt={processedAt}
+              apiOrigin={formatterApiOrigin()}
+              logoUrl={rrgLogo}
+              onMessage={setMessage}
+            />
+          </Suspense>
+        )}
+
         {showDiagnostics && (
           <section className="diagnostics-section">
             <div className="section-heading">
@@ -770,15 +789,30 @@ function App() {
         </footer>
 
         <div className="footer-note-row">
-          <label className="quiet-diagnostics-toggle" title="Show diagnostics">
-            <input
-              type="checkbox"
-              checked={showDiagnostics}
-              aria-label="Show diagnostics"
-              onChange={(event) => setShowDiagnostics(event.target.checked)}
-            />
-            <Bug size={12} />
-          </label>
+          <div className="quiet-mode-toggles">
+            <label className="quiet-footer-toggle" title="Show diagnostics">
+              <input
+                type="checkbox"
+                checked={showDiagnostics}
+                aria-label="Show diagnostics"
+                onChange={(event) => setShowDiagnostics(event.target.checked)}
+              />
+              <Bug size={12} />
+            </label>
+            <label className="quiet-footer-toggle pricing-mode-toggle" title="Show experimental pricing assistant">
+              <input
+                type="checkbox"
+                checked={showPricing}
+                aria-label="Show pricing assistant"
+                onChange={(event) => {
+                  const enabled = event.target.checked;
+                  setShowPricing(enabled);
+                  if (enabled) setHasOpenedPricing(true);
+                }}
+              />
+              <DollarSign size={12} />
+            </label>
+          </div>
           <p className="work-note">Updated 8/9/26, Continue to let me know if and when this breaks! -Derek</p>
         </div>
       </section>

@@ -1,14 +1,15 @@
 {
   "name": "rrg-pull-list-formatter",
   "private": true,
-  "version": "0.3.3",
+  "version": "0.4.0-experimental.0",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "typecheck": "tsc --noEmit",
     "build:server-formatter": "esbuild src/formatter.ts --bundle --platform=node --format=esm --outfile=api/server-formatter.mjs",
-    "build": "npm run build:server-formatter && vite build",
-    "test": "npm run build:server-formatter && node --test test/*.test.mjs",
+    "build:server-pricing": "esbuild src/pricing.ts --bundle --platform=node --format=esm --outfile=api/server-pricing.mjs",
+    "build": "npm run build:server-formatter && npm run build:server-pricing && vite build",
+    "test": "npm run build:server-formatter && npm run build:server-pricing && node --test test/*.test.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
@@ -16,6 +17,7 @@
     "@vercel/blob": "^2.7.0",
     "@vitejs/plugin-react": "^5.1.0",
     "fflate": "^0.8.3",
+    "keyrune": "^3.19.0",
     "lucide-react": "^0.555.0",
     "lz-string": "^1.5.0",
     "react": "^19.2.0",

@@ -2,12 +2,19 @@
   "functions": {
     "api/refresh-mtgjson-index.ts": {
       "maxDuration": 300
+    },
+    "api/refresh-mtgjson-pricing-index.ts": {
+      "maxDuration": 300
     }
   },
   "crons": [
     {
       "path": "/api/refresh-mtgjson-index",
       "schedule": "0 5 * * 1"
+    },
+    {
+      "path": "/api/refresh-mtgjson-pricing-index",
+      "schedule": "0 6 * * 1"
     }
   ],
   "rewrites": [

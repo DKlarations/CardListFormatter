@@ -1,0 +1,21 @@
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
+
+const tcgplayerProxy = {
+  "/tcgplayer-details-api": {
+    target: "https://mp-search-api.tcgplayer.com",
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/tcgplayer-details-api/, ""),
+  },
+  "/tcgplayer-pricepoints-api": {
+    target: "https://mpapi.tcgplayer.com",
+    changeOrigin: true,
+    rewrite: (path: string) => path.replace(/^\/tcgplayer-pricepoints-api/, ""),
+  },
+};
+
+export default defineConfig({
+  plugins: [react()],
+  server: { proxy: tcgplayerProxy },
+  preview: { proxy: tcgplayerProxy },
+});

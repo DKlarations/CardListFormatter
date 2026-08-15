@@ -1222,6 +1222,20 @@ function sortByName(a, b) {
 function sortBasicLands(a, b) {
   return BASIC_LAND_ORDER.indexOf(displayName(a)) - BASIC_LAND_ORDER.indexOf(displayName(b));
 }
+function sortItemsForOutput(items) {
+  const found = items.filter((item) => item.status === "found");
+  const needsReview = items.filter((item) => item.status !== "found").sort(sortByName);
+  const tokens = found.filter((item) => item.isToken).sort(sortByName);
+  const basics = found.filter((item) => item.isBasicLand).sort(sortBasicLands);
+  const nonBasics = found.filter((item) => !item.isBasicLand && !item.isToken);
+  const high = nonBasics.filter((item) => rarityBucket(item) === "high").sort(sortByName);
+  const both = nonBasics.filter((item) => rarityBucket(item) === "both").sort(sortByName);
+  const low = nonBasics.filter((item) => rarityBucket(item) === "low").sort(sortByName);
+  return [...high, ...both, ...low, ...tokens, ...basics, ...needsReview];
+}
+function outputDisplayName(item) {
+  return displayName(item);
+}
 function formatCardLine(item, useCheckboxes) {
   const specialNote = specialRequestNote(item);
   const caseNote = item.caseNote ? ` - ${item.caseNote}` : "";
@@ -1402,7 +1416,7 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
       lessVerified: true
     };
   }
-  if (item.skipScryfallEnrichment && !caseCheck) {
+  if (item.skipScryfallEnrichment && !caseCheck && !providerOptions.pricingMode) {
     return {
       ...item,
       caseNote: "",
@@ -1604,9 +1618,11 @@ export {
   fetchRecentCaseSets,
   formatOutput,
   inferBoundaryCustomer,
+  outputDisplayName,
   parsePullList,
   processPullListText,
   reliabilityMessage,
   resolveCardNames,
-  safeFileName
+  safeFileName,
+  sortItemsForOutput
 };
