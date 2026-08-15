@@ -275,10 +275,8 @@ export function applyMinimumPrice(
 export function pricingQuantityMaximum(
   requestedQuantity: number,
   allocatedQuantity: number,
-  isBasicLand: boolean,
 ) {
-  const remaining = Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
-  return isBasicLand ? remaining : Math.min(4, remaining);
+  return Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
 }
 
 export function priceWithListedMedianFallback(

@@ -104,7 +104,7 @@ function createPricingRows(items: any[]): PricingRow[] {
       sourceIndex: item.index ?? order,
       requestedQuantity,
       isBasicLand,
-      quantity: pricingQuantityMaximum(requestedQuantity, 0, isBasicLand),
+      quantity: pricingQuantityMaximum(requestedQuantity, 0),
       found: false,
       resolved: item.status === "found",
       cardName: outputDisplayName(item),
@@ -490,7 +490,7 @@ export default function PricingPanel({
     const otherQuantity = rows
       .filter((candidate) => candidate.groupId === row.groupId && candidate.id !== row.id)
       .reduce((sum, candidate) => sum + candidate.quantity, 0);
-    return pricingQuantityMaximum(row.requestedQuantity, otherQuantity, row.isBasicLand);
+    return pricingQuantityMaximum(row.requestedQuantity, otherQuantity);
   }
 
   function duplicateRow(source: PricingRow) {
@@ -500,7 +500,6 @@ export default function PricingPanel({
       let duplicateQuantity = pricingQuantityMaximum(
         source.requestedQuantity,
         currentTotal,
-        source.isBasicLand,
       );
       let next = current;
       if (!duplicateQuantity && source.quantity > 1) {

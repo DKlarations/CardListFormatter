@@ -157,11 +157,11 @@ test("applies the store price floor with the standard nonfoil basic-land excepti
   assert.equal(applyMinimumPrice(null, false, "standard", "normal"), null);
 });
 
-test("allows basic-land quantities up to the requested amount", () => {
-  assert.equal(pricingQuantityMaximum(40, 0, true), 40);
-  assert.equal(pricingQuantityMaximum(40, 7, true), 33);
-  assert.equal(pricingQuantityMaximum(40, 0, false), 4);
-  assert.equal(pricingQuantityMaximum(3, 1, false), 2);
+test("allows every card quantity up to the requested amount", () => {
+  assert.equal(pricingQuantityMaximum(40, 0), 40);
+  assert.equal(pricingQuantityMaximum(40, 7), 33);
+  assert.equal(pricingQuantityMaximum(7, 0), 7);
+  assert.equal(pricingQuantityMaximum(3, 1), 2);
 });
 
 test("formats receipt treatments using common Magic shorthand", () => {

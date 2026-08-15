@@ -149,9 +149,8 @@ function applyMinimumPrice(price, isBasicLand, treatment, finish) {
   if (price === null) return null;
   return Math.max(price, minimumPriceForSelection(isBasicLand, treatment, finish));
 }
-function pricingQuantityMaximum(requestedQuantity, allocatedQuantity, isBasicLand) {
-  const remaining = Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
-  return isBasicLand ? remaining : Math.min(4, remaining);
+function pricingQuantityMaximum(requestedQuantity, allocatedQuantity) {
+  return Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
 }
 function priceWithListedMedianFallback(listedMedian, mtgjson) {
   if (listedMedian.status === "ready" && listedMedian.price !== null) return listedMedian;
