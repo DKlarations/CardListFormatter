@@ -670,7 +670,7 @@ export default function PricingPanel({
         .card-main { display: grid; grid-template-columns: 5mm minmax(0, 1fr); align-items: start; gap: .8mm; font-size: 9.5pt; line-height: 1.15; }
         .card-main strong { color: #b4202a; font-size: 10.5pt; }
         .card-main .card-name { min-width: 0; }
-        .card-meta { display: grid; grid-template-columns: 15mm minmax(0, 1fr) 19mm 16mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
+        .card-meta { display: grid; grid-template-columns: 19mm minmax(0, 1fr) 15mm 16mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
         .card-meta .treatment { white-space: nowrap; text-align: left; }
         .card-meta .unit-price { white-space: nowrap; text-align: right; font-style: italic; }
         .card-meta .line-total { white-space: nowrap; text-align: right; }
