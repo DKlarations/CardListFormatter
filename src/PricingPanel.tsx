@@ -638,41 +638,42 @@ export default function PricingPanel({
     const receiptRows = foundRows.map((row) => {
       const pricing = effectivePricing(row);
       const unitPrice = pricing.price || 0;
+      const lineTotal = row.quantity * unitPrice;
       return `
         <div class="card-row">
           <div class="card-main"><strong>${row.quantity}</strong><span>${escapeHtml(row.cardName)}</span></div>
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
-            <span class="unit-price">$${unitPrice.toFixed(2)}${row.quantity > 1 ? " ea." : ""}</span>
+            <span class="line-price">${row.quantity > 1 ? "Total " : ""}$${lineTotal.toFixed(2)}</span>
           </div>
-          ${row.quantity > 1 ? `<div class="line-total">Line total: $${(row.quantity * unitPrice).toFixed(2)}</div>` : ""}
+          ${row.quantity > 1 ? `<div class="each-price">$${unitPrice.toFixed(2)} ea.</div>` : ""}
         </div>`;
     }).join("");
     const absoluteLogoUrl = new URL(logoUrl, window.location.origin).href;
 
     printWindow.document.write(`<!doctype html>
       <html><head><title>RRG Priced Pull List</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet"><style>
-        @page { size: 80mm auto; margin: 3mm; }
+        @page { size: 80mm auto; margin: 2mm; }
         * { box-sizing: border-box; }
-        body { width: 72mm; margin: 0 auto; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; font-size: 10pt; }
-        .brand { padding: 1mm 0 3mm; border-bottom: 1px solid #111; text-align: center; }
-        .brand img { display: block; width: 25mm; height: 25mm; margin: 0 auto 1mm; object-fit: contain; }
-        .brand h1 { margin: 0; font-family: "Luckiest Guy", Arial, Helvetica, sans-serif; font-size: 16pt; font-weight: 400; letter-spacing: .4px; text-transform: uppercase; }
-        .customer { padding: 3mm 0; border-bottom: 1px dashed #777; line-height: 1.4; }
-        .customer strong { display: block; font-size: 11pt; }
-        .printed { color: #555; font-size: 8pt; }
-        .card-row { padding: 2.5mm 0; border-bottom: 1px dashed #aaa; break-inside: avoid; }
-        .card-main { display: grid; grid-template-columns: 6mm 1fr; gap: 1mm; font-size: 10.5pt; }
-        .card-main strong { color: #b4202a; font-size: 12pt; }
-        .card-meta { display: grid; grid-template-columns: minmax(0, 1fr) 21mm 23mm; gap: 1mm; width: calc(100% - 7mm); margin: 1mm 0 0 7mm; font-family: Consolas, monospace; font-size: 8.5pt; font-weight: 700; }
+        body { width: 76mm; margin: 0 auto; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; font-size: 9pt; }
+        .brand { padding: .5mm 0 1.5mm; border-bottom: 1px solid #111; text-align: center; }
+        .brand img { display: block; width: 20mm; height: 20mm; margin: 0 auto .5mm; object-fit: contain; }
+        .brand h1 { margin: 0; font-family: "Luckiest Guy", Arial, Helvetica, sans-serif; font-size: 14pt; font-weight: 400; letter-spacing: .3px; text-transform: uppercase; }
+        .customer { padding: 1.5mm 0; border-bottom: 1px dashed #777; line-height: 1.25; }
+        .customer strong { display: block; font-size: 10pt; }
+        .printed { color: #555; font-size: 7.5pt; }
+        .card-row { padding: 1.4mm 0; border-bottom: 1px dashed #aaa; break-inside: avoid; }
+        .card-main { display: grid; grid-template-columns: 5mm 1fr; gap: .8mm; font-size: 9.5pt; line-height: 1.15; }
+        .card-main strong { color: #b4202a; font-size: 10.5pt; }
+        .card-meta { display: grid; grid-template-columns: minmax(0, 1fr) 19mm 27mm; gap: .8mm; width: calc(100% - 5.8mm); margin: .45mm 0 0 5.8mm; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
         .card-meta .treatment { white-space: nowrap; text-align: left; }
-        .card-meta .unit-price { white-space: nowrap; text-align: right; }
-        .line-total { width: calc(100% - 7mm); margin: .8mm 0 0 7mm; text-align: right; font-size: 8pt; }
-        .totals { margin-top: 3mm; padding: 3mm; border: 1.5px solid #111; border-top: 2mm solid #b4202a; }
-        .found { font-size: 9pt; font-weight: 700; }
-        .total { display: flex; justify-content: space-between; margin-top: 1.5mm; font-size: 15pt; font-weight: 900; }
-        .thanks { margin-top: 3mm; color: #555; font-size: 8pt; font-style: italic; text-align: center; }
+        .card-meta .line-price { white-space: nowrap; text-align: right; }
+        .each-price { width: calc(100% - 5.8mm); margin: .3mm 0 0 5.8mm; text-align: right; font-family: Consolas, monospace; font-size: 8pt; font-weight: 700; line-height: 1.1; }
+        .totals { margin-top: 2mm; padding: 2mm; border: 1.25px solid #111; border-top: 1mm solid #111; }
+        .found { font-size: 8.5pt; font-weight: 700; }
+        .total { display: flex; justify-content: space-between; margin-top: .8mm; font-size: 13pt; font-weight: 900; }
+        .thanks { margin-top: 2mm; color: #555; font-size: 7.5pt; font-style: italic; text-align: center; }
         @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
       </style></head><body>
         <header class="brand"><img src="${escapeHtml(absoluteLogoUrl)}" alt=""><h1>Priced Pull List</h1></header>
