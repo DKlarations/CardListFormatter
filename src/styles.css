@@ -404,30 +404,39 @@ h2 {
   font-weight: 900;
 }
 
-.pricing-median-toggle {
+.pricing-source-selector,
+.pricing-print-option {
   display: inline-flex;
   min-height: 34px;
   align-items: center;
-  gap: 7px;
   padding: 0 10px;
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 7px;
   color: #b9c8d5;
   background: #14253a;
-  cursor: pointer;
   font-size: 0.75rem;
   font-weight: 800;
   white-space: nowrap;
 }
 
-.pricing-median-toggle input {
+.pricing-source-selector {
+  width: min(230px, 32vw);
+  cursor: pointer;
+}
+
+.pricing-print-option {
+  gap: 7px;
+  cursor: pointer;
+}
+
+.pricing-print-option input {
   width: 15px;
   height: 15px;
   margin: 0;
   accent-color: #5aa7d8;
 }
 
-.pricing-median-toggle:has(input:checked) {
+.pricing-print-option:has(input:checked) {
   border-color: rgba(87, 168, 218, 0.55);
   color: #bfe8ff;
   background: rgba(34, 95, 133, 0.32);

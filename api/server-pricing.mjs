@@ -22,6 +22,26 @@ var TREATMENT_ABBREVIATIONS = {
   retro: "Retro",
   special: "Special"
 };
+var LEGACY_MTGJSON_PRICE_SOURCES = [
+  { key: "tcgplayer:retail", provider: "tcgplayer", listType: "retail", currency: "USD" },
+  { key: "cardkingdom:retail", provider: "cardkingdom", listType: "retail", currency: "USD" }
+];
+function mtgjsonPriceSourceLabel(source) {
+  const providerLabels = {
+    cardkingdom: "Card Kingdom",
+    cardmarket: "Cardmarket",
+    cardsphere: "Cardsphere",
+    manapool: "Mana Pool",
+    tcgplayer: "TCGplayer"
+  };
+  const provider = providerLabels[source.provider] || source.provider.replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return `MTGJSON \xB7 ${provider} ${source.listType === "buylist" ? "Buylist" : "Retail"}${source.currency && source.currency !== "USD" ? ` (${source.currency})` : ""}`;
+}
+function priceCurrencySymbol(currency = "USD") {
+  if (currency === "EUR") return "\u20AC";
+  if (currency === "GBP") return "\xA3";
+  return currency === "USD" ? "$" : `${currency} `;
+}
 function pricingNameKey(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w/ ]+/g, "").replace(/\s+/g, " ").trim();
 }
@@ -47,6 +67,10 @@ function editionOptions(card) {
     }
   });
   return Array.from(editions.values()).sort((a, b) => b.releaseDate.localeCompare(a.releaseDate) || a.setCode.localeCompare(b.setCode));
+}
+function preferredDefaultEdition(card) {
+  const editions = editionOptions(card);
+  return editions.find((edition) => edition.setCode.toUpperCase() !== "SLD" && !/secret\s+lair/i.test(edition.setName)) || editions[0] || null;
 }
 function treatmentOptions(card, setCode) {
   if (!card || !setCode) return ["standard"];
@@ -88,7 +112,7 @@ function listedMedianPriceForFinish(points, finish) {
   const value = finish === "foil" ? point?.marketPrice : point?.listedMedianPrice;
   return typeof value === "number" && Number.isFinite(value) ? Math.round((value + Number.EPSILON) * 100) / 100 : null;
 }
-function priceForSelection(card, setCode, treatment, finish) {
+function priceForSelection(card, setCode, treatment, finish, priceSource = "tcgplayer:retail") {
   if (!setCode) {
     return {
       status: "select-printing",
@@ -106,7 +130,13 @@ function priceForSelection(card, setCode, treatment, finish) {
     };
   }
   const candidates = printingsForSelection(card, setCode, treatment, finish);
-  const priced = candidates.map((printing) => printing.prices[finish]).filter((price) => Boolean(price && Number.isFinite(price.value)));
+  const priced = candidates.map((printing) => {
+    const indexedPrice = printing.priceListings?.[finish]?.[priceSource];
+    if (indexedPrice) return indexedPrice;
+    const legacyPrice = printing.prices[finish];
+    const legacySource = legacyPrice?.source === "tcgplayer" ? "tcgplayer:retail" : legacyPrice?.source === "cardkingdom" ? "cardkingdom:retail" : legacyPrice?.source;
+    return legacySource === priceSource ? legacyPrice : null;
+  }).filter((price) => Boolean(price && Number.isFinite(price.value)));
   if (!candidates.length || !priced.length) {
     return {
       status: "unavailable",
@@ -124,12 +154,19 @@ function priceForSelection(card, setCode, treatment, finish) {
       message: "Multiple matching collector variants have different prices. Enter the exact price manually."
     };
   }
-  const selected = priced.find((price) => price.source === "tcgplayer") || priced[0];
+  const selected = priced[0];
+  const [provider, listType] = priceSource.split(":");
+  const sourceOption = {
+    key: priceSource,
+    provider,
+    listType: listType === "buylist" ? "buylist" : "retail",
+    currency: selected.currency || "USD"
+  };
   return {
     status: "ready",
     price: selected.value,
-    source: selected.source,
-    message: selected.source === "tcgplayer" ? "TCGplayer retail" : "Card Kingdom retail fallback"
+    source: priceSource,
+    message: mtgjsonPriceSourceLabel(sourceOption)
   };
 }
 function parsePrice(value) {
@@ -152,6 +189,10 @@ function applyMinimumPrice(price, isBasicLand, treatment, finish) {
 function pricingQuantityMaximum(requestedQuantity, allocatedQuantity) {
   return Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
 }
+function remainingRequestedQuantity(requestedQuantity, foundQuantities) {
+  const foundQuantity = foundQuantities.reduce((sum, quantity) => sum + Math.max(0, Math.floor(Number(quantity) || 0)), 0);
+  return Math.max(0, Math.floor(Number(requestedQuantity) || 0) - foundQuantity);
+}
 function priceWithListedMedianFallback(listedMedian, mtgjson) {
   if (listedMedian.status === "ready" && listedMedian.price !== null) return listedMedian;
   if (["loading", "select-printing"].includes(listedMedian.status)) return listedMedian;
@@ -172,6 +213,7 @@ function receiptTreatment(treatment, finish) {
 }
 export {
   FINISH_LABELS,
+  LEGACY_MTGJSON_PRICE_SOURCES,
   TREATMENT_ABBREVIATIONS,
   TREATMENT_LABELS,
   applyMinimumPrice,
@@ -181,7 +223,10 @@ export {
   formatPrice,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
+  mtgjsonPriceSourceLabel,
   parsePrice,
+  preferredDefaultEdition,
+  priceCurrencySymbol,
   priceForSelection,
   priceWithListedMedianFallback,
   pricingNameKey,
@@ -189,6 +234,7 @@ export {
   pricingShardKey,
   printingsForSelection,
   receiptTreatment,
+  remainingRequestedQuantity,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
   treatmentOptions

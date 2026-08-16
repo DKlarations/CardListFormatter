@@ -67,12 +67,19 @@ function latestHistoryValue(history: unknown) {
   return entries.length ? Number(entries[0][1]) : null;
 }
 
-function priceForUuid(priceRecord: MtgjsonRecord | undefined, finish: PricingFinish): PricingValue | null {
-  const tcgplayer = latestHistoryValue(priceRecord?.paper?.tcgplayer?.retail?.[finish]);
-  if (tcgplayer !== null) return { value: tcgplayer, source: "tcgplayer" };
-  const cardkingdom = latestHistoryValue(priceRecord?.paper?.cardkingdom?.retail?.[finish]);
-  if (cardkingdom !== null) return { value: cardkingdom, source: "cardkingdom" };
-  return null;
+function pricesForUuid(priceRecord: MtgjsonRecord | undefined, finish: PricingFinish) {
+  const listings: Record<string, PricingValue> = {};
+  Object.entries(priceRecord?.paper || {}).forEach(([provider, rawPriceList]) => {
+    const priceList = rawPriceList as MtgjsonRecord;
+    const currency = firstString(priceList?.currency, "USD").toUpperCase();
+    (["retail", "buylist"] as const).forEach((listType) => {
+      const value = latestHistoryValue(priceList?.[listType]?.[finish]);
+      if (value === null) return;
+      const source = `${provider}:${listType}`;
+      listings[source] = { value, source, currency };
+    });
+  });
+  return listings;
 }
 
 function normalizeFinish(value: string): PricingFinish | "" {
@@ -128,14 +135,19 @@ function printingsForCard(
       const finishes = Array.from(new Set([
         ...stringArray(card.finishes).map(normalizeFinish).filter((finish): finish is PricingFinish => Boolean(finish)),
         ...(["normal", "foil", "etched"] as PricingFinish[]).filter((finish) => (
-          priceRecord?.paper?.tcgplayer?.retail?.[finish]
-          || priceRecord?.paper?.cardkingdom?.retail?.[finish]
+          Object.values(priceRecord?.paper || {}).some((rawPriceList) => {
+            const priceList = rawPriceList as MtgjsonRecord;
+            return Boolean(priceList?.retail?.[finish] || priceList?.buylist?.[finish]);
+          })
         )),
       ]));
       if (!finishes.length) finishes.push("normal");
       const prices: Partial<Record<PricingFinish, PricingValue>> = {};
+      const priceListings: PricingPrinting["priceListings"] = {};
       finishes.forEach((finish) => {
-        const price = priceForUuid(priceRecord, finish);
+        const listings = pricesForUuid(priceRecord, finish);
+        if (Object.keys(listings).length) priceListings[finish] = listings;
+        const price = listings["tcgplayer:retail"] || listings["cardkingdom:retail"] || Object.values(listings)[0] || null;
         if (price) prices[finish] = price;
       });
 
@@ -152,6 +164,7 @@ function printingsForCard(
         treatments: treatmentsForCard(card),
         finishes,
         prices,
+        priceListings,
       };
     })
     .filter((printing): printing is PricingPrinting => Boolean(printing));

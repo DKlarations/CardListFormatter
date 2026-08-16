@@ -6,11 +6,14 @@ import {
   editionOptions,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
+  preferredDefaultEdition,
+  priceCurrencySymbol,
   priceWithListedMedianFallback,
   priceForSelection,
   pricingNameKey,
   pricingQuantityMaximum,
   pricingShardKey,
+  remainingRequestedQuantity,
   receiptTreatment,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
@@ -31,6 +34,16 @@ const basePrinting = {
     normal: { value: 4.65, source: "tcgplayer" },
     foil: { value: 32, source: "cardkingdom" },
   },
+  priceListings: {
+    normal: {
+      "tcgplayer:retail": { value: 4.65, source: "tcgplayer:retail", currency: "USD" },
+      "cardkingdom:retail": { value: 5, source: "cardkingdom:retail", currency: "USD" },
+      "cardmarket:retail": { value: 4.25, source: "cardmarket:retail", currency: "EUR" },
+    },
+    foil: {
+      "cardkingdom:retail": { value: 32, source: "cardkingdom:retail", currency: "USD" },
+    },
+  },
 };
 
 test("normalizes card names and assigns stable pricing shards", () => {
@@ -50,6 +63,18 @@ test("sorts printing choices newest to oldest", () => {
   assert.deepEqual(editionOptions(card).map((edition) => edition.setCode), ["2XM", "RAV"]);
 });
 
+test("defaults to the newest printing that is not a Secret Lair", () => {
+  const card = {
+    name: "Dark Confidant",
+    printings: [
+      basePrinting,
+      { ...basePrinting, uuid: "sld-dark-confidant", setCode: "SLD", setName: "Secret Lair Drop", releaseDate: "2026-01-01" },
+      { ...basePrinting, uuid: "2xm-dark-confidant", setCode: "2XM", setName: "Double Masters", releaseDate: "2020-08-07" },
+    ],
+  };
+  assert.equal(preferredDefaultEdition(card).setCode, "2XM");
+});
+
 test("builds a generic TCGplayer Magic search for manual price lookup", () => {
   assert.equal(
     tcgplayerCardSearchUrl("Crop Rotation"),
@@ -63,10 +88,13 @@ test("requires a printing and returns the indexed retail price", () => {
   assert.deepEqual(priceForSelection(card, "RAV", "standard", "normal"), {
     status: "ready",
     price: 4.65,
-    source: "tcgplayer",
-    message: "TCGplayer retail",
+    source: "tcgplayer:retail",
+    message: "MTGJSON · TCGplayer Retail",
   });
-  assert.equal(priceForSelection(card, "RAV", "standard", "foil").source, "cardkingdom");
+  assert.equal(priceForSelection(card, "RAV", "standard", "foil", "cardkingdom:retail").source, "cardkingdom:retail");
+  assert.equal(priceForSelection(card, "RAV", "standard", "normal", "cardkingdom:retail").price, 5);
+  assert.equal(priceForSelection(card, "RAV", "standard", "normal", "cardmarket:retail").price, 4.25);
+  assert.equal(priceCurrencySymbol("EUR"), "€");
 });
 
 test("leaves conflicting collector variants blank for manual pricing", () => {
@@ -74,7 +102,13 @@ test("leaves conflicting collector variants blank for manual pricing", () => {
     name: "Example",
     printings: [
       basePrinting,
-      { ...basePrinting, uuid: "alternate", number: "81a", prices: { normal: { value: 5.25, source: "tcgplayer" } } },
+      {
+        ...basePrinting,
+        uuid: "alternate",
+        number: "81a",
+        prices: { normal: { value: 5.25, source: "tcgplayer" } },
+        priceListings: { normal: { "tcgplayer:retail": { value: 5.25, source: "tcgplayer:retail", currency: "USD" } } },
+      },
     ],
   };
   const selection = priceForSelection(card, "RAV", "standard", "normal");
@@ -162,6 +196,12 @@ test("allows every card quantity up to the requested amount", () => {
   assert.equal(pricingQuantityMaximum(40, 7), 33);
   assert.equal(pricingQuantityMaximum(7, 0), 7);
   assert.equal(pricingQuantityMaximum(3, 1), 2);
+});
+
+test("calculates cards not found across split printing rows", () => {
+  assert.equal(remainingRequestedQuantity(7, [2, 3]), 2);
+  assert.equal(remainingRequestedQuantity(4, [4]), 0);
+  assert.equal(remainingRequestedQuantity(3, []), 3);
 });
 
 test("formats receipt treatments using common Magic shorthand", () => {

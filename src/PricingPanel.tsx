@@ -22,19 +22,25 @@ import {
   FINISH_LABELS,
   finishOptions,
   formatPrice,
+  LEGACY_MTGJSON_PRICE_SOURCES,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
+  mtgjsonPriceSourceLabel,
   parsePrice,
+  preferredDefaultEdition,
+  priceCurrencySymbol,
   priceWithListedMedianFallback,
   priceForSelection,
   pricingNameKey,
   pricingQuantityMaximum,
   pricingShardKey,
+  remainingRequestedQuantity,
   receiptTreatment,
   TREATMENT_LABELS,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
   treatmentOptions,
+  type MtgjsonPriceSourceOption,
   type PricingCatalog,
   type PricingFinish,
 } from "./pricing";
@@ -67,6 +73,7 @@ type PricingPanelProps = {
 
 type PricingManifest = {
   generatedAt?: string;
+  priceSources?: MtgjsonPriceSourceOption[];
   shards?: Record<string, { url?: string } | string>;
 };
 
@@ -242,7 +249,7 @@ function rowsWithDefaultPrintings(rows: PricingRow[], catalog: PricingCatalog) {
     const card = cardFromCatalog(catalog, row.cardName);
     const editions = editionOptions(card);
     if (!editions.length || editions.some((edition) => edition.setCode === row.setCode)) return row;
-    const setCode = editions[0].setCode;
+    const setCode = preferredDefaultEdition(card)?.setCode || editions[0].setCode;
     const finishes = finishOptions(card, setCode, "standard");
     const finish = finishes.includes("normal") ? "normal" : finishes[0];
     return { ...row, setCode, treatment: "standard", finish };
@@ -264,7 +271,9 @@ export default function PricingPanel({
   const [loadMessage, setLoadMessage] = useState("Pricing data loads after a list is processed.");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hydratingRows, setHydratingRows] = useState<Set<string>>(new Set());
-  const [useListedMedian, setUseListedMedian] = useState(false);
+  const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
+  const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
+  const [includeNotFound, setIncludeNotFound] = useState(true);
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
   const [listedMedianByProduct, setListedMedianByProduct] = useState<Record<string, ListedMedianEntry>>({});
@@ -308,6 +317,7 @@ export default function PricingPanel({
         catalogRef.current = {};
         requestedMedianIdsRef.current.clear();
         setListedMedianByProduct({});
+        setMtgjsonPriceSources(LEGACY_MTGJSON_PRICE_SOURCES);
         setCatalog({});
       }
       if (!manifestRef.current) {
@@ -317,6 +327,9 @@ export default function PricingPanel({
         const manifest = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(manifest.error || "Pricing index is unavailable.");
         manifestRef.current = manifest;
+        if (Array.isArray(manifest.priceSources) && manifest.priceSources.length) {
+          setMtgjsonPriceSources(manifest.priceSources);
+        }
       }
 
       const shardKeys = Array.from(new Set(cardNames.map(pricingShardKey)))
@@ -341,9 +354,9 @@ export default function PricingPanel({
       setRows((current) => rowsWithDefaultPrintings(current, nextCatalog));
       usingLiveFallbackRef.current = false;
       setLoadState("ready");
-      setLoadMessage(useListedMedian
+      setLoadMessage(pricingSource === "tcgplayer-listed-median"
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
-        : "Using MTGJSON retail pricing. Turn on Listed Median to compare current TCGplayer values.");
+        : "Using the selected MTGJSON price listing.");
     } catch (error) {
       const fallbackCatalog = fallbackCatalogFromItems(items);
       if (Object.keys(fallbackCatalog).length) {
@@ -352,7 +365,7 @@ export default function PricingPanel({
         setRows((current) => rowsWithDefaultPrintings(current, fallbackCatalog));
         usingLiveFallbackRef.current = true;
         setLoadState("ready");
-        setLoadMessage(useListedMedian
+        setLoadMessage(pricingSource === "tcgplayer-listed-median"
           ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
           : "Printing history is ready. MTGJSON prices load automatically when a card is marked Found.");
       } else {
@@ -403,7 +416,7 @@ export default function PricingPanel({
   }, [processedAt, visible]);
 
   useEffect(() => {
-    if (!useListedMedian) return;
+    if (pricingSource !== "tcgplayer-listed-median") return;
     const productIds = Array.from(new Set(rows
       .filter((row) => row.found && row.quantity > 0)
       .map((row) => tcgplayerProductIdForSelection(
@@ -439,7 +452,7 @@ export default function PricingPanel({
       const reason = error instanceof Error ? error.message : "TCGplayer Listed Median pricing failed.";
       setLoadMessage(`${reason} Yellow warnings mark prices using the MTGJSON fallback.`);
     });
-  }, [useListedMedian, rows, catalog]);
+  }, [pricingSource, rows, catalog]);
 
   function updateRow(id: string, update: Partial<PricingRow> | ((row: PricingRow) => Partial<PricingRow>)) {
     setRows((current) => current.map((row) => (
@@ -471,7 +484,7 @@ export default function PricingPanel({
       };
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
-      setLoadMessage(useListedMedian
+      setLoadMessage(pricingSource === "tcgplayer-listed-median"
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
         : "Live MTGJSON pricing loaded: TCGplayer retail, with Card Kingdom retail fallback.");
     } catch (error) {
@@ -558,10 +571,21 @@ export default function PricingPanel({
     };
   }
 
+  const selectedMtgjsonSource = mtgjsonPriceSources.find((source) => source.key === pricingSource);
+  const selectedCurrency = pricingSource === "tcgplayer-listed-median"
+    ? "USD"
+    : selectedMtgjsonSource?.currency || "USD";
+  const currencySymbol = priceCurrencySymbol(selectedCurrency);
+
   function effectivePricing(row: PricingRow) {
     const card = cardFromCatalog(catalog, row.cardName);
-    const mtgjsonPricing = priceForSelection(card, row.setCode, row.treatment, row.finish);
-    const automatic = useListedMedian && row.found
+    const selectedSource = pricingSource === "tcgplayer-listed-median" ? "tcgplayer:retail" : pricingSource;
+    let mtgjsonPricing = priceForSelection(card, row.setCode, row.treatment, row.finish, selectedSource);
+    if (pricingSource === "tcgplayer-listed-median" && mtgjsonPricing.status === "unavailable") {
+      const cardKingdomFallback = priceForSelection(card, row.setCode, row.treatment, row.finish, "cardkingdom:retail");
+      if (cardKingdomFallback.status === "ready") mtgjsonPricing = cardKingdomFallback;
+    }
+    const automatic = pricingSource === "tcgplayer-listed-median" && row.found
       ? priceWithListedMedianFallback(listedMedianPricing(row), mtgjsonPricing)
       : mtgjsonPricing;
     const override = row.priceOverride === null ? null : parsePrice(row.priceOverride);
@@ -582,7 +606,7 @@ export default function PricingPanel({
       automatic: automaticPrice === automatic.price ? automatic : {
         ...automatic,
         price: automaticPrice,
-        message: `${automatic.message}; raised to the $${minimumPriceForSelection(row.isBasicLand, row.treatment, row.finish).toFixed(2)} minimum.`,
+        message: `${automatic.message}; raised to the ${currencySymbol}${minimumPriceForSelection(row.isBasicLand, row.treatment, row.finish).toFixed(2)} minimum.`,
       },
       price: row.priceOverride === null ? automaticPrice : overridePrice,
       source: row.priceOverride === null ? automatic.source : "manual",
@@ -602,6 +626,19 @@ export default function PricingPanel({
   const foundCount = checkedRows.reduce((sum, row) => sum + row.quantity, 0);
   const unpricedFoundCount = checkedRows.length - foundRows.length;
   const totalPrice = foundRows.reduce((sum, row) => sum + row.quantity * (effectivePricing(row).price || 0), 0);
+  const notFoundCards = groups.map((group) => {
+    const requestedQuantity = group[0]?.requestedQuantity || 0;
+    return {
+      cardName: group[0]?.cardName || "Unknown card",
+      quantity: remainingRequestedQuantity(
+        requestedQuantity,
+        group.filter((row) => row.found).map((row) => row.quantity),
+      ),
+    };
+  }).filter((item) => item.quantity > 0);
+  const notFoundCount = notFoundCards.reduce((sum, item) => sum + item.quantity, 0);
+  const canPrintReceipt = !unpricedFoundCount
+    && (foundRows.length > 0 || (includeNotFound && notFoundCards.length > 0));
 
   async function refreshPricingIndex() {
     if (isRefreshing) return;
@@ -625,8 +662,10 @@ export default function PricingPanel({
   }
 
   function printPricingReceipt() {
-    if (!foundRows.length) {
-      onMessage("Check at least one fully priced card before printing.");
+    if (!canPrintReceipt) {
+      onMessage(unpricedFoundCount
+        ? "Finish pricing every found row before printing."
+        : "Check at least one priced card or include the cards that were not found.");
       return;
     }
     const printWindow = window.open("", "_blank");
@@ -648,11 +687,14 @@ export default function PricingPanel({
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
             <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
-            <span class="unit-price">${row.quantity > 1 ? `$${unitPrice.toFixed(2)} ea.` : ""}</span>
-            <span class="line-total">$${lineTotal.toFixed(2)}</span>
+            <span class="unit-price">${row.quantity > 1 ? `${escapeHtml(currencySymbol)}${unitPrice.toFixed(2)} ea.` : ""}</span>
+            <span class="line-total">${escapeHtml(currencySymbol)}${lineTotal.toFixed(2)}</span>
           </div>
         </div>`;
     }).join("");
+    const notFoundRows = includeNotFound ? notFoundCards.map((item) => `
+      <div class="missing-row"><strong>${item.quantity}</strong><span>${escapeHtml(item.cardName)}</span></div>
+    `).join("") : "";
     const absoluteLogoUrl = new URL(logoUrl, window.location.origin).href;
 
     printWindow.document.write(`<!doctype html>
@@ -677,6 +719,11 @@ export default function PricingPanel({
         .totals { margin-top: 2mm; padding: 2mm; border: 1.25px solid #111; border-top: 1mm solid #111; }
         .found { font-size: 8.5pt; font-weight: 700; }
         .total { display: flex; justify-content: space-between; margin-top: .8mm; font-size: 13pt; font-weight: 900; }
+        .not-found { margin-top: 2mm; padding-top: 1.2mm; border-top: 1px solid #111; break-inside: avoid; }
+        .not-found h2 { display: flex; justify-content: space-between; margin: 0 0 .5mm; font-size: 9pt; }
+        .not-found h2 span { font-size: 7.5pt; font-weight: 700; }
+        .missing-row { display: grid; grid-template-columns: 5mm minmax(0, 1fr); gap: .8mm; padding: .55mm 0; border-bottom: 1px dotted #bbb; font-size: 8.5pt; line-height: 1.1; }
+        .missing-row strong { color: #b4202a; }
         .thanks { margin-top: 2mm; color: #555; font-size: 7.5pt; font-style: italic; text-align: center; }
         @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
       </style></head><body>
@@ -687,7 +734,8 @@ export default function PricingPanel({
           <div class="printed">Priced ${escapeHtml(printedTimestamp(processedAt))}</div>
         </section>
         <main>${receiptRows}</main>
-        <footer class="totals"><div class="found">${foundCount}/${requestedCount} cards found</div><div class="total"><span>TOTAL</span><span>$${totalPrice.toFixed(2)}</span></div></footer>
+        <footer class="totals"><div class="found">${foundCount}/${requestedCount} cards found</div><div class="total"><span>TOTAL</span><span>${escapeHtml(currencySymbol)}${totalPrice.toFixed(2)}</span></div></footer>
+        ${notFoundRows ? `<section class="not-found"><h2><span>NOT FOUND</span><span>${notFoundCount} card${notFoundCount === 1 ? "" : "s"}</span></h2>${notFoundRows}</section>` : ""}
         <p class="thanks">Thanks for shopping local!</p>
       </body></html>`);
     printWindow.document.close();
@@ -706,27 +754,29 @@ export default function PricingPanel({
           <h2>Pricing Assistant <span className="experimental-pill">Experimental</span></h2>
         </div>
         <div className="actions">
-          <label className="pricing-median-toggle" title="Use TCGplayer Listed Median for nonfoil and the Near Mint comparison price for foil instead of MTGJSON retail pricing">
-            <input
-              type="checkbox"
-              checked={useListedMedian}
-              onChange={(event) => {
-                const enabled = event.target.checked;
-                setUseListedMedian(enabled);
-                setLoadMessage(enabled
-                  ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
-                  : "Using MTGJSON retail pricing.");
-              }}
-            />
-            <span>Listed Median</span>
-          </label>
+          <select
+            className="pricing-source-selector"
+            value={pricingSource}
+            onChange={(event) => setPricingSource(event.target.value)}
+            aria-label="Automatic pricing source"
+            title="Choose the automatic price used for found cards"
+          >
+            <option value="tcgplayer-listed-median">TCGPlayer Listed Median</option>
+            {mtgjsonPriceSources.map((source) => (
+              <option value={source.key} key={source.key}>{mtgjsonPriceSourceLabel(source)}</option>
+            ))}
+          </select>
           <button className="icon-button" type="button" onClick={() => loadPricingData(true)} disabled={loadState === "loading" || !rows.length} title="Reload pricing data">
             {loadState === "loading" ? <Loader2 size={17} className="spin" /> : <RefreshCw size={17} />}
           </button>
           <button className="icon-button" type="button" onClick={refreshPricingIndex} disabled={isRefreshing} title="Rebuild the MTGJSON pricing index">
             {isRefreshing ? <Loader2 size={17} className="spin" /> : <span className="pricing-refresh-label">MTGJSON</span>}
           </button>
-          <button className="icon-button primary" type="button" onClick={printPricingReceipt} disabled={!foundRows.length || Boolean(unpricedFoundCount)} title={unpricedFoundCount ? "Finish pricing every found row before printing" : "Print branded pricing receipt"}>
+          <label className="pricing-print-option" title="Include requested cards that were not found beneath the receipt total">
+            <input type="checkbox" checked={includeNotFound} onChange={(event) => setIncludeNotFound(event.target.checked)} />
+            <span>Not Found</span>
+          </label>
+          <button className="icon-button primary" type="button" onClick={printPricingReceipt} disabled={!canPrintReceipt} title={unpricedFoundCount ? "Finish pricing every found row before printing" : "Print branded pricing receipt"}>
             <Printer size={18} /><span>Print Pricing</span>
           </button>
         </div>
@@ -740,7 +790,7 @@ export default function PricingPanel({
       ) : (
         <>
           <div className="pricing-column-labels" aria-hidden="true">
-            <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>{useListedMedian ? "Each (TCG)" : "Each"}</span><span>Actions</span>
+            <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>{pricingSource === "tcgplayer-listed-median" ? "Each (TCG)" : "Each"}</span><span>Actions</span>
           </div>
           <div className="pricing-groups">
             {groups.map((group) => (
@@ -764,11 +814,11 @@ export default function PricingPanel({
                   const needsWarning = !row.resolved
                     || loadState === "error"
                     || (row.found && !priceIsValid && !isPriceLoading);
-                  const usingMtgjsonFallback = useListedMedian
+                  const usingMtgjsonFallback = pricingSource === "tcgplayer-listed-median"
                     && row.found
                     && row.priceOverride === null
                     && pricing.automatic.status === "ready"
-                    && ["tcgplayer", "cardkingdom"].includes(pricing.automatic.source);
+                    && pricing.automatic.source !== "tcgplayer-listed-median";
                   const foilNeedsDoubleCheck = row.found && row.finish === "foil";
                   const showYellowWarning = usingMtgjsonFallback || foilNeedsDoubleCheck;
                   const yellowWarningMessage = foilNeedsDoubleCheck
@@ -959,7 +1009,7 @@ export default function PricingPanel({
                       </select>
 
                       <div className={`pricing-price ${row.priceOverride !== null ? "is-manual" : ""} ${row.found && !priceIsValid && row.setCode ? "is-missing" : ""}`}>
-                        <span>$</span>
+                        <span>{currencySymbol}</span>
                         <input
                           inputMode="decimal"
                           value={priceValue}
@@ -981,7 +1031,7 @@ export default function PricingPanel({
                           placeholder={isPriceLoading ? "Loading..." : "0.00"}
                           aria-label={`Price for one ${row.cardName}`}
                           title={row.priceOverride !== null
-                            ? `Manual price · minimum $${minimumPriceForSelection(row.isBasicLand, row.treatment, row.finish).toFixed(2)}`
+                            ? `Manual price · minimum ${currencySymbol}${minimumPriceForSelection(row.isBasicLand, row.treatment, row.finish).toFixed(2)}`
                             : pricing.automatic.message}
                         />
                         {isPriceLoading && <Loader2 size={13} className="spin pricing-price-loader" aria-label="Loading automatic price" />}
@@ -1010,7 +1060,7 @@ export default function PricingPanel({
           <footer className="pricing-total-bar">
             <div><strong>{foundCount}/{requestedCount}</strong><span>cards found</span></div>
             {unpricedFoundCount > 0 && <span className="pricing-incomplete">{unpricedFoundCount} found row{unpricedFoundCount === 1 ? "" : "s"} still need pricing</span>}
-            <div className="pricing-grand-total"><span>Total</span><strong>${totalPrice.toFixed(2)}</strong></div>
+            <div className="pricing-grand-total"><span>Total</span><strong>{currencySymbol}{totalPrice.toFixed(2)}</strong></div>
           </footer>
         </>
       )}

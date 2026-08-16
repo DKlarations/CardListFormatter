@@ -5,7 +5,7 @@ const DEFAULT_SET_LIST_URL = "https://mtgjson.com/api/v5/SetList.json.zip";
 const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
 const DEFAULT_PRICES_URL = "https://mtgjson.com/api/v5/AllPricesToday.json.zip";
 const MANIFEST_PATHNAME = "mtgjson/pricing-index-manifest.json";
-const INDEX_VERSION = 2;
+const INDEX_VERSION = 3;
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,OPTIONS",
@@ -15,7 +15,8 @@ const CORS_HEADERS = {
 type MtgjsonRecord = Record<string, any>;
 type MtgjsonPayload = { meta?: Record<string, any>; data?: any };
 type PriceFinish = "normal" | "foil" | "etched";
-type IndexedPrice = { value: number; source: "tcgplayer" | "cardkingdom" };
+type IndexedPrice = { value: number; source: string; currency?: string };
+type IndexedPriceSource = { key: string; provider: string; listType: "retail" | "buylist"; currency: string };
 type IndexedPrinting = {
   uuid: string;
   tcgplayerProductId?: string;
@@ -29,6 +30,7 @@ type IndexedPrinting = {
   treatments: string[];
   finishes: PriceFinish[];
   prices: Partial<Record<PriceFinish, IndexedPrice>>;
+  priceListings: Partial<Record<PriceFinish, Record<string, IndexedPrice>>>;
 };
 type PricingShard = {
   version: number;
@@ -135,12 +137,24 @@ function latestHistoryValue(history: unknown) {
   return entries.length ? Number(entries[0][1]) : null;
 }
 
+export function pricesForUuid(priceRecord: MtgjsonRecord | undefined, finish: PriceFinish) {
+  const listings: Record<string, IndexedPrice> = {};
+  Object.entries(priceRecord?.paper || {}).forEach(([provider, rawPriceList]) => {
+    const priceList = rawPriceList as MtgjsonRecord;
+    const currency = firstString(priceList?.currency, "USD").toUpperCase();
+    (["retail", "buylist"] as const).forEach((listType) => {
+      const value = latestHistoryValue(priceList?.[listType]?.[finish]);
+      if (value === null) return;
+      const source = `${provider}:${listType}`;
+      listings[source] = { value, source, currency };
+    });
+  });
+  return listings;
+}
+
 export function priceForUuid(priceRecord: MtgjsonRecord | undefined, finish: PriceFinish): IndexedPrice | null {
-  const tcgplayer = latestHistoryValue(priceRecord?.paper?.tcgplayer?.retail?.[finish]);
-  if (tcgplayer !== null) return { value: tcgplayer, source: "tcgplayer" };
-  const cardkingdom = latestHistoryValue(priceRecord?.paper?.cardkingdom?.retail?.[finish]);
-  if (cardkingdom !== null) return { value: cardkingdom, source: "cardkingdom" };
-  return null;
+  const listings = pricesForUuid(priceRecord, finish);
+  return listings["tcgplayer:retail"] || listings["cardkingdom:retail"] || Object.values(listings)[0] || null;
 }
 
 function normalizeFinish(value: string): PriceFinish | "" {
@@ -169,9 +183,11 @@ export function treatmentsForCard(card: MtgjsonRecord) {
 function finishesForCard(card: MtgjsonRecord, priceRecord: MtgjsonRecord | undefined) {
   const finishes = stringArray(card.finishes).map(normalizeFinish).filter((value): value is PriceFinish => Boolean(value));
   (["normal", "foil", "etched"] as PriceFinish[]).forEach((finish) => {
-    if (priceRecord?.paper?.tcgplayer?.retail?.[finish] || priceRecord?.paper?.cardkingdom?.retail?.[finish]) {
-      finishes.push(finish);
-    }
+    const hasPrice = Object.values(priceRecord?.paper || {}).some((rawPriceList) => {
+      const priceList = rawPriceList as MtgjsonRecord;
+      return Boolean(priceList?.retail?.[finish] || priceList?.buylist?.[finish]);
+    });
+    if (hasPrice) finishes.push(finish);
   });
   return uniqueStrings(finishes) as PriceFinish[];
 }
@@ -190,6 +206,7 @@ function addCardToShards(
   set: { code: string; name: string; keyruneCode: string; releaseDate: string },
   pricesByUuid: Record<string, MtgjsonRecord>,
   generatedAt: string,
+  priceSources: Map<string, IndexedPriceSource>,
 ) {
   if (!isEnglishPaperCard(card)) return false;
   const name = firstString(card.name, card.faceName);
@@ -201,8 +218,21 @@ function addCardToShards(
   const finishes = finishesForCard(card, priceRecord);
   if (!finishes.length) finishes.push("normal");
   const prices: Partial<Record<PriceFinish, IndexedPrice>> = {};
+  const priceListings: Partial<Record<PriceFinish, Record<string, IndexedPrice>>> = {};
   finishes.forEach((finish) => {
-    const price = priceForUuid(priceRecord, finish);
+    const listings = pricesForUuid(priceRecord, finish);
+    if (Object.keys(listings).length) priceListings[finish] = listings;
+    Object.values(listings).forEach((listing) => {
+      const [provider, rawListType] = listing.source.split(":");
+      const listType = rawListType === "buylist" ? "buylist" : "retail";
+      priceSources.set(listing.source, {
+        key: listing.source,
+        provider,
+        listType,
+        currency: listing.currency || "USD",
+      });
+    });
+    const price = listings["tcgplayer:retail"] || listings["cardkingdom:retail"] || Object.values(listings)[0] || null;
     if (price) prices[finish] = price;
   });
 
@@ -223,6 +253,7 @@ function addCardToShards(
       treatments: treatmentsForCard(card),
       finishes,
       prices,
+      priceListings,
     });
   }
   shard.cards[cardKey] = indexedCard;
@@ -269,6 +300,7 @@ export async function GET(request: Request) {
     const sets = limit ? allSets.slice(0, limit) : allSets;
     const pricesByUuid = pricePayload.data || {};
     const shards: Record<string, PricingShard> = {};
+    const priceSources = new Map<string, IndexedPriceSource>();
     const failures: { code: string; error: string }[] = [];
     const concurrency = Math.max(1, Number(env("MTGJSON_PRICING_SET_FETCH_CONCURRENCY", "8")) || 8);
     let printingCount = 0;
@@ -295,7 +327,7 @@ export async function GET(request: Request) {
         };
         [...(Array.isArray(setData.cards) ? setData.cards : []), ...(Array.isArray(setData.tokens) ? setData.tokens : [])]
           .forEach((card) => {
-            if (addCardToShards(shards, card, set, pricesByUuid, generatedAt)) printingCount += 1;
+            if (addCardToShards(shards, card, set, pricesByUuid, generatedAt, priceSources)) printingCount += 1;
           });
       });
     }
@@ -318,7 +350,15 @@ export async function GET(request: Request) {
     };
 
     if (dryRun) {
-      return jsonResponse({ ok: true, dryRun: true, generatedAt, bytes, counts, failedSets: failures.slice(0, 25) });
+      return jsonResponse({
+        ok: true,
+        dryRun: true,
+        generatedAt,
+        bytes,
+        counts,
+        priceSources: Array.from(priceSources.values()),
+        failedSets: failures.slice(0, 25),
+      });
     }
 
     const uploaded = await Promise.all(Object.entries(shardJson).map(async ([key, body]) => {
@@ -332,6 +372,11 @@ export async function GET(request: Request) {
       generatedAt,
       counts,
       bytes,
+      priceSources: Array.from(priceSources.values()).sort((a, b) => (
+        ((a.provider === "tcgplayer" ? 0 : 1) - (b.provider === "tcgplayer" ? 0 : 1)
+          || a.provider.localeCompare(b.provider))
+          || (a.listType === "retail" ? -1 : 1)
+      )),
       source: {
         setListUrl,
         setFileBaseUrl,

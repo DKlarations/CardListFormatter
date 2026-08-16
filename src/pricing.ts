@@ -2,7 +2,15 @@ export type PricingFinish = "normal" | "foil" | "etched";
 
 export type PricingValue = {
   value: number;
-  source: "tcgplayer" | "cardkingdom";
+  source: string;
+  currency?: string;
+};
+
+export type MtgjsonPriceSourceOption = {
+  key: string;
+  provider: string;
+  listType: "retail" | "buylist";
+  currency: string;
 };
 
 export type PricingPrinting = {
@@ -18,6 +26,7 @@ export type PricingPrinting = {
   treatments: string[];
   finishes: PricingFinish[];
   prices: Partial<Record<PricingFinish, PricingValue>>;
+  priceListings?: Partial<Record<PricingFinish, Record<string, PricingValue>>>;
 };
 
 export type PricingCard = {
@@ -30,7 +39,7 @@ export type PricingCatalog = Record<string, PricingCard>;
 export type PricingSelection = {
   status: "ready" | "loading" | "select-printing" | "unavailable" | "ambiguous";
   price: number | null;
-  source: "tcgplayer" | "cardkingdom" | "tcgplayer-listed-median" | "";
+  source: string;
   message: string;
 };
 
@@ -65,6 +74,29 @@ export const TREATMENT_ABBREVIATIONS: Record<string, string> = {
   retro: "Retro",
   special: "Special",
 };
+
+export const LEGACY_MTGJSON_PRICE_SOURCES: MtgjsonPriceSourceOption[] = [
+  { key: "tcgplayer:retail", provider: "tcgplayer", listType: "retail", currency: "USD" },
+  { key: "cardkingdom:retail", provider: "cardkingdom", listType: "retail", currency: "USD" },
+];
+
+export function mtgjsonPriceSourceLabel(source: MtgjsonPriceSourceOption) {
+  const providerLabels: Record<string, string> = {
+    cardkingdom: "Card Kingdom",
+    cardmarket: "Cardmarket",
+    cardsphere: "Cardsphere",
+    manapool: "Mana Pool",
+    tcgplayer: "TCGplayer",
+  };
+  const provider = providerLabels[source.provider] || source.provider.replace(/\b\w/g, (letter) => letter.toUpperCase());
+  return `MTGJSON · ${provider} ${source.listType === "buylist" ? "Buylist" : "Retail"}${source.currency && source.currency !== "USD" ? ` (${source.currency})` : ""}`;
+}
+
+export function priceCurrencySymbol(currency = "USD") {
+  if (currency === "EUR") return "€";
+  if (currency === "GBP") return "£";
+  return currency === "USD" ? "$" : `${currency} `;
+}
 
 export function pricingNameKey(value: string) {
   return String(value || "")
@@ -111,6 +143,14 @@ export function editionOptions(card: PricingCard | null) {
     b.releaseDate.localeCompare(a.releaseDate)
       || a.setCode.localeCompare(b.setCode)
   ));
+}
+
+export function preferredDefaultEdition(card: PricingCard | null) {
+  const editions = editionOptions(card);
+  return editions.find((edition) => (
+    edition.setCode.toUpperCase() !== "SLD"
+      && !/secret\s+lair/i.test(edition.setName)
+  )) || editions[0] || null;
 }
 
 export function treatmentOptions(card: PricingCard | null, setCode: string) {
@@ -191,6 +231,7 @@ export function priceForSelection(
   setCode: string,
   treatment: string,
   finish: PricingFinish,
+  priceSource = "tcgplayer:retail",
 ): PricingSelection {
   if (!setCode) {
     return {
@@ -211,7 +252,17 @@ export function priceForSelection(
 
   const candidates = printingsForSelection(card, setCode, treatment, finish);
   const priced = candidates
-    .map((printing) => printing.prices[finish])
+    .map((printing) => {
+      const indexedPrice = printing.priceListings?.[finish]?.[priceSource];
+      if (indexedPrice) return indexedPrice;
+      const legacyPrice = printing.prices[finish];
+      const legacySource = legacyPrice?.source === "tcgplayer"
+        ? "tcgplayer:retail"
+        : legacyPrice?.source === "cardkingdom"
+          ? "cardkingdom:retail"
+          : legacyPrice?.source;
+      return legacySource === priceSource ? legacyPrice : null;
+    })
     .filter((price): price is PricingValue => Boolean(price && Number.isFinite(price.value)));
 
   if (!candidates.length || !priced.length) {
@@ -233,12 +284,19 @@ export function priceForSelection(
     };
   }
 
-  const selected = priced.find((price) => price.source === "tcgplayer") || priced[0];
+  const selected = priced[0];
+  const [provider, listType] = priceSource.split(":");
+  const sourceOption = {
+    key: priceSource,
+    provider,
+    listType: listType === "buylist" ? "buylist" as const : "retail" as const,
+    currency: selected.currency || "USD",
+  };
   return {
     status: "ready",
     price: selected.value,
-    source: selected.source,
-    message: selected.source === "tcgplayer" ? "TCGplayer retail" : "Card Kingdom retail fallback",
+    source: priceSource,
+    message: mtgjsonPriceSourceLabel(sourceOption),
   };
 }
 
@@ -277,6 +335,13 @@ export function pricingQuantityMaximum(
   allocatedQuantity: number,
 ) {
   return Math.max(0, Math.floor(requestedQuantity) - Math.floor(allocatedQuantity));
+}
+
+export function remainingRequestedQuantity(requestedQuantity: number, foundQuantities: number[]) {
+  const foundQuantity = foundQuantities.reduce((sum, quantity) => (
+    sum + Math.max(0, Math.floor(Number(quantity) || 0))
+  ), 0);
+  return Math.max(0, Math.floor(Number(requestedQuantity) || 0) - foundQuantity);
 }
 
 export function priceWithListedMedianFallback(
