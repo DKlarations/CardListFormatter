@@ -133,7 +133,7 @@ One With Nothing U
 Squire
 raph's jitte
 4x Lightningbolt
-liliana
+Earthbending Student
 4x Godless Shrine land
 Yargle gluttin of urborg
 sol ring :-)`;
@@ -1185,7 +1185,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit: HeadersInit | undefined) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.4.1");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.4.4");
   }
   return headers;
 }

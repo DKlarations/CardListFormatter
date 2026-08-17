@@ -5,12 +5,13 @@ import {
   AlertTriangle,
   Check,
   ChevronDown,
-  CopyPlus,
+  CornerDownLeft,
   ExternalLink,
   Loader2,
   Printer,
   RefreshCw,
   RotateCcw,
+  Settings,
   Trash2,
 } from "lucide-react";
 import "keyrune/css/keyrune.css";
@@ -18,6 +19,7 @@ import { outputDisplayName, sortItemsForOutput } from "./formatter";
 import {
   applyMinimumPrice,
   cardFromCatalog,
+  convertCurrencyPrice,
   editionOptions,
   FINISH_LABELS,
   finishOptions,
@@ -29,6 +31,7 @@ import {
   parsePrice,
   preferredDefaultEdition,
   priceCurrencySymbol,
+  priceVarianceRatio,
   priceWithListedMedianFallback,
   priceForSelection,
   pricingNameKey,
@@ -36,6 +39,8 @@ import {
   pricingShardKey,
   remainingRequestedQuantity,
   receiptTreatment,
+  requiresPriceVarianceReview,
+  selectableMtgjsonPriceSources,
   TREATMENT_LABELS,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
@@ -88,6 +93,12 @@ type ListedMedianEntry = {
   points: ListedMedianPoint[];
 };
 
+type EurUsdRate = {
+  status: "idle" | "loading" | "ready" | "error";
+  rate: number | null;
+  date: string;
+};
+
 type PrintingMenuPosition = {
   rowId: string;
   top: number;
@@ -95,6 +106,48 @@ type PrintingMenuPosition = {
   width: number;
   maxHeight: number;
 };
+
+const RECEIPT_LOGO_DARKNESS_KEY = "rrg-receipt-logo-darkness";
+
+function storedReceiptLogoDarkness() {
+  if (typeof window === "undefined") return 100;
+  const stored = Number(window.localStorage.getItem(RECEIPT_LOGO_DARKNESS_KEY));
+  return Number.isFinite(stored) && stored >= 20 && stored <= 100 ? stored : 100;
+}
+
+async function preprocessReceiptLogo(url: string, darkness: number) {
+  const image = new Image();
+  image.decoding = "async";
+  await new Promise<void>((resolve, reject) => {
+    image.onload = () => resolve();
+    image.onerror = () => reject(new Error("The receipt logo could not be prepared for printing."));
+    image.src = url;
+  });
+
+  const canvas = document.createElement("canvas");
+  canvas.width = image.naturalWidth;
+  canvas.height = image.naturalHeight;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) throw new Error("The receipt logo could not be prepared for printing.");
+
+  context.fillStyle = "#fff";
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.drawImage(image, 0, 0);
+
+  const strength = Math.max(0.2, Math.min(1, darkness / 100));
+  if (strength < 1) {
+    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+    for (let index = 0; index < pixels.data.length; index += 4) {
+      pixels.data[index] = 255 - ((255 - pixels.data[index]) * strength);
+      pixels.data[index + 1] = 255 - ((255 - pixels.data[index + 1]) * strength);
+      pixels.data[index + 2] = 255 - ((255 - pixels.data[index + 2]) * strength);
+      pixels.data[index + 3] = 255;
+    }
+    context.putImageData(pixels, 0, 0);
+  }
+
+  return canvas.toDataURL("image/png");
+}
 
 function rowId(groupId: string) {
   return `${groupId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -249,7 +302,8 @@ function rowsWithDefaultPrintings(rows: PricingRow[], catalog: PricingCatalog) {
     const card = cardFromCatalog(catalog, row.cardName);
     const editions = editionOptions(card);
     if (!editions.length || editions.some((edition) => edition.setCode === row.setCode)) return row;
-    const setCode = preferredDefaultEdition(card)?.setCode || editions[0].setCode;
+    const setCode = preferredDefaultEdition(card)?.setCode || "";
+    if (!setCode) return row;
     const finishes = finishOptions(card, setCode, "standard");
     const finish = finishes.includes("normal") ? "normal" : finishes[0];
     return { ...row, setCode, treatment: "standard", finish };
@@ -274,6 +328,9 @@ export default function PricingPanel({
   const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
   const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
   const [includeNotFound, setIncludeNotFound] = useState(true);
+  const [receiptSettingsOpen, setReceiptSettingsOpen] = useState(false);
+  const [receiptLogoDarkness, setReceiptLogoDarkness] = useState(storedReceiptLogoDarkness);
+  const [eurUsdRate, setEurUsdRate] = useState<EurUsdRate>({ status: "idle", rate: null, date: "" });
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
   const [listedMedianByProduct, setListedMedianByProduct] = useState<Record<string, ListedMedianEntry>>({});
@@ -283,6 +340,27 @@ export default function PricingPanel({
   const usingLiveFallbackRef = useRef(false);
   const requestedMedianIdsRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
+  const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    window.localStorage.setItem(RECEIPT_LOGO_DARKNESS_KEY, String(receiptLogoDarkness));
+  }, [receiptLogoDarkness]);
+
+  useEffect(() => {
+    if (!receiptSettingsOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      if (!receiptSettingsRef.current?.contains(event.target as Node)) setReceiptSettingsOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setReceiptSettingsOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [receiptSettingsOpen]);
 
   useEffect(() => {
     if (!processedAt || !items.length) {
@@ -328,7 +406,7 @@ export default function PricingPanel({
         if (!response.ok) throw new Error(manifest.error || "Pricing index is unavailable.");
         manifestRef.current = manifest;
         if (Array.isArray(manifest.priceSources) && manifest.priceSources.length) {
-          setMtgjsonPriceSources(manifest.priceSources);
+          setMtgjsonPriceSources(selectableMtgjsonPriceSources(manifest.priceSources));
         }
       }
 
@@ -379,6 +457,26 @@ export default function PricingPanel({
     if (!visible || !rows.length) return;
     loadPricingData();
   }, [visible, cardNameSignature, processedAt]);
+
+  useEffect(() => {
+    if (pricingSource !== "cardmarket:retail" || eurUsdRate.status !== "idle") return;
+    setEurUsdRate({ status: "loading", rate: null, date: "" });
+    void fetch("https://api.frankfurter.dev/v2/rate/EUR/USD", {
+      headers: { Accept: "application/json" },
+    }).then(async (response) => {
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok || !Number.isFinite(Number(payload.rate)) || Number(payload.rate) <= 0) {
+        throw new Error("EUR to USD conversion is unavailable.");
+      }
+      setEurUsdRate({
+        status: "ready",
+        rate: Number(payload.rate),
+        date: String(payload.date || ""),
+      });
+    }).catch(() => {
+      setEurUsdRate({ status: "error", rate: null, date: "" });
+    });
+  }, [pricingSource, eurUsdRate.status]);
 
   useEffect(() => {
     if (!openPrintingRowId) return;
@@ -572,7 +670,7 @@ export default function PricingPanel({
   }
 
   const selectedMtgjsonSource = mtgjsonPriceSources.find((source) => source.key === pricingSource);
-  const selectedCurrency = pricingSource === "tcgplayer-listed-median"
+  const selectedCurrency = pricingSource === "tcgplayer-listed-median" || pricingSource === "cardmarket:retail"
     ? "USD"
     : selectedMtgjsonSource?.currency || "USD";
   const currencySymbol = priceCurrencySymbol(selectedCurrency);
@@ -585,9 +683,33 @@ export default function PricingPanel({
       const cardKingdomFallback = priceForSelection(card, row.setCode, row.treatment, row.finish, "cardkingdom:retail");
       if (cardKingdomFallback.status === "ready") mtgjsonPricing = cardKingdomFallback;
     }
-    const automatic = pricingSource === "tcgplayer-listed-median" && row.found
-      ? priceWithListedMedianFallback(listedMedianPricing(row), mtgjsonPricing)
+    const listedMedian = pricingSource === "tcgplayer-listed-median" && row.found
+      ? listedMedianPricing(row)
+      : null;
+    let automatic = listedMedian
+      ? priceWithListedMedianFallback(listedMedian, mtgjsonPricing)
       : mtgjsonPricing;
+    if (pricingSource === "cardmarket:retail") {
+      if (eurUsdRate.status === "ready") {
+        automatic = {
+          ...automatic,
+          price: convertCurrencyPrice(automatic.price, eurUsdRate.rate),
+          message: `${automatic.message} · converted from EUR to USD at ${eurUsdRate.rate}${eurUsdRate.date ? ` (${eurUsdRate.date})` : ""}.`,
+        };
+      } else {
+        automatic = {
+          status: eurUsdRate.status === "error" ? "unavailable" : "loading",
+          price: null,
+          source: "cardmarket:retail",
+          message: eurUsdRate.status === "error"
+            ? "The EUR to USD conversion rate could not be loaded. Enter a price manually or choose another source."
+            : "Loading the EUR to USD conversion rate...",
+        };
+      }
+    }
+    const varianceRatio = listedMedian?.status === "ready"
+      ? priceVarianceRatio(listedMedian.price, mtgjsonPricing.status === "ready" ? mtgjsonPricing.price : null)
+      : null;
     const override = row.priceOverride === null ? null : parsePrice(row.priceOverride);
     const automaticPrice = applyMinimumPrice(
       automatic.price,
@@ -611,6 +733,9 @@ export default function PricingPanel({
       price: row.priceOverride === null ? automaticPrice : overridePrice,
       source: row.priceOverride === null ? automatic.source : "manual",
       isManual: row.priceOverride !== null,
+      varianceRatio,
+      comparisonPrice: mtgjsonPricing.status === "ready" ? mtgjsonPricing.price : null,
+      listedMedianPrice: listedMedian?.status === "ready" ? listedMedian.price : null,
     };
   }
 
@@ -661,7 +786,40 @@ export default function PricingPanel({
     }
   }
 
-  function printPricingReceipt() {
+  async function printCalibrationReceipt() {
+    const printWindow = window.open("", "_blank");
+    if (!printWindow) {
+      onMessage("Print window was blocked.");
+      return;
+    }
+    printWindow.document.write("<!doctype html><title>Preparing logo calibration...</title><p>Preparing logo calibration...</p>");
+    try {
+      const processedLogoUrl = await preprocessReceiptLogo(
+        new URL(logoUrl, window.location.origin).href,
+        receiptLogoDarkness,
+      );
+      printWindow.document.open();
+      printWindow.document.write(`<!doctype html><html><head><title>RRG Logo Calibration ${receiptLogoDarkness}%</title><style>
+        @page { size: 80mm auto; margin: 2mm; }
+        * { box-sizing: border-box; }
+        body { width: 76mm; margin: 0 auto; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; text-align: center; }
+        img { display: block; width: 28mm; height: 28mm; margin: 3mm auto 1.5mm; object-fit: contain; }
+        strong { display: block; font-size: 13pt; }
+        span { display: block; margin-top: .75mm; font-size: 9pt; }
+        @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
+      </style></head><body><img src="${processedLogoUrl}" alt=""><strong>${receiptLogoDarkness}%</strong><span>Receipt logo darkness</span></body></html>`);
+      printWindow.document.close();
+      setTimeout(() => {
+        printWindow.focus();
+        printWindow.print();
+      }, 250);
+    } catch (error) {
+      printWindow.close();
+      onMessage(error instanceof Error ? error.message : "The calibration receipt could not be prepared.");
+    }
+  }
+
+  async function printPricingReceipt() {
     if (!canPrintReceipt) {
       onMessage(unpricedFoundCount
         ? "Finish pricing every found row before printing."
@@ -695,8 +853,19 @@ export default function PricingPanel({
     const notFoundRows = includeNotFound ? notFoundCards.map((item) => `
       <div class="missing-row"><strong>${item.quantity}</strong><span>${escapeHtml(item.cardName)}</span></div>
     `).join("") : "";
-    const absoluteLogoUrl = new URL(logoUrl, window.location.origin).href;
+    let processedLogoUrl: string;
+    try {
+      processedLogoUrl = await preprocessReceiptLogo(
+        new URL(logoUrl, window.location.origin).href,
+        receiptLogoDarkness,
+      );
+    } catch (error) {
+      printWindow.close();
+      onMessage(error instanceof Error ? error.message : "The pricing receipt could not be prepared.");
+      return;
+    }
 
+    printWindow.document.open();
     printWindow.document.write(`<!doctype html>
       <html><head><title>RRG Priced Pull List</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Luckiest+Guy&display=swap" rel="stylesheet"><style>
         @page { size: 80mm auto; margin: 2mm; }
@@ -727,7 +896,7 @@ export default function PricingPanel({
         .thanks { margin-top: 2mm; color: #555; font-size: 7.5pt; font-style: italic; text-align: center; }
         @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
       </style></head><body>
-        <header class="brand"><img src="${escapeHtml(absoluteLogoUrl)}" alt=""><h1>Priced Pull List</h1></header>
+        <header class="brand"><img src="${processedLogoUrl}" alt=""><h1>Priced Pull List</h1></header>
         <section class="customer">
           <strong>${escapeHtml(customer.name || "Customer")}</strong>
           ${customer.contact ? `<div>${escapeHtml(customer.contact)}</div>` : ""}
@@ -751,18 +920,24 @@ export default function PricingPanel({
     <section className="pricing-section">
       <div className="section-heading pricing-heading">
         <div>
-          <h2>Pricing Assistant <span className="experimental-pill">Experimental</span></h2>
+          <h2>Pricing Assistant <span className="experimental-pill">THIS IS STILL EXPERIMENTAL</span></h2>
         </div>
         <div className="actions">
           <select
             className="pricing-source-selector"
             value={pricingSource}
-            onChange={(event) => setPricingSource(event.target.value)}
+            onChange={(event) => {
+              const source = event.target.value;
+              setPricingSource(source);
+              if (source === "cardmarket:retail" && eurUsdRate.status === "error") {
+                setEurUsdRate({ status: "idle", rate: null, date: "" });
+              }
+            }}
             aria-label="Automatic pricing source"
             title="Choose the automatic price used for found cards"
           >
             <option value="tcgplayer-listed-median">TCGPlayer Listed Median</option>
-            {mtgjsonPriceSources.map((source) => (
+            {selectableMtgjsonPriceSources(mtgjsonPriceSources).map((source) => (
               <option value={source.key} key={source.key}>{mtgjsonPriceSourceLabel(source)}</option>
             ))}
           </select>
@@ -772,10 +947,48 @@ export default function PricingPanel({
           <button className="icon-button" type="button" onClick={refreshPricingIndex} disabled={isRefreshing} title="Rebuild the MTGJSON pricing index">
             {isRefreshing ? <Loader2 size={17} className="spin" /> : <span className="pricing-refresh-label">MTGJSON</span>}
           </button>
-          <label className="pricing-print-option" title="Include requested cards that were not found beneath the receipt total">
-            <input type="checkbox" checked={includeNotFound} onChange={(event) => setIncludeNotFound(event.target.checked)} />
-            <span>Not Found</span>
-          </label>
+          <div className="receipt-settings" ref={receiptSettingsRef}>
+            <button
+              className={`icon-button ${receiptSettingsOpen ? "is-active" : ""}`}
+              type="button"
+              onClick={() => setReceiptSettingsOpen((open) => !open)}
+              title="Receipt print settings"
+              aria-label="Receipt print settings"
+              aria-haspopup="dialog"
+              aria-expanded={receiptSettingsOpen}
+            >
+              <Settings size={17} />
+            </button>
+            {receiptSettingsOpen && (
+              <div className="receipt-settings-panel" role="dialog" aria-label="Receipt print settings">
+                <label className="receipt-not-found-toggle" title="Include requested cards that were not found beneath the receipt total">
+                  <input type="checkbox" checked={includeNotFound} onChange={(event) => setIncludeNotFound(event.target.checked)} />
+                  <span>Print Not Found</span>
+                </label>
+                <section className="receipt-logo-settings" aria-labelledby="receipt-logo-settings-title">
+                  <div className="receipt-settings-title">
+                    <strong id="receipt-logo-settings-title">Receipt logo</strong>
+                    <output>{receiptLogoDarkness}%</output>
+                  </div>
+                  <label className="receipt-darkness-label" htmlFor="receipt-logo-darkness">Darkness</label>
+                  <input
+                    className="receipt-darkness-slider"
+                    id="receipt-logo-darkness"
+                    type="range"
+                    min="20"
+                    max="100"
+                    step="5"
+                    value={receiptLogoDarkness}
+                    onChange={(event) => setReceiptLogoDarkness(Number(event.target.value))}
+                  />
+                  <button type="button" className="receipt-calibration-button" onClick={() => void printCalibrationReceipt()}>
+                    <Printer size={15} />
+                    <span>Print calibration</span>
+                  </button>
+                </section>
+              </div>
+            )}
+          </div>
           <button className="icon-button primary" type="button" onClick={printPricingReceipt} disabled={!canPrintReceipt} title={unpricedFoundCount ? "Finish pricing every found row before printing" : "Print branded pricing receipt"}>
             <Printer size={18} /><span>Print Pricing</span>
           </button>
@@ -790,7 +1003,7 @@ export default function PricingPanel({
       ) : (
         <>
           <div className="pricing-column-labels" aria-hidden="true">
-            <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>{pricingSource === "tcgplayer-listed-median" ? "Each (TCG)" : "Each"}</span><span>Actions</span>
+            <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>Condition</span><span>{pricingSource === "tcgplayer-listed-median" ? "Each (TCG)" : "Each"}</span><span>Actions</span>
           </div>
           <div className="pricing-groups">
             {groups.map((group) => (
@@ -843,9 +1056,18 @@ export default function PricingPanel({
                     ? `https://www.tcgplayer.com/product/${encodeURIComponent(tcgplayerProductId)}`
                     : "";
                   const tcgplayerSearchUrl = tcgplayerCardSearchUrl(row.cardName);
+                  const needsVarianceReview = pricingSource === "tcgplayer-listed-median"
+                    && !pricing.isManual
+                    && requiresPriceVarianceReview(pricing.listedMedianPrice, pricing.comparisonPrice);
+                  const variancePercent = pricing.varianceRatio === null
+                    ? 0
+                    : Math.round(pricing.varianceRatio * 100);
+                  const varianceMessage = needsVarianceReview
+                    ? `Manual price check: TCGplayer Listed Median ${currencySymbol}${pricing.listedMedianPrice?.toFixed(2)} is ${Math.abs(variancePercent)}% ${variancePercent > 0 ? "higher" : "lower"} than MTGJSON ${currencySymbol}${pricing.comparisonPrice?.toFixed(2)}.`
+                    : "";
 
                   return (
-                    <div className={`pricing-row ${!row.found ? "is-awaiting-found" : ""}`} key={row.id}>
+                    <div className={`pricing-row ${!row.found ? "is-awaiting-found" : ""} ${needsVarianceReview ? "is-price-review" : ""}`} key={row.id}>
                       <div className="pricing-found-cell">
                         <input
                           type="checkbox"
@@ -935,7 +1157,7 @@ export default function PricingPanel({
                             : <span className="set-symbol-placeholder" aria-hidden="true">—</span>}
                           <span className="pricing-printing-trigger-label">
                             <strong>{selectedEdition?.setCode || (row.resolved ? "Unavailable" : "Needs review")}</strong>
-                            {selectedEdition && <span>— {selectedEdition.setName}</span>}
+                            {selectedEdition && <span>: {selectedEdition.setName}</span>}
                           </span>
                           <ChevronDown size={14} aria-hidden="true" />
                         </button>
@@ -1008,6 +1230,19 @@ export default function PricingPanel({
                         {treatments.map((treatment) => <option value={treatment} key={treatment}>{TREATMENT_LABELS[treatment] || treatment}</option>)}
                       </select>
 
+                      <select
+                        value="near-mint"
+                        disabled
+                        aria-label={`Condition for ${row.cardName}; condition pricing is coming soon`}
+                        title="Condition pricing is coming soon"
+                      >
+                        <option value="near-mint">NM</option>
+                        <option value="lightly-played">LP</option>
+                        <option value="moderately-played">MP</option>
+                        <option value="heavily-played">HP</option>
+                        <option value="damaged">Damaged</option>
+                      </select>
+
                       <div className={`pricing-price ${row.priceOverride !== null ? "is-manual" : ""} ${row.found && !priceIsValid && row.setCode ? "is-missing" : ""}`}>
                         <span>{currencySymbol}</span>
                         <input
@@ -1048,7 +1283,17 @@ export default function PricingPanel({
                       </div>
 
                       <div className="pricing-row-actions">
-                        <button type="button" disabled={!controlsEnabled} onClick={() => duplicateRow(row)} title="Split across another printing" aria-label={`Duplicate ${row.cardName}`}><CopyPlus size={17} /></button>
+                        {needsVarianceReview && (
+                          <a
+                            className="pricing-variance-warning"
+                            href={tcgplayerUrl || tcgplayerSearchUrl}
+                            target="_blank"
+                            rel="noreferrer"
+                            title={`${varianceMessage} Open TCGplayer to review.`}
+                            aria-label={`${varianceMessage} Open TCGplayer to review.`}
+                          ><AlertTriangle size={18} /></a>
+                        )}
+                        <button type="button" disabled={!controlsEnabled} onClick={() => duplicateRow(row)} title="Break out into another printing" aria-label={`Break out ${row.cardName} into another printing`}><CornerDownLeft size={17} /></button>
                         {groupCanRemove && <button type="button" onClick={() => removeRow(row.id)} title="Remove this split row" aria-label={`Remove split ${row.cardName}`}><Trash2 size={16} /></button>}
                       </div>
                     </div>

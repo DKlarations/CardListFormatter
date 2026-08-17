@@ -26,6 +26,9 @@ var LEGACY_MTGJSON_PRICE_SOURCES = [
   { key: "tcgplayer:retail", provider: "tcgplayer", listType: "retail", currency: "USD" },
   { key: "cardkingdom:retail", provider: "cardkingdom", listType: "retail", currency: "USD" }
 ];
+function selectableMtgjsonPriceSources(sources) {
+  return sources.filter((source) => source.key !== "cardkingdom:buylist");
+}
 function mtgjsonPriceSourceLabel(source) {
   const providerLabels = {
     cardkingdom: "Card Kingdom",
@@ -41,6 +44,18 @@ function priceCurrencySymbol(currency = "USD") {
   if (currency === "EUR") return "\u20AC";
   if (currency === "GBP") return "\xA3";
   return currency === "USD" ? "$" : `${currency} `;
+}
+function convertCurrencyPrice(value, rate) {
+  if (value === null || rate === null || !Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return null;
+  return Math.round(value * rate * 100) / 100;
+}
+function priceVarianceRatio(primaryPrice, comparisonPrice) {
+  if (primaryPrice === null || comparisonPrice === null || !Number.isFinite(primaryPrice) || !Number.isFinite(comparisonPrice) || comparisonPrice <= 0) return null;
+  return (primaryPrice - comparisonPrice) / comparisonPrice;
+}
+function requiresPriceVarianceReview(listedMedianPrice, comparisonPrice, varianceThreshold = 0.5, minimumCardValue = 4) {
+  const ratio = priceVarianceRatio(listedMedianPrice, comparisonPrice);
+  return listedMedianPrice !== null && listedMedianPrice >= minimumCardValue && ratio !== null && Math.abs(ratio) >= varianceThreshold;
 }
 function pricingNameKey(value) {
   return String(value || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^\w/ ]+/g, "").replace(/\s+/g, " ").trim();
@@ -68,9 +83,18 @@ function editionOptions(card) {
   });
   return Array.from(editions.values()).sort((a, b) => b.releaseDate.localeCompare(a.releaseDate) || a.setCode.localeCompare(b.setCode));
 }
-function preferredDefaultEdition(card) {
+function localDateKey(date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0")
+  ].join("-");
+}
+function preferredDefaultEdition(card, referenceDate = /* @__PURE__ */ new Date()) {
   const editions = editionOptions(card);
-  return editions.find((edition) => edition.setCode.toUpperCase() !== "SLD" && !/secret\s+lair/i.test(edition.setName)) || editions[0] || null;
+  const today = typeof referenceDate === "string" ? referenceDate.slice(0, 10) : localDateKey(referenceDate);
+  const releasedEditions = editions.filter((edition) => /^\d{4}-\d{2}-\d{2}$/.test(edition.releaseDate) && edition.releaseDate <= today);
+  return releasedEditions.find((edition) => edition.setCode.toUpperCase() !== "SLD" && !/secret\s+lair/i.test(edition.setName)) || releasedEditions[0] || null;
 }
 function treatmentOptions(card, setCode) {
   if (!card || !setCode) return ["standard"];
@@ -218,6 +242,7 @@ export {
   TREATMENT_LABELS,
   applyMinimumPrice,
   cardFromCatalog,
+  convertCurrencyPrice,
   editionOptions,
   finishOptions,
   formatPrice,
@@ -228,6 +253,7 @@ export {
   preferredDefaultEdition,
   priceCurrencySymbol,
   priceForSelection,
+  priceVarianceRatio,
   priceWithListedMedianFallback,
   pricingNameKey,
   pricingQuantityMaximum,
@@ -235,6 +261,8 @@ export {
   printingsForSelection,
   receiptTreatment,
   remainingRequestedQuantity,
+  requiresPriceVarianceReview,
+  selectableMtgjsonPriceSources,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
   treatmentOptions

@@ -7,7 +7,6 @@ import {
   Clipboard,
   Copy,
   Bug,
-  DollarSign,
   Download,
   Loader2,
   Printer,
@@ -173,7 +172,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.4.1</span>
+              <span>v0.4.4</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -242,8 +241,6 @@ function App() {
   const [useMtgjson, setUseMtgjson] = useState(true);
   const [useScryfall, setUseScryfall] = useState(true);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
-  const [showPricing, setShowPricing] = useState(false);
-  const [hasOpenedPricing, setHasOpenedPricing] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefreshingMtgjson, setIsRefreshingMtgjson] = useState(false);
   const [mtgjsonUpdateLabel, setMtgjsonUpdateLabel] = useState("MTGJSON update unknown");
@@ -265,6 +262,7 @@ function App() {
     () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes, processedAt) : preloadedOutput),
     [outputCustomer, resolvedItems, useCheckboxes, processedAt, preloadedOutput],
   );
+  const showPricing = Boolean(processedAt && output);
   const totalQuantity = parsed.cards.reduce((sum, item) => sum + item.quantity, 0);
   const needsReview = resolvedItems.length
     ? resolvedItems.filter((item) => item.status !== "found").length
@@ -380,7 +378,7 @@ function App() {
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const providerOptions = { useMtgjson, useScryfall, pricingMode: showPricing };
+      const providerOptions = { useMtgjson, useScryfall, pricingMode: true };
       const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
       const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
 
@@ -428,7 +426,7 @@ function App() {
         recentCaseSets = await fetchRecentCaseSets();
       }
 
-      const providerOptions = { useMtgjson, useScryfall, pricingMode: showPricing };
+      const providerOptions = { useMtgjson, useScryfall, pricingMode: true };
       const namesResolved = await resolveCardNames(
         reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
         setMessage,
@@ -575,7 +573,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.4.1</span>
+              <span>v0.4.4</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -711,10 +709,10 @@ function App() {
           />
         </section>
 
-        {hasOpenedPricing && (
+        {showPricing && (
           <Suspense fallback={showPricing ? <div className="pricing-loading-panel">Loading pricing assistant…</div> : null}>
             <PricingPanel
-              visible={showPricing}
+              visible
               items={resolvedItems}
               customer={outputCustomer || {}}
               processedAt={processedAt}
@@ -799,21 +797,8 @@ function App() {
               />
               <Bug size={12} />
             </label>
-            <label className="quiet-footer-toggle pricing-mode-toggle" title="Show experimental pricing assistant">
-              <input
-                type="checkbox"
-                checked={showPricing}
-                aria-label="Show pricing assistant"
-                onChange={(event) => {
-                  const enabled = event.target.checked;
-                  setShowPricing(enabled);
-                  if (enabled) setHasOpenedPricing(true);
-                }}
-              />
-              <DollarSign size={12} />
-            </label>
           </div>
-          <p className="work-note">Updated 8/9/26, Continue to let me know if and when this breaks! -Derek</p>
+          <p className="work-note">Updated 8/16/26, Continue to let me know if and when this breaks! -Derek</p>
         </div>
       </section>
     </main>

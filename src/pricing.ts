@@ -80,6 +80,10 @@ export const LEGACY_MTGJSON_PRICE_SOURCES: MtgjsonPriceSourceOption[] = [
   { key: "cardkingdom:retail", provider: "cardkingdom", listType: "retail", currency: "USD" },
 ];
 
+export function selectableMtgjsonPriceSources(sources: MtgjsonPriceSourceOption[]) {
+  return sources.filter((source) => source.key !== "cardkingdom:buylist");
+}
+
 export function mtgjsonPriceSourceLabel(source: MtgjsonPriceSourceOption) {
   const providerLabels: Record<string, string> = {
     cardkingdom: "Card Kingdom",
@@ -96,6 +100,35 @@ export function priceCurrencySymbol(currency = "USD") {
   if (currency === "EUR") return "€";
   if (currency === "GBP") return "£";
   return currency === "USD" ? "$" : `${currency} `;
+}
+
+export function convertCurrencyPrice(value: number | null, rate: number | null) {
+  if (value === null || rate === null || !Number.isFinite(value) || !Number.isFinite(rate) || rate <= 0) return null;
+  return Math.round(value * rate * 100) / 100;
+}
+
+export function priceVarianceRatio(primaryPrice: number | null, comparisonPrice: number | null) {
+  if (
+    primaryPrice === null
+      || comparisonPrice === null
+      || !Number.isFinite(primaryPrice)
+      || !Number.isFinite(comparisonPrice)
+      || comparisonPrice <= 0
+  ) return null;
+  return (primaryPrice - comparisonPrice) / comparisonPrice;
+}
+
+export function requiresPriceVarianceReview(
+  listedMedianPrice: number | null,
+  comparisonPrice: number | null,
+  varianceThreshold = 0.5,
+  minimumCardValue = 4,
+) {
+  const ratio = priceVarianceRatio(listedMedianPrice, comparisonPrice);
+  return listedMedianPrice !== null
+    && listedMedianPrice >= minimumCardValue
+    && ratio !== null
+    && Math.abs(ratio) >= varianceThreshold;
 }
 
 export function pricingNameKey(value: string) {
@@ -145,12 +178,30 @@ export function editionOptions(card: PricingCard | null) {
   ));
 }
 
-export function preferredDefaultEdition(card: PricingCard | null) {
+function localDateKey(date: Date) {
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+  ].join("-");
+}
+
+export function preferredDefaultEdition(
+  card: PricingCard | null,
+  referenceDate: Date | string = new Date(),
+) {
   const editions = editionOptions(card);
-  return editions.find((edition) => (
+  const today = typeof referenceDate === "string"
+    ? referenceDate.slice(0, 10)
+    : localDateKey(referenceDate);
+  const releasedEditions = editions.filter((edition) => (
+    /^\d{4}-\d{2}-\d{2}$/.test(edition.releaseDate)
+      && edition.releaseDate <= today
+  ));
+  return releasedEditions.find((edition) => (
     edition.setCode.toUpperCase() !== "SLD"
       && !/secret\s+lair/i.test(edition.setName)
-  )) || editions[0] || null;
+  )) || releasedEditions[0] || null;
 }
 
 export function treatmentOptions(card: PricingCard | null, setCode: string) {

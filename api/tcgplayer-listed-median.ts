@@ -34,7 +34,7 @@ export async function GET(request: Request) {
     const entries = await Promise.all(productIds.map(async (productId) => {
       const headers = {
         Accept: "application/json",
-        "User-Agent": "Mozilla/5.0 (compatible; rrg-pull-list-formatter/0.4.1)",
+        "User-Agent": "Mozilla/5.0 (compatible; rrg-pull-list-formatter/0.4.4)",
       };
       const [detailsResponse, pricePointsResponse] = await Promise.all([
         fetch(`https://mp-search-api.tcgplayer.com/v1/product/${productId}/details`, {

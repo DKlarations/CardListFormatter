@@ -3,11 +3,13 @@ import test from "node:test";
 
 import {
   applyMinimumPrice,
+  convertCurrencyPrice,
   editionOptions,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
   preferredDefaultEdition,
   priceCurrencySymbol,
+  priceVarianceRatio,
   priceWithListedMedianFallback,
   priceForSelection,
   pricingNameKey,
@@ -15,6 +17,8 @@ import {
   pricingShardKey,
   remainingRequestedQuantity,
   receiptTreatment,
+  requiresPriceVarianceReview,
+  selectableMtgjsonPriceSources,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
 } from "../api/server-pricing.mjs";
@@ -72,7 +76,29 @@ test("defaults to the newest printing that is not a Secret Lair", () => {
       { ...basePrinting, uuid: "2xm-dark-confidant", setCode: "2XM", setName: "Double Masters", releaseDate: "2020-08-07" },
     ],
   };
-  assert.equal(preferredDefaultEdition(card).setCode, "2XM");
+  assert.equal(preferredDefaultEdition(card, "2026-08-16").setCode, "2XM");
+});
+
+test("does not default to an announced printing before its release date", () => {
+  const card = {
+    name: "Godless Shrine",
+    printings: [
+      { ...basePrinting, uuid: "eoe-godless-shrine", setCode: "EOE", setName: "Edge of Eternities", releaseDate: "2025-08-01" },
+      { ...basePrinting, uuid: "trK-godless-shrine", setCode: "TRK", setName: "Star Trek", releaseDate: "2026-11-06" },
+    ],
+  };
+  assert.equal(preferredDefaultEdition(card, "2026-08-16").setCode, "EOE");
+  assert.equal(preferredDefaultEdition(card, "2026-11-06").setCode, "TRK");
+});
+
+test("leaves the default empty when every known printing is unreleased", () => {
+  const card = {
+    name: "Future Card",
+    printings: [
+      { ...basePrinting, uuid: "future-card", setCode: "FTR", setName: "Future Set", releaseDate: "2027-01-01" },
+    ],
+  };
+  assert.equal(preferredDefaultEdition(card, "2026-08-16"), null);
 });
 
 test("builds a generic TCGplayer Magic search for manual price lookup", () => {
@@ -178,6 +204,28 @@ test("uses MTGJSON only when TCGplayer Listed Median is unavailable", () => {
   assert.equal(fallback.price, 2.65);
   assert.equal(fallback.source, "tcgplayer");
   assert.match(fallback.message, /Using MTGJSON fallback/);
+});
+
+test("flags Listed Median variance at fifty percent for cards worth at least four dollars", () => {
+  assert.equal(requiresPriceVarianceReview(15, 10), true);
+  assert.equal(requiresPriceVarianceReview(5, 10), true);
+  assert.equal(requiresPriceVarianceReview(14.99, 10), false);
+  assert.equal(requiresPriceVarianceReview(3.99, 8), false);
+  assert.equal(requiresPriceVarianceReview(4, 8), true);
+  assert.equal(priceVarianceRatio(10, 0), null);
+});
+
+test("removes Card Kingdom buylist and converts Cardmarket prices to USD", () => {
+  assert.deepEqual(
+    selectableMtgjsonPriceSources([
+      { key: "cardkingdom:retail", provider: "cardkingdom", listType: "retail", currency: "USD" },
+      { key: "cardkingdom:buylist", provider: "cardkingdom", listType: "buylist", currency: "USD" },
+      { key: "cardmarket:retail", provider: "cardmarket", listType: "retail", currency: "EUR" },
+    ]).map((source) => source.key),
+    ["cardkingdom:retail", "cardmarket:retail"],
+  );
+  assert.equal(convertCurrencyPrice(4.25, 1.1556), 4.91);
+  assert.equal(convertCurrencyPrice(4.25, null), null);
 });
 
 test("applies the store price floor with the standard nonfoil basic-land exception", () => {
