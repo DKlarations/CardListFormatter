@@ -33,6 +33,7 @@ import {
 import { decodeFormatterHash } from "./share-link";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
+import receiptLogo from "../images/Logo-LineArt.png";
 
 const PricingPanel = lazy(() => import("./PricingPanel"));
 
@@ -717,7 +718,7 @@ function App() {
               customer={outputCustomer || {}}
               processedAt={processedAt}
               apiOrigin={formatterApiOrigin()}
-              logoUrl={rrgLogo}
+              logoUrl={receiptLogo}
               onMessage={setMessage}
             />
           </Suspense>

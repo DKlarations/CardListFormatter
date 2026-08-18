@@ -107,48 +107,6 @@ type PrintingMenuPosition = {
   maxHeight: number;
 };
 
-const RECEIPT_LOGO_DARKNESS_KEY = "rrg-receipt-logo-darkness";
-
-function storedReceiptLogoDarkness() {
-  if (typeof window === "undefined") return 100;
-  const stored = Number(window.localStorage.getItem(RECEIPT_LOGO_DARKNESS_KEY));
-  return Number.isFinite(stored) && stored >= 20 && stored <= 100 ? stored : 100;
-}
-
-async function preprocessReceiptLogo(url: string, darkness: number) {
-  const image = new Image();
-  image.decoding = "async";
-  await new Promise<void>((resolve, reject) => {
-    image.onload = () => resolve();
-    image.onerror = () => reject(new Error("The receipt logo could not be prepared for printing."));
-    image.src = url;
-  });
-
-  const canvas = document.createElement("canvas");
-  canvas.width = image.naturalWidth;
-  canvas.height = image.naturalHeight;
-  const context = canvas.getContext("2d", { willReadFrequently: true });
-  if (!context) throw new Error("The receipt logo could not be prepared for printing.");
-
-  context.fillStyle = "#fff";
-  context.fillRect(0, 0, canvas.width, canvas.height);
-  context.drawImage(image, 0, 0);
-
-  const strength = Math.max(0.2, Math.min(1, darkness / 100));
-  if (strength < 1) {
-    const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
-    for (let index = 0; index < pixels.data.length; index += 4) {
-      pixels.data[index] = 255 - ((255 - pixels.data[index]) * strength);
-      pixels.data[index + 1] = 255 - ((255 - pixels.data[index + 1]) * strength);
-      pixels.data[index + 2] = 255 - ((255 - pixels.data[index + 2]) * strength);
-      pixels.data[index + 3] = 255;
-    }
-    context.putImageData(pixels, 0, 0);
-  }
-
-  return canvas.toDataURL("image/png");
-}
-
 function rowId(groupId: string) {
   return `${groupId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
@@ -329,7 +287,6 @@ export default function PricingPanel({
   const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
   const [includeNotFound, setIncludeNotFound] = useState(true);
   const [receiptSettingsOpen, setReceiptSettingsOpen] = useState(false);
-  const [receiptLogoDarkness, setReceiptLogoDarkness] = useState(storedReceiptLogoDarkness);
   const [eurUsdRate, setEurUsdRate] = useState<EurUsdRate>({ status: "idle", rate: null, date: "" });
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
@@ -341,10 +298,6 @@ export default function PricingPanel({
   const requestedMedianIdsRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    window.localStorage.setItem(RECEIPT_LOGO_DARKNESS_KEY, String(receiptLogoDarkness));
-  }, [receiptLogoDarkness]);
 
   useEffect(() => {
     if (!receiptSettingsOpen) return;
@@ -786,39 +739,6 @@ export default function PricingPanel({
     }
   }
 
-  async function printCalibrationReceipt() {
-    const printWindow = window.open("", "_blank");
-    if (!printWindow) {
-      onMessage("Print window was blocked.");
-      return;
-    }
-    printWindow.document.write("<!doctype html><title>Preparing logo calibration...</title><p>Preparing logo calibration...</p>");
-    try {
-      const processedLogoUrl = await preprocessReceiptLogo(
-        new URL(logoUrl, window.location.origin).href,
-        receiptLogoDarkness,
-      );
-      printWindow.document.open();
-      printWindow.document.write(`<!doctype html><html><head><title>RRG Logo Calibration ${receiptLogoDarkness}%</title><style>
-        @page { size: 80mm auto; margin: 2mm; }
-        * { box-sizing: border-box; }
-        body { width: 76mm; margin: 0 auto; color: #111; background: #fff; font-family: Arial, Helvetica, sans-serif; text-align: center; }
-        img { display: block; width: 28mm; height: 28mm; margin: 3mm auto 1.5mm; object-fit: contain; }
-        strong { display: block; font-size: 13pt; }
-        span { display: block; margin-top: .75mm; font-size: 9pt; }
-        @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
-      </style></head><body><img src="${processedLogoUrl}" alt=""><strong>${receiptLogoDarkness}%</strong><span>Receipt logo darkness</span></body></html>`);
-      printWindow.document.close();
-      setTimeout(() => {
-        printWindow.focus();
-        printWindow.print();
-      }, 250);
-    } catch (error) {
-      printWindow.close();
-      onMessage(error instanceof Error ? error.message : "The calibration receipt could not be prepared.");
-    }
-  }
-
   async function printPricingReceipt() {
     if (!canPrintReceipt) {
       onMessage(unpricedFoundCount
@@ -853,17 +773,7 @@ export default function PricingPanel({
     const notFoundRows = includeNotFound ? notFoundCards.map((item) => `
       <div class="missing-row"><strong>${item.quantity}</strong><span>${escapeHtml(item.cardName)}</span></div>
     `).join("") : "";
-    let processedLogoUrl: string;
-    try {
-      processedLogoUrl = await preprocessReceiptLogo(
-        new URL(logoUrl, window.location.origin).href,
-        receiptLogoDarkness,
-      );
-    } catch (error) {
-      printWindow.close();
-      onMessage(error instanceof Error ? error.message : "The pricing receipt could not be prepared.");
-      return;
-    }
+    const receiptLogoUrl = new URL(logoUrl, window.location.origin).href;
 
     printWindow.document.open();
     printWindow.document.write(`<!doctype html>
@@ -896,7 +806,7 @@ export default function PricingPanel({
         .thanks { margin-top: 2mm; color: #555; font-size: 7.5pt; font-style: italic; text-align: center; }
         @media print { body { print-color-adjust: exact; -webkit-print-color-adjust: exact; } }
       </style></head><body>
-        <header class="brand"><img src="${processedLogoUrl}" alt=""><h1>Priced Pull List</h1></header>
+        <header class="brand"><img src="${receiptLogoUrl}" alt=""><h1>Priced Pull List</h1></header>
         <section class="customer">
           <strong>${escapeHtml(customer.name || "Customer")}</strong>
           ${customer.contact ? `<div>${escapeHtml(customer.contact)}</div>` : ""}
@@ -965,27 +875,6 @@ export default function PricingPanel({
                   <input type="checkbox" checked={includeNotFound} onChange={(event) => setIncludeNotFound(event.target.checked)} />
                   <span>Print Not Found</span>
                 </label>
-                <section className="receipt-logo-settings" aria-labelledby="receipt-logo-settings-title">
-                  <div className="receipt-settings-title">
-                    <strong id="receipt-logo-settings-title">Receipt logo</strong>
-                    <output>{receiptLogoDarkness}%</output>
-                  </div>
-                  <label className="receipt-darkness-label" htmlFor="receipt-logo-darkness">Darkness</label>
-                  <input
-                    className="receipt-darkness-slider"
-                    id="receipt-logo-darkness"
-                    type="range"
-                    min="20"
-                    max="100"
-                    step="5"
-                    value={receiptLogoDarkness}
-                    onChange={(event) => setReceiptLogoDarkness(Number(event.target.value))}
-                  />
-                  <button type="button" className="receipt-calibration-button" onClick={() => void printCalibrationReceipt()}>
-                    <Printer size={15} />
-                    <span>Print calibration</span>
-                  </button>
-                </section>
               </div>
             )}
           </div>
