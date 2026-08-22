@@ -23,6 +23,7 @@ import {
   cardFromCatalog,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
+  createPricingRowsFromFormatterItems,
   editionOptions,
   finishChoiceKey,
   finishChoices,
@@ -32,8 +33,6 @@ import {
   minimumPriceForSelection,
   mtgjsonPriceSourceLabel,
   parsePrice,
-  preferredDefaultTreatment,
-  preferredPrintingSelection,
   priceCurrencySymbol,
   priceVarianceRatio,
   priceWithListedMedianFallback,
@@ -43,6 +42,7 @@ import {
   shouldShowPricingVariant,
   pricingNameKey,
   pricingIndexSupportsPhysicalDimensions,
+  pricingRowWarningState,
   pricingQuantityMaximum,
   pricingShardKey,
   remainingRequestedQuantity,
@@ -53,16 +53,17 @@ import {
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
   tcgplayerProductIdsForSelection,
-  treatmentOptions,
   treatmentForFinishChoice,
   createManualPricingRow,
-  normalizePricingAssistantRow,
+  initializeFoundPricingSelection,
+  initializePricingRowSelection,
   normalizePricingPhysicalSelection,
   pricingSelectionForPrintingUuid,
+  reconcilePricingRowsWithFormatterItems,
+  selectManualPricingSet,
   type MtgjsonPriceSourceOption,
   type PricingCatalog,
   type PricingAssistantRowState,
-  type PricingAssistantState,
   type PricingFinish,
 } from "./pricing";
 import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
@@ -77,8 +78,6 @@ type PricingPanelProps = {
   apiOrigin: string;
   logoUrl: string;
   onMessage: (message: string) => void;
-  initialState?: PricingAssistantState | null;
-  onStateChange?: (state: PricingAssistantState) => void;
 };
 
 type PricingManifest = {
@@ -121,39 +120,6 @@ type PrintingMenuPosition = {
 
 function rowId(groupId: string) {
   return `${groupId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
-
-function createPricingRows(items: any[]): PricingRow[] {
-  return sortItemsForOutput(items).map((item, order) => {
-    const groupId = `card-${item.index ?? order}-${pricingNameKey(item.inputName || String(order)).replace(/[^a-z0-9]/g, "-")}`;
-    const requestedQuantity = Math.max(1, Number(item.quantity) || 1);
-    const isBasicLand = Boolean(item.isBasicLand);
-    const canonicalName = item.card?.name || outputDisplayName(item);
-    const displayName = item.alternateTitle || item.requestedDisplayName || canonicalName;
-    return {
-      id: `${groupId}-original`,
-      groupId,
-      sourceIndex: item.index ?? order,
-      requestedQuantity,
-      isBasicLand,
-      quantity: pricingQuantityMaximum(requestedQuantity, 0),
-      found: false,
-      resolved: item.status === "found",
-      displayName,
-      canonicalName,
-      requestedFlavorName: item.alternateTitle || item.requestedDisplayName || "",
-      requestedSetCode: item.requestedPrinting?.setCode || "",
-      requestedFinish: item.requestedPrinting?.finish,
-      requestedFoilTreatment: item.requestedPrinting?.foilTreatment,
-      requestedTreatment: item.requestedPrinting?.treatment || "",
-      setCode: "",
-      selectedPrintingUuid: "",
-      finish: "normal",
-      treatment: "standard",
-      foilTreatment: "standard",
-      priceOverride: null,
-    };
-  });
 }
 
 function escapeHtml(value: unknown) {
@@ -284,59 +250,44 @@ function fallbackCatalogFromItems(items: any[]): PricingCatalog {
   return catalog;
 }
 
+async function fallbackCatalogWithPrintHistories(
+  items: any[],
+  currentCatalog: PricingCatalog,
+  setMessage: (message: string) => void,
+) {
+  // Formatter/Scryfall fallback records intentionally have no MTGJSON prices.
+  // Never let them replace an already hydrated exact-printing catalog entry.
+  let fallbackCatalog = { ...fallbackCatalogFromItems(items), ...currentCatalog };
+  const missingItems = items.filter((item) => {
+    if (item.status !== "found") return false;
+    const canonicalName = item.card?.name || item.mtgjsonCard?.name || outputDisplayName(item);
+    return !cardFromCatalog(fallbackCatalog, canonicalName);
+  });
+  if (!missingItems.length) return fallbackCatalog;
+
+  setMessage("Restoring printing histories for this processed list...");
+  const enriched = await enrichPrintHistories(
+    missingItems.map((item) => ({
+      ...item,
+      // Compact shared items retain canonical identity but not Scryfall's URI.
+      // This asks the existing protected enrichment path to recover it exactly.
+      ...(!item.card?.prints_search_uri ? { lookupSource: "mtgjson" } : {}),
+    })),
+    false,
+    [],
+    setMessage,
+    false,
+    { useMtgjson: true, useScryfall: true, pricingMode: true },
+  );
+  fallbackCatalog = { ...fallbackCatalog, ...fallbackCatalogFromItems(enriched) };
+  return fallbackCatalog;
+}
+
 function rowsWithDefaultPrintings(rows: PricingRow[], catalog: PricingCatalog) {
   return rows.map((row) => {
     if (!row.resolved) return row;
     const card = cardFromCatalog(catalog, row.canonicalName);
-    const editions = editionOptions(card);
-    if (!editions.length) return row;
-    const requestedDefault = preferredPrintingSelection(card, {
-      setCode: row.requestedSetCode,
-      treatment: row.requestedTreatment,
-      finish: row.requestedFinish,
-      foilTreatment: row.requestedFoilTreatment,
-      flavorName: row.requestedFlavorName,
-    });
-    const setCode = editions.some((edition) => edition.setCode === row.setCode)
-      ? row.setCode
-      : requestedDefault?.setCode || "";
-    if (!setCode) return row;
-    const treatments = treatmentOptions(card, setCode);
-    const treatment = row.setCode && treatments.includes(row.treatment)
-      ? row.treatment
-      : requestedDefault && treatments.includes(requestedDefault.treatment)
-        ? requestedDefault.treatment
-        : preferredDefaultTreatment(card, setCode);
-    const choices = finishChoices(card, setCode);
-    const currentChoice = choices.find((choice) => choice.finish === row.finish && choice.foilTreatment === row.foilTreatment);
-    const requestedChoice = choices.find((choice) => (
-      choice.finish === requestedDefault?.finish
-        && choice.foilTreatment === (requestedDefault?.foilTreatment || "standard")
-    ));
-    const finishChoice = currentChoice || requestedChoice || choices[0];
-    if (!finishChoice) return row;
-    const storedPhysicalSelection = {
-      setCode,
-      treatment,
-      finish: finishChoice.finish,
-      foilTreatment: finishChoice.foilTreatment,
-      selectedPrintingUuid: row.selectedPrintingUuid || "",
-    };
-    const hasStoredExactPrinting = Boolean(row.selectedPrintingUuid && card?.printings.some((printing) => (
-      printing.uuid === row.selectedPrintingUuid && printing.setCode === setCode
-    )));
-    const physicalSelection = hasStoredExactPrinting
-      ? pricingSelectionForPrintingUuid(
-        card,
-        storedPhysicalSelection,
-        row.selectedPrintingUuid || "",
-        row.requestedFlavorName,
-      )
-      : normalizePricingPhysicalSelection(card, storedPhysicalSelection, row.requestedFlavorName);
-    return {
-      ...row,
-      ...physicalSelection,
-    };
+    return initializePricingRowSelection(row, card);
   });
 }
 
@@ -348,16 +299,14 @@ export default function PricingPanel({
   apiOrigin,
   logoUrl,
   onMessage,
-  initialState,
-  onStateChange,
 }: PricingPanelProps) {
-  const [rows, setRows] = useState<PricingRow[]>(() => (initialState?.rows || []).map(normalizePricingAssistantRow));
+  const [rows, setRows] = useState<PricingRow[]>([]);
   const [catalog, setCatalog] = useState<PricingCatalog>({});
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [loadMessage, setLoadMessage] = useState("Pricing data loads after a list is processed.");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hydratingRows, setHydratingRows] = useState<Set<string>>(new Set());
-  const [pricingSource, setPricingSource] = useState(() => initialState?.pricingSource || "tcgplayer-listed-median");
+  const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
   const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
   const [includeNotFound, setIncludeNotFound] = useState(true);
   const [receiptSettingsOpen, setReceiptSettingsOpen] = useState(false);
@@ -373,6 +322,9 @@ export default function PricingPanel({
   const catalogRef = useRef<PricingCatalog>({});
   const loadedShardsRef = useRef(new Set<string>());
   const usingLiveFallbackRef = useRef(false);
+  const loadGenerationRef = useRef(0);
+  const hydrationGenerationRef = useRef(0);
+  const hydratingKeysRef = useRef(new Set<string>());
   const requestedMedianIdsRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
@@ -399,16 +351,14 @@ export default function PricingPanel({
       initializedAtRef.current = null;
       return;
     }
-    if (initializedAtRef.current === processedAt) return;
-    initializedAtRef.current = processedAt;
-    setRows(initialState?.rows?.length
-      ? initialState.rows.map(normalizePricingAssistantRow)
-      : createPricingRows(items));
+    const sortedItems = sortItemsForOutput(items);
+    if (initializedAtRef.current !== processedAt) {
+      initializedAtRef.current = processedAt;
+      setRows(createPricingRowsFromFormatterItems(sortedItems));
+      return;
+    }
+    setRows((current) => reconcilePricingRowsWithFormatterItems(current, sortedItems));
   }, [items, processedAt]);
-
-  useEffect(() => {
-    onStateChange?.({ pricingSource, rows });
-  }, [onStateChange, pricingSource, rows]);
 
   const cardNames = useMemo(
     () => Array.from(new Set(rows.filter((row) => row.resolved).map((row) => row.canonicalName))),
@@ -417,6 +367,7 @@ export default function PricingPanel({
   const cardNameSignature = cardNames.join("|");
 
   async function loadPricingData(force = false) {
+    const loadGeneration = ++loadGenerationRef.current;
     if (!cardNames.length) {
       setLoadState("ready");
       setLoadMessage("Unresolved cards can be entered manually.");
@@ -427,9 +378,12 @@ export default function PricingPanel({
     setLoadMessage("Loading MTGJSON pricing printings...");
     try {
       if (force) {
+        hydrationGenerationRef.current += 1;
         manifestRef.current = null;
         loadedShardsRef.current.clear();
         catalogRef.current = {};
+        hydratingKeysRef.current.clear();
+        setHydratingRows(new Set());
         requestedMedianIdsRef.current.clear();
         setListedMedianByProduct({});
         setMtgjsonPriceSources(LEGACY_MTGJSON_PRICE_SOURCES);
@@ -440,9 +394,10 @@ export default function PricingPanel({
           headers: { Accept: "application/json" },
         });
         const manifest = await response.json().catch(() => ({}));
+        if (loadGeneration !== loadGenerationRef.current) return;
         if (!response.ok) throw new Error(manifest.error || "Pricing index is unavailable.");
         if (!pricingIndexSupportsPhysicalDimensions(manifest.version)) {
-          throw new Error("The published pricing index predates exact finish classification.");
+          throw new Error("The published pricing index predates the current physical-printing model.");
         }
         manifestRef.current = manifest;
         if (Array.isArray(manifest.priceSources) && manifest.priceSources.length) {
@@ -461,6 +416,7 @@ export default function PricingPanel({
         const shard = await response.json();
         return { key, cards: shard.cards || {} };
       }));
+      if (loadGeneration !== loadGenerationRef.current) return;
 
       const nextCatalog = { ...catalogRef.current };
       shards.forEach(({ key, cards }) => {
@@ -476,8 +432,21 @@ export default function PricingPanel({
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
         : "Using the selected MTGJSON price listing.");
     } catch (error) {
-      const fallbackCatalog = fallbackCatalogFromItems(items);
+      if (loadGeneration !== loadGenerationRef.current) return;
+      // Compact shared items intentionally omit provider catalogs. Recover their
+      // print histories through the existing throttled/cached enrichment path.
+      // Keep manually resolved cards already merged into the local catalog too.
+      let fallbackCatalog: PricingCatalog;
+      try {
+        fallbackCatalog = await fallbackCatalogWithPrintHistories(items, catalogRef.current, setLoadMessage);
+      } catch {
+        fallbackCatalog = { ...fallbackCatalogFromItems(items), ...catalogRef.current };
+      }
+      if (loadGeneration !== loadGenerationRef.current) return;
       if (Object.keys(fallbackCatalog).length) {
+        const foundRowsToHydrate = force
+          ? rowsWithDefaultPrintings(rows, fallbackCatalog).filter((row) => row.found && row.setCode)
+          : [];
         catalogRef.current = fallbackCatalog;
         setCatalog(fallbackCatalog);
         setRows((current) => rowsWithDefaultPrintings(current, fallbackCatalog));
@@ -486,6 +455,7 @@ export default function PricingPanel({
         setLoadMessage(pricingSource === "tcgplayer-listed-median"
           ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
           : "Printing history is ready. MTGJSON prices load automatically when a card is marked Found.");
+        foundRowsToHydrate.forEach((row) => void hydrateLivePrice(row));
       } else {
         setLoadState("error");
         setLoadMessage(error instanceof Error ? error.message : "Pricing data failed to load.");
@@ -497,6 +467,12 @@ export default function PricingPanel({
     if (!visible || !rows.length) return;
     loadPricingData();
   }, [visible, cardNameSignature, processedAt]);
+
+  useEffect(() => () => {
+    loadGenerationRef.current += 1;
+    hydrationGenerationRef.current += 1;
+    hydratingKeysRef.current.clear();
+  }, []);
 
   useEffect(() => {
     if (pricingSource !== "cardmarket:retail" || eurUsdRate.status !== "idle") return;
@@ -616,9 +592,35 @@ export default function PricingPanel({
           selectedPrintingUuid: update.selectedPrintingUuid === undefined
             ? row.selectedPrintingUuid || ""
             : update.selectedPrintingUuid || "",
-        }, next.requestedFlavorName),
+        }, next.setSelectionSource === "manual" ? "" : next.requestedFlavorName),
       };
     }));
+  }
+
+  function selectPrintingSet(row: PricingRow, setCode: string) {
+    const card = cardFromCatalog(catalog, row.canonicalName);
+    const selection = selectManualPricingSet(row, card, setCode);
+    setRows((current) => current.map((candidate) => (
+      candidate.id === row.id
+        ? selectManualPricingSet(candidate, card, setCode)
+        : candidate
+    )));
+    void hydrateLivePrice(selection, setCode);
+  }
+
+  function updateFoundState(row: PricingRow, found: boolean) {
+    if (!found) {
+      updateRow(row.id, { found: false });
+      return;
+    }
+    const card = cardFromCatalog(catalogRef.current, row.canonicalName);
+    const initialized = initializeFoundPricingSelection(row, card);
+    setRows((current) => current.map((candidate) => (
+      candidate.id === row.id
+        ? initializeFoundPricingSelection(candidate, card)
+        : candidate
+    )));
+    void hydrateLivePrice(initialized);
   }
 
   function selectArtVariant(row: PricingRow, selectedPrintingUuid: string) {
@@ -629,7 +631,7 @@ export default function PricingPanel({
       finish: row.finish,
       foilTreatment: row.foilTreatment || "standard",
       selectedPrintingUuid: row.selectedPrintingUuid || "",
-    }, selectedPrintingUuid, row.requestedFlavorName);
+    }, selectedPrintingUuid, row.setSelectionSource === "manual" ? "" : row.requestedFlavorName);
     updateRow(row.id, physicalSelection);
   }
 
@@ -686,7 +688,15 @@ export default function PricingPanel({
         canonicalName,
         item.alternateTitle || "",
       );
-      setRows((current) => [...current, row]);
+      const manualCatalog = fallbackCatalogFromItems([item]);
+      const nextCatalog = { ...catalogRef.current, ...manualCatalog };
+      catalogRef.current = nextCatalog;
+      setCatalog(nextCatalog);
+      const initializedRow = initializePricingRowSelection(
+        row,
+        cardFromCatalog(nextCatalog, canonicalName),
+      );
+      setRows((current) => [...current, initializedRow]);
       setManualCardName("");
       setIsAddingCard(false);
       setLoadMessage(`${row.displayName} added. Choose the printing when it is found.`);
@@ -698,17 +708,21 @@ export default function PricingPanel({
   }
 
   async function hydrateLivePrice(row: PricingRow, setCode = row.setCode) {
-    if (!usingLiveFallbackRef.current || !setCode || hydratingRows.has(row.id)) return;
+    const normalizedSetCode = setCode.toUpperCase();
+    const hydrationKey = `${row.id}|${normalizedSetCode}`;
+    if (!usingLiveFallbackRef.current || !normalizedSetCode || hydratingKeysRef.current.has(hydrationKey)) return;
+    const hydrationGeneration = hydrationGenerationRef.current;
+    hydratingKeysRef.current.add(hydrationKey);
     setHydratingRows((current) => new Set(current).add(row.id));
-    setLoadMessage(`Loading ${setCode.toUpperCase()} pricing from MTGJSON...`);
+    setLoadMessage(`Loading ${normalizedSetCode} pricing from MTGJSON...`);
     try {
       const { loadLiveMtgjsonPrintings } = await import("./mtgjson-live-pricing");
-      const livePrintings = await loadLiveMtgjsonPrintings(row.canonicalName, setCode);
-      if (!livePrintings.length) throw new Error(`MTGJSON did not match ${row.canonicalName} in ${setCode.toUpperCase()}.`);
+      const livePrintings = await loadLiveMtgjsonPrintings(row.canonicalName, normalizedSetCode);
+      if (hydrationGeneration !== hydrationGenerationRef.current) return;
+      if (!livePrintings.length) throw new Error(`MTGJSON did not match ${row.canonicalName} in ${normalizedSetCode}.`);
 
       const cardKey = pricingNameKey(row.canonicalName);
       const currentCard = catalogRef.current[cardKey] || { name: row.canonicalName, printings: [] };
-      const normalizedSetCode = setCode.toUpperCase();
       const nextCatalog = {
         ...catalogRef.current,
         [cardKey]: {
@@ -721,18 +735,28 @@ export default function PricingPanel({
       };
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
+      setRows((current) => current.map((candidate) => (
+        pricingNameKey(candidate.canonicalName) === cardKey
+          ? initializePricingRowSelection(candidate, nextCatalog[cardKey])
+          : candidate
+      )));
       setLoadMessage(pricingSource === "tcgplayer-listed-median"
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
         : "Live MTGJSON pricing loaded: TCGplayer retail, with Card Kingdom retail fallback.");
     } catch (error) {
+      if (hydrationGeneration !== hydrationGenerationRef.current) return;
       const message = error instanceof Error ? error.message : "MTGJSON pricing failed to load.";
       setLoadMessage(`${message} This row can still be priced manually.`);
     } finally {
-      setHydratingRows((current) => {
-        const next = new Set(current);
-        next.delete(row.id);
-        return next;
-      });
+      if (hydrationGeneration === hydrationGenerationRef.current) {
+        hydratingKeysRef.current.delete(hydrationKey);
+        setHydratingRows((current) => {
+          if (Array.from(hydratingKeysRef.current).some((key) => key.startsWith(`${row.id}|`))) return current;
+          const next = new Set(current);
+          next.delete(row.id);
+          return next;
+        });
+      }
     }
   }
 
@@ -1128,14 +1152,20 @@ export default function PricingPanel({
                     : "";
                   const priceIsValid = pricing.price !== null;
                   const isHydrating = hydratingRows.has(row.id);
-                  const isPriceLoading = row.found && (isHydrating || pricing.automatic.status === "loading");
+                  const warningState = pricingRowWarningState({
+                    resolved: row.resolved,
+                    found: row.found,
+                    catalogState: loadState,
+                    hydrating: isHydrating,
+                    automaticStatus: pricing.automatic.status,
+                    priceValid: priceIsValid,
+                  });
+                  const isPriceLoading = row.found && warningState === "loading";
                   const canMarkFound = row.resolved
                     && loadState === "ready"
                     && (editions.length > 0 || row.isBasicLand);
                   const controlsEnabled = row.found && canMarkFound;
-                  const needsWarning = !row.resolved
-                    || loadState === "error"
-                    || (row.found && !priceIsValid && !isPriceLoading);
+                  const needsWarning = warningState === "unavailable" || warningState === "ambiguous";
                   const usingMtgjsonFallback = pricingSource === "tcgplayer-listed-median"
                     && row.found
                     && row.priceOverride === null
@@ -1166,7 +1196,11 @@ export default function PricingPanel({
                   const tcgplayerUrl = tcgplayerProductId
                     ? `https://www.tcgplayer.com/product/${encodeURIComponent(tcgplayerProductId)}`
                     : "";
-                  const tcgplayerSearchUrl = tcgplayerCardSearchUrl(row.canonicalName, row.setCode || selectedEdition?.setName);
+                  const tcgplayerSearchUrl = tcgplayerCardSearchUrl(
+                    row.canonicalName,
+                    row.setCode,
+                    selectedEdition?.setName,
+                  );
                   const needsVarianceReview = pricingSource === "tcgplayer-listed-median"
                     && !pricing.isManual
                     && requiresPriceVarianceReview(pricing.listedMedianPrice, pricing.comparisonPrice);
@@ -1186,9 +1220,7 @@ export default function PricingPanel({
                           checked={row.found}
                           disabled={!canMarkFound}
                           onChange={(event) => {
-                            const found = event.target.checked;
-                            updateRow(row.id, { found });
-                            if (found) void hydrateLivePrice(row);
+                            updateFoundState(row, event.target.checked);
                           }}
                           aria-label={`Found ${row.displayName}`}
                           title={canMarkFound ? "I found this card; enable its pricing controls" : warningMessage}
@@ -1293,18 +1325,9 @@ export default function PricingPanel({
                                 key={edition.setCode}
                                 onClick={() => {
                                   const setCode = edition.setCode;
-                                  const treatment = preferredDefaultTreatment(pricing.card, setCode);
-                                  const choice = finishChoices(pricing.card, setCode)[0];
-                                  if (!choice) return;
-                                  updatePrintingSelection(row.id, {
-                                    setCode,
-                                    treatment: treatmentForFinishChoice(pricing.card, setCode, treatment, choice.finish, choice.foilTreatment),
-                                    finish: choice.finish,
-                                    foilTreatment: choice.foilTreatment,
-                                  });
+                                  selectPrintingSet(row, setCode);
                                   setOpenPrintingRowId(null);
                                   setPrintingMenuPosition(null);
-                                  void hydrateLivePrice(row, setCode);
                                 }}
                                 title={`${edition.setName} (${edition.releaseDate})`}
                               >

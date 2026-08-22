@@ -7,9 +7,12 @@ import {
   compatibleTreatmentOptions,
   convertCurrencyPrice,
   createManualPricingRow,
+  createPricingRowsFromFormatterItems,
   editionOptions,
   exactPrintingUuidForSelection,
   finishChoices,
+  initializeFoundPricingSelection,
+  initializePricingRowSelection,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
   matchingPrintings,
@@ -23,6 +26,9 @@ import {
   priceForSelection,
   pricingDisplayName,
   pricingIndexSupportsPhysicalDimensions,
+  pricingPhysicalSelectionIsValid,
+  pricingRowWarningState,
+  reconcilePricingRowsWithFormatterItems,
   pricingVariantOptions,
   pricingSelectionForPrintingUuid,
   printingMatchesFinishChoice,
@@ -34,12 +40,14 @@ import {
   receiptTreatment,
   requiresPriceVarianceReview,
   selectableMtgjsonPriceSources,
+  setSearchTerm,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
   tcgplayerProductIdsForSelection,
   treatmentOptions,
   treatmentForFinishChoice,
   shouldShowPricingVariant,
+  selectManualPricingSet,
   normalizePricingAssistantRow,
 } from "../api/server-pricing.mjs";
 
@@ -95,6 +103,350 @@ const treatmentAvailabilityFixture = {
     { ...basePrinting, uuid: "UUID-5", setCode: "TST", number: "400", treatments: ["borderless"], finishes: ["foil"], foilTreatment: "surge" },
   ],
 };
+
+function exactFixturePrinting({
+  uuid,
+  setCode,
+  setName = `${setCode} Test Set`,
+  releaseDate = "2025-01-01",
+  number = "1",
+  treatments = ["standard"],
+  finishes = ["normal"],
+  foilTreatment = "standard",
+  tcgplayerProductId = `${setCode.toLowerCase()}-${number}`,
+  price = 1.25,
+}) {
+  const pricedFinish = finishes.includes("normal") ? "normal" : finishes[0];
+  return {
+    ...basePrinting,
+    uuid,
+    tcgplayerProductId,
+    setCode,
+    setName,
+    keyruneCode: setCode.toLowerCase(),
+    releaseDate,
+    number,
+    treatments,
+    finishes,
+    foilTreatment,
+    prices: {
+      [pricedFinish]: { value: price, source: "tcgplayer" },
+    },
+    priceListings: {
+      [pricedFinish]: {
+        "tcgplayer:retail": { value: price, source: "tcgplayer:retail", currency: "USD" },
+      },
+    },
+  };
+}
+
+function freshFormatterPricingRow(cardName, requestedPrinting) {
+  return createPricingRowsFromFormatterItems([{
+    index: 0,
+    inputName: cardName,
+    quantity: 1,
+    status: "found",
+    card: { name: cardName },
+    ...(requestedPrinting ? { requestedPrinting } : {}),
+  }])[0];
+}
+
+function readyWarningState(row) {
+  return pricingRowWarningState({
+    resolved: row.resolved,
+    found: row.found,
+    catalogState: "ready",
+    hydrating: false,
+    automaticStatus: "ready",
+    priceValid: true,
+  });
+}
+
+test("initializes Found through a complete single-printing pricing pipeline", () => {
+  const card = {
+    name: "Single Standard",
+    printings: [exactFixturePrinting({
+      uuid: "single-standard-uuid",
+      setCode: "ONE",
+      tcgplayerProductId: "100001",
+      price: 2.75,
+    })],
+  };
+  const initial = freshFormatterPricingRow(card.name);
+  assert.equal(initial.found, false);
+  assert.equal(initial.setCode, "");
+
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.deepEqual({
+    found: found.found,
+    setCode: found.setCode,
+    finish: found.finish,
+    foilTreatment: found.foilTreatment,
+    treatment: found.treatment,
+    selectedPrintingUuid: found.selectedPrintingUuid,
+  }, {
+    found: true,
+    setCode: "ONE",
+    finish: "normal",
+    foilTreatment: "standard",
+    treatment: "standard",
+    selectedPrintingUuid: "single-standard-uuid",
+  });
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+  assert.equal(tcgplayerProductIdForSelection(card, found.setCode, found.treatment, found.finish, found.selectedPrintingUuid, found.foilTreatment), "100001");
+  assert.equal(priceForSelection(card, found.setCode, found.treatment, found.finish, "tcgplayer:retail", found.selectedPrintingUuid, found.foilTreatment).price, 2.75);
+  assert.equal(shouldShowPricingVariant(found.found, pricingVariantOptions(card, found.setCode, found.treatment, found.finish, found.foilTreatment)), false);
+  assert.equal(readyWarningState(found), "none");
+});
+
+test("reconciles retried formatter resolution without erasing pricing work", () => {
+  const unresolved = createPricingRowsFromFormatterItems([{
+    index: 7,
+    inputName: "Typod Card",
+    quantity: 2,
+    status: "review",
+  }])[0];
+  const inProgress = { ...unresolved, found: true, priceOverride: "1.25" };
+  const manual = createManualPricingRow("manual-keep", "manual-keep", "Manual Card", "Manual Card");
+  const reconciled = reconcilePricingRowsWithFormatterItems([inProgress, manual], [{
+    index: 7,
+    inputName: "Typod Card",
+    quantity: 2,
+    status: "found",
+    card: { name: "Typed Card" },
+  }]);
+  assert.equal(reconciled.length, 2);
+  assert.equal(reconciled[0].resolved, true);
+  assert.equal(reconciled[0].canonicalName, "Typed Card");
+  assert.equal(reconciled[0].found, true);
+  assert.equal(reconciled[0].priceOverride, "1.25");
+  assert.equal(reconciled[1].manuallyCreated, true);
+});
+
+test("initializes a lone Borderless Non-Foil printing without inventing Standard", () => {
+  const card = {
+    name: "Single Borderless",
+    printings: [exactFixturePrinting({
+      uuid: "single-borderless-uuid",
+      setCode: "BOR",
+      treatments: ["borderless"],
+      tcgplayerProductId: "100002",
+    })],
+  };
+  const found = initializeFoundPricingSelection(freshFormatterPricingRow(card.name), card, "2026-08-21");
+  assert.equal(found.finish, "normal");
+  assert.equal(found.treatment, "borderless");
+  assert.equal(found.selectedPrintingUuid, "single-borderless-uuid");
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+  assert.equal(shouldShowPricingVariant(found.found, pricingVariantOptions(card, "BOR", "borderless", "normal")), false);
+  assert.equal(readyWarningState(found), "none");
+});
+
+test("initializes a lone Extended Art Foil printing and makes it price eligible", () => {
+  const card = {
+    name: "Single Extended Foil",
+    printings: [exactFixturePrinting({
+      uuid: "single-extended-foil-uuid",
+      setCode: "EXT",
+      treatments: ["extended-art"],
+      finishes: ["foil"],
+      tcgplayerProductId: "100003",
+      price: 4.5,
+    })],
+  };
+  const found = initializeFoundPricingSelection(freshFormatterPricingRow(card.name), card, "2026-08-21");
+  assert.equal(found.finish, "foil");
+  assert.equal(found.foilTreatment, "standard");
+  assert.equal(found.treatment, "extended-art");
+  assert.equal(found.selectedPrintingUuid, "single-extended-foil-uuid");
+  assert.equal(priceForSelection(card, found.setCode, found.treatment, found.finish, "tcgplayer:retail", found.selectedPrintingUuid, found.foilTreatment).status, "ready");
+  assert.equal(shouldShowPricingVariant(found.found, pricingVariantOptions(card, "EXT", "extended-art", "foil")), false);
+});
+
+test("initializes a Surge-only Borderless printing in the Surge finish bucket", () => {
+  const card = {
+    name: "Single Borderless Surge",
+    printings: [exactFixturePrinting({
+      uuid: "single-surge-uuid",
+      setCode: "SRG",
+      treatments: ["borderless"],
+      finishes: ["foil"],
+      foilTreatment: "surge",
+      tcgplayerProductId: "100004",
+    })],
+  };
+  const found = initializeFoundPricingSelection(freshFormatterPricingRow(card.name), card, "2026-08-21");
+  assert.equal(finishChoices(card, "SRG")[0].label, "Surge");
+  assert.equal(found.finish, "foil");
+  assert.equal(found.foilTreatment, "surge");
+  assert.equal(found.treatment, "borderless");
+  assert.equal(found.selectedPrintingUuid, "single-surge-uuid");
+  assert.equal(matchingPrintings(card, "SRG", "borderless", "foil", "", "standard").length, 0);
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+  assert.equal(shouldShowPricingVariant(found.found, pricingVariantOptions(card, "SRG", "borderless", "foil", "surge")), false);
+  assert.equal(readyWarningState(found), "none");
+});
+
+test("Found initialization preserves a valid requested set over the newest default set", () => {
+  const card = {
+    name: "Requested Edition",
+    printings: [
+      exactFixturePrinting({ uuid: "new-edition", setCode: "NEW", releaseDate: "2026-01-01", tcgplayerProductId: "100005" }),
+      exactFixturePrinting({ uuid: "requested-edition", setCode: "REQ", releaseDate: "2024-01-01", tcgplayerProductId: "100006" }),
+    ],
+  };
+  const initial = freshFormatterPricingRow(card.name, { setCode: "REQ" });
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.equal(found.setCode, "REQ");
+  assert.equal(found.selectedPrintingUuid, "requested-edition");
+  assert.equal(tcgplayerProductIdForSelection(card, found.setCode, found.treatment, found.finish, found.selectedPrintingUuid, found.foilTreatment), "100006");
+});
+
+test("requested ordinary Foil wins over Non-Foil and remains distinct from Surge", () => {
+  const card = {
+    name: "Requested Foil",
+    printings: [
+      exactFixturePrinting({ uuid: "requested-normal", setCode: "RQF", finishes: ["normal"], number: "1" }),
+      exactFixturePrinting({ uuid: "requested-foil", setCode: "RQF", finishes: ["foil"], number: "2", tcgplayerProductId: "100007" }),
+      exactFixturePrinting({ uuid: "requested-surge", setCode: "RQF", finishes: ["foil"], foilTreatment: "surge", number: "3", tcgplayerProductId: "100008" }),
+    ],
+  };
+  const initial = freshFormatterPricingRow(card.name, { setCode: "RQF", finish: "foil" });
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.equal(found.finish, "foil");
+  assert.equal(found.foilTreatment, "standard");
+  assert.equal(found.selectedPrintingUuid, "requested-foil");
+  assert.deepEqual(matchingPrintings(card, "RQF", "standard", "foil", "", "standard").map((printing) => printing.uuid), ["requested-foil"]);
+  assert.deepEqual(matchingPrintings(card, "RQF", "standard", "foil", "", "surge").map((printing) => printing.uuid), ["requested-surge"]);
+});
+
+test("requested Treatment moves an incompatible requested Finish to a real combination", () => {
+  const card = {
+    name: "Requested Treatment Conflict",
+    printings: [
+      exactFixturePrinting({ uuid: "normal-standard", setCode: "RTC", finishes: ["normal"], treatments: ["standard"] }),
+      exactFixturePrinting({ uuid: "foil-retro", setCode: "RTC", finishes: ["foil"], treatments: ["retro"] }),
+    ],
+  };
+  const initial = freshFormatterPricingRow(card.name, {
+    setCode: "RTC",
+    finish: "normal",
+    treatment: "retro",
+  });
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.equal(found.finish, "foil");
+  assert.equal(found.treatment, "retro");
+  assert.equal(found.selectedPrintingUuid, "foil-retro");
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+});
+
+test("resolves an MSC-like preselected set with one physical printing", () => {
+  const card = {
+    name: "MSC-Like Bolt",
+    printings: [
+      exactFixturePrinting({ uuid: "msc-only-uuid", setCode: "MSC", setName: "Marvel Super Heroes Commander", tcgplayerProductId: "100009", price: 3.25 }),
+      exactFixturePrinting({ uuid: "newer-other-uuid", setCode: "OTH", releaseDate: "2026-01-01", tcgplayerProductId: "100010" }),
+    ],
+  };
+  const initial = { ...freshFormatterPricingRow(card.name), setCode: "MSC" };
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  const variants = pricingVariantOptions(card, found.setCode, found.treatment, found.finish, found.foilTreatment);
+  assert.equal(found.setCode, "MSC");
+  assert.equal(found.selectedPrintingUuid, "msc-only-uuid");
+  assert.equal(tcgplayerProductIdForSelection(card, found.setCode, found.treatment, found.finish, found.selectedPrintingUuid, found.foilTreatment), "100009");
+  assert.equal(priceForSelection(card, found.setCode, found.treatment, found.finish, "tcgplayer:retail", found.selectedPrintingUuid, found.foilTreatment).status, "ready");
+  assert.equal(shouldShowPricingVariant(found.found, variants), false);
+  assert.equal(readyWarningState(found), "none");
+});
+
+test("reinitializes a stale Scryfall exact ID to the lone MTGJSON UUID", () => {
+  const name = "Hydration Identity Swap";
+  const scryfallCard = {
+    name,
+    printings: [exactFixturePrinting({ uuid: "scryfall-id", setCode: "HYD", tcgplayerProductId: "100011" })],
+  };
+  const beforeHydration = initializeFoundPricingSelection(freshFormatterPricingRow(name), scryfallCard, "2026-08-21");
+  assert.equal(beforeHydration.selectedPrintingUuid, "scryfall-id");
+
+  const mtgjsonCard = {
+    name,
+    printings: [exactFixturePrinting({ uuid: "mtgjson-uuid", setCode: "HYD", tcgplayerProductId: "100011" })],
+  };
+  assert.equal(pricingPhysicalSelectionIsValid(beforeHydration, mtgjsonCard), false);
+  const afterHydration = initializePricingRowSelection(beforeHydration, mtgjsonCard, "2026-08-21");
+  assert.equal(afterHydration.selectedPrintingUuid, "mtgjson-uuid");
+  assert.equal(pricingPhysicalSelectionIsValid(afterHydration, mtgjsonCard), true);
+  assert.equal(readyWarningState(afterHydration), "none");
+});
+
+test("keeps loading separate from valid, ambiguous, and unavailable warning states", () => {
+  const baseState = {
+    resolved: true,
+    found: true,
+    catalogState: "ready",
+    hydrating: false,
+    automaticStatus: "ready",
+    priceValid: false,
+  };
+  assert.equal(pricingRowWarningState({ ...baseState, catalogState: "loading" }), "loading");
+  assert.equal(pricingRowWarningState({ ...baseState, hydrating: true }), "loading");
+  assert.equal(pricingRowWarningState({ ...baseState, automaticStatus: "loading" }), "loading");
+  assert.equal(pricingRowWarningState({ ...baseState, priceValid: true }), "none");
+  assert.equal(pricingRowWarningState({ ...baseState, automaticStatus: "ambiguous" }), "ambiguous");
+  assert.equal(pricingRowWarningState({ ...baseState, automaticStatus: "unavailable" }), "unavailable");
+  assert.equal(pricingRowWarningState({ ...baseState, found: false, automaticStatus: "unavailable" }), "none");
+  assert.equal(pricingRowWarningState({ ...baseState, resolved: false }), "unavailable");
+});
+
+test("manual rows use the same Found initialization pipeline", () => {
+  const card = {
+    name: "Manual Pipeline Card",
+    printings: [exactFixturePrinting({
+      uuid: "manual-borderless-uuid",
+      setCode: "MAN",
+      treatments: ["borderless"],
+      tcgplayerProductId: "100012",
+    })],
+  };
+  const initial = createManualPricingRow("manual-pipeline-original", "manual-pipeline", card.name, card.name);
+  const found = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.equal(found.manuallyCreated, true);
+  assert.equal(found.found, true);
+  assert.equal(found.setCode, "MAN");
+  assert.equal(found.treatment, "borderless");
+  assert.equal(found.selectedPrintingUuid, "manual-borderless-uuid");
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+});
+
+test("switches from two ordinary Foil arts to one auto-selected Surge art", () => {
+  const card = {
+    name: "Finish Art Transition",
+    printings: [
+      exactFixturePrinting({ uuid: "ordinary-art-one", setCode: "FAT", finishes: ["foil"], treatments: ["borderless"], number: "1" }),
+      exactFixturePrinting({ uuid: "ordinary-art-two", setCode: "FAT", finishes: ["foil"], treatments: ["borderless"], number: "2" }),
+      exactFixturePrinting({ uuid: "surge-art-only", setCode: "FAT", finishes: ["foil"], foilTreatment: "surge", treatments: ["borderless"], number: "3" }),
+    ],
+  };
+  const ordinary = initializeFoundPricingSelection(freshFormatterPricingRow(card.name), card, "2026-08-21");
+  const ordinaryVariants = pricingVariantOptions(card, "FAT", "borderless", "foil", "standard");
+  assert.equal(ordinary.foilTreatment, "standard");
+  assert.equal(ordinary.selectedPrintingUuid, "");
+  assert.deepEqual(ordinaryVariants.map((variant) => variant.uuid), ["ordinary-art-one", "ordinary-art-two"]);
+  assert.equal(shouldShowPricingVariant(ordinary.found, ordinaryVariants), true);
+
+  const surge = initializePricingRowSelection({
+    ...ordinary,
+    finish: "foil",
+    foilTreatment: "surge",
+    treatment: "borderless",
+    selectedPrintingUuid: "",
+  }, card, "2026-08-21");
+  const surgeVariants = pricingVariantOptions(card, "FAT", "borderless", "foil", "surge");
+  assert.equal(surge.foilTreatment, "surge");
+  assert.equal(surge.selectedPrintingUuid, "surge-art-only");
+  assert.deepEqual(surgeVariants.map((variant) => variant.uuid), ["surge-art-only"]);
+  assert.equal(shouldShowPricingVariant(surge.found, surgeVariants), false);
+});
 
 test("normalizes card names and assigns stable pricing shards", () => {
   assert.equal(pricingNameKey("  Éowyn, Shieldmaiden  "), "eowyn shieldmaiden");
@@ -159,6 +511,11 @@ test("builds a generic TCGplayer Magic search for manual price lookup", () => {
   assert.equal(
     tcgplayerCardSearchUrl("Putrefy", "RVR"),
     "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Putrefy%20RVR&view=grid",
+  );
+  assert.equal(setSearchTerm("PLST", "The List"), "List");
+  assert.equal(
+    tcgplayerCardSearchUrl("Goblin Game", "PLST", "The List"),
+    "https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=Goblin%20Game%20List&view=grid",
   );
 });
 
@@ -306,6 +663,98 @@ test("flavor-name requests retain a canonical lookup and choose an exact reskin 
   assert.equal(row.canonicalName, "Umezawa's Jitte");
 });
 
+test("a manual set change releases reskin defaults and reprices the canonical card", () => {
+  const card = {
+    name: "Umezawa's Jitte",
+    printings: [
+      {
+        ...exactFixturePrinting({
+          uuid: "bok-jitte",
+          setCode: "BOK",
+          number: "163",
+          tcgplayerProductId: "12222",
+          price: 8.5,
+        }),
+      },
+      {
+        ...exactFixturePrinting({
+          uuid: "v16-jitte",
+          setCode: "V16",
+          number: "14",
+          tcgplayerProductId: "31234",
+          price: 9.25,
+        }),
+      },
+      {
+        ...exactFixturePrinting({
+          uuid: "pza-raph-jitte",
+          setCode: "PZA",
+          number: "19",
+          treatments: ["borderless"],
+          tcgplayerProductId: "679213",
+          price: 12.5,
+        }),
+        flavorName: "Raph's Jitte",
+      },
+    ],
+  };
+  const initial = createPricingRowsFromFormatterItems([{
+    index: 0,
+    quantity: 1,
+    inputName: "Raph's Jitte",
+    status: "found",
+    alternateTitle: "Raph's Jitte",
+    card: { name: "Umezawa's Jitte" },
+  }])[0];
+  const pza = initializeFoundPricingSelection(initial, card, "2026-08-21");
+  assert.deepEqual(
+    { setCode: pza.setCode, finish: pza.finish, treatment: pza.treatment, selectedPrintingUuid: pza.selectedPrintingUuid },
+    { setCode: "PZA", finish: "normal", treatment: "borderless", selectedPrintingUuid: "pza-raph-jitte" },
+  );
+
+  const bok = selectManualPricingSet(pza, card, "BOK");
+  assert.equal(bok.displayName, "Raph's Jitte");
+  assert.equal(bok.canonicalName, "Umezawa's Jitte");
+  assert.equal(bok.setSelectionSource, "manual");
+  assert.deepEqual(
+    { setCode: bok.setCode, finish: bok.finish, foilTreatment: bok.foilTreatment, treatment: bok.treatment, selectedPrintingUuid: bok.selectedPrintingUuid },
+    { setCode: "BOK", finish: "normal", foilTreatment: "standard", treatment: "standard", selectedPrintingUuid: "bok-jitte" },
+  );
+  assert.equal(tcgplayerProductIdForSelection(card, bok.setCode, bok.treatment, bok.finish, bok.selectedPrintingUuid, bok.foilTreatment), "12222");
+  assert.equal(priceForSelection(card, bok.setCode, bok.treatment, bok.finish, "tcgplayer:retail", bok.selectedPrintingUuid, bok.foilTreatment).price, 8.5);
+  // Live pricing hydration reuses the initializer; it must not snap back to PZA.
+  assert.equal(initializePricingRowSelection(bok, card, "2026-08-21").setCode, "BOK");
+
+  const v16 = selectManualPricingSet(bok, card, "V16");
+  assert.deepEqual(
+    { setCode: v16.setCode, finish: v16.finish, treatment: v16.treatment, selectedPrintingUuid: v16.selectedPrintingUuid },
+    { setCode: "V16", finish: "normal", treatment: "standard", selectedPrintingUuid: "v16-jitte" },
+  );
+});
+
+test("manual set changes reset old Surge and art identity for ordinary cards too", () => {
+  const card = {
+    name: "Generic Set Switch",
+    printings: [
+      exactFixturePrinting({ uuid: "surge-art", setCode: "OLD", finishes: ["foil"], foilTreatment: "surge", treatments: ["borderless"], number: "99" }),
+      exactFixturePrinting({ uuid: "new-standard", setCode: "NEW", finishes: ["normal", "foil"], treatments: ["standard"], number: "1" }),
+    ],
+  };
+  const old = initializeFoundPricingSelection(freshFormatterPricingRow(card.name, {
+    setCode: "OLD",
+    finish: "foil",
+    foilTreatment: "surge",
+    treatment: "borderless",
+  }), card, "2026-08-21");
+  assert.equal(old.selectedPrintingUuid, "surge-art");
+  const changed = selectManualPricingSet(old, card, "NEW");
+  assert.deepEqual(
+    { setCode: changed.setCode, finish: changed.finish, foilTreatment: changed.foilTreatment, treatment: changed.treatment, selectedPrintingUuid: changed.selectedPrintingUuid },
+    { setCode: "NEW", finish: "normal", foilTreatment: "standard", treatment: "standard", selectedPrintingUuid: "new-standard" },
+  );
+  assert.equal(shouldShowPricingVariant(changed.found, pricingVariantOptions(card, changed.setCode, changed.treatment, changed.finish, changed.foilTreatment)), false);
+});
+
 test("models Surge as a foil technology independent of visual treatment", () => {
   const card = {
     name: "Example",
@@ -323,11 +772,12 @@ test("models Surge as a foil technology independent of visual treatment", () => 
   assert.equal(finishChoices({ name: "Plain", printings: [{ ...basePrinting, setCode: "PLN" }] }, "PLN", "standard").some((choice) => choice.label === "Surge"), false);
 });
 
-test("rejects legacy pricing catalogs that discarded the Surge dimension", () => {
+test("rejects pricing catalogs older than the current physical-treatment model", () => {
   assert.equal(pricingIndexSupportsPhysicalDimensions(3), false);
   assert.equal(pricingIndexSupportsPhysicalDimensions(undefined), false);
   assert.equal(pricingIndexSupportsPhysicalDimensions(4), false);
-  assert.equal(pricingIndexSupportsPhysicalDimensions(5), true);
+  assert.equal(pricingIndexSupportsPhysicalDimensions(5), false);
+  assert.equal(pricingIndexSupportsPhysicalDimensions(6), true);
 });
 
 test("never places one Surge UUID in another effective Finish bucket", () => {

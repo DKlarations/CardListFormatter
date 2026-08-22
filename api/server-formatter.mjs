@@ -1,3 +1,30 @@
+// src/printing-normalization.ts
+function treatmentsForRawPrinting(print) {
+  const frameEffectValues = [
+    ...Array.isArray(print.frameEffects) ? print.frameEffects : [],
+    ...Array.isArray(print.frame_effects) ? print.frame_effects : []
+  ];
+  const promoTypeValues = [
+    ...Array.isArray(print.promoTypes) ? print.promoTypes : [],
+    ...Array.isArray(print.promo_types) ? print.promo_types : []
+  ];
+  const normalizeValues = (values) => new Set(
+    values.map((value) => String(value).toLowerCase().replace(/[^a-z]/g, ""))
+  );
+  const frameEffects = normalizeValues(frameEffectValues);
+  const promoTypes = normalizeValues(promoTypeValues);
+  const effects = /* @__PURE__ */ new Set([...frameEffects, ...promoTypes]);
+  const frameVersion = String(print.frameVersion ?? print.frame_version ?? print.frame ?? "").trim();
+  const borderless = String(print.borderColor ?? print.border_color ?? "").toLowerCase() === "borderless" || effects.has("borderless");
+  const explicitlyRetro = effects.has("retroframe") || effects.has("oldframe") || effects.has("oldborder") || effects.has("retro");
+  if (explicitlyRetro || frameVersion === "1997" && promoTypes.has("boosterfun")) return ["retro"];
+  if (effects.has("extendedart")) return ["extended-art"];
+  if (effects.has("showcase")) return ["showcase"];
+  if (borderless) return ["borderless"];
+  if (print.isFullArt || print.full_art || effects.has("fullart")) return ["full-art"];
+  return ["standard"];
+}
+
 // src/formatter.ts
 var SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 var SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -666,7 +693,7 @@ function printMatchesSpecialRequests(print, item) {
     if (request === "SHOWCASE") return print.frame_effects?.includes("showcase") || print.promo_types?.includes("showcase");
     if (request === "ETCHED") return print.finishes?.includes("etched");
     if (request === "SURGE FOIL") return (print.finishes?.includes("foil") || print.foil) && print.promo_types?.includes("surgefoil");
-    if (request === "RETRO FRAME") return print.frame_effects?.includes("retro") || print.promo_types?.includes("retroframe");
+    if (request === "RETRO FRAME") return treatmentsForRawPrinting(print).includes("retro");
     if (request === "ALT ART") return print.promo_types?.some((type) => /alternate|boosterfun|showcase|borderless/.test(type));
     if (request === "PROMO") return Boolean(print.promo);
     return true;
@@ -1599,6 +1626,21 @@ function reliabilityMessage(items, options = {}) {
   if (retryCount) notes.push(`Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`);
   return notes.join(" ");
 }
+function compactFormatterItems(items) {
+  return items.map((item) => ({
+    index: item.index,
+    quantity: item.quantity,
+    inputName: item.inputName,
+    status: item.status,
+    isBasicLand: Boolean(item.isBasicLand),
+    isToken: Boolean(item.isToken),
+    alternateTitle: item.alternateTitle || "",
+    requestedDisplayName: item.requestedDisplayName || "",
+    requestedPrinting: item.requestedPrinting || void 0,
+    card: item.card?.name ? { name: item.card.name } : void 0,
+    mtgjsonCard: item.mtgjsonCard?.name ? { name: item.mtgjsonCard.name } : void 0
+  }));
+}
 async function processPullListText(text, options = {}) {
   const {
     useCheckboxes = true,
@@ -1638,6 +1680,7 @@ async function processPullListText(text, options = {}) {
 export {
   beginScryfallRun,
   clearMtgjsonIndexCache,
+  compactFormatterItems,
   createSampleList,
   endScryfallRun,
   enrichPrintHistories,

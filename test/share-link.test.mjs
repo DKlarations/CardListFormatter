@@ -2,15 +2,35 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import LZString from "lz-string";
 import { importBundledModule } from "./test-module-bundle.mjs";
+import {
+  createPricingRowsFromFormatterItems,
+  initializeFoundPricingSelection,
+  priceForSelection,
+  pricingRowWarningState,
+} from "../api/server-pricing.mjs";
 
 const { decodeFormatterHash, encodeFormattedHash } = await importBundledModule("src/share-link.ts", "share-link");
+const { normalizePayload } = await importBundledModule("api/formatted-lists.ts", "formatted-lists");
 
-test("shares pricing selections without serializing a pricing catalog", () => {
+test("version five shares formatter state without pricing work", () => {
+  const formatterItems = [{
+    index: 0,
+    quantity: 1,
+    inputName: "Raph's Jitte",
+    status: "found",
+    alternateTitle: "Raph's Jitte",
+    requestedPrinting: { setCode: "PZA", finish: "foil", treatment: "borderless" },
+    card: { name: "Umezawa's Jitte" },
+  }];
   const hash = encodeFormattedHash({
-    input: "Jane Doe\n1 Putrefy FOIL",
+    input: "Jane Doe\n1 Raph's Jitte FOIL",
     output: "formatted",
+    processedAt: "2026-08-21T12:00:00.000Z",
+    reliabilityNote: "Provider fallback used.",
     customer: { name: "Jane Doe" },
-    pricingItems: [{ index: 0, quantity: 1, inputName: "Putrefy", status: "found", card: { name: "Putrefy" } }],
+    stats: { resolvedCount: 1, needsReviewCount: 0, printFallbackCount: 1 },
+    formatterItems,
+    // JavaScript callers can still supply obsolete data; the v5 encoder must discard it.
     pricing: {
       pricingSource: "tcgplayer-listed-median",
       rows: [{
@@ -37,40 +57,53 @@ test("shares pricing selections without serializing a pricing catalog", () => {
   });
   const decoded = decodeFormatterHash(hash);
   assert.equal(decoded.customer?.name, "Jane Doe");
-  assert.equal(decoded.pricing?.rows[0].displayName, "Raph's Jitte");
-  assert.equal(decoded.pricing?.rows[0].canonicalName, "Umezawa's Jitte");
-  assert.equal(decoded.pricing?.rows[0].selectedPrintingUuid, "pza-raph-jitte");
-  assert.equal(decoded.pricing?.rows[0].priceOverride, ".35");
-  assert.equal(decoded.pricing?.rows[0].manuallyCreated, true);
+  assert.equal(decoded.processedAt, "2026-08-21T12:00:00.000Z");
+  assert.equal(decoded.reliabilityNote, "Provider fallback used.");
+  assert.deepEqual(decoded.formatterItems, formatterItems);
+  assert.equal(decoded.pricing, undefined);
   const encoded = JSON.parse(LZString.decompressFromEncodedURIComponent(hash.slice("#formatted=".length)));
-  assert.equal(encoded.version, 4);
+  assert.equal(encoded.version, 5);
+  assert.deepEqual(encoded.formatterItems, formatterItems);
+  assert.equal("pricing" in encoded, false);
+  assert.equal("pricingItems" in encoded, false);
   assert.equal("catalog" in encoded, false);
 });
 
-test("continues to decode version-two pricing links with legacy card names", () => {
-  const v2 = `#formatted=${LZString.compressToEncodedURIComponent(JSON.stringify({
-    version: 2,
-    input: "Putrefy",
-    pricing: {
-      pricingSource: "tcgplayer:retail",
-      rows: [{ cardName: "Putrefy", selectedPrintingUuid: "rvr-378", treatment: "retro", finish: "foil" }],
-    },
-  }))}`;
-  const decoded = decodeFormatterHash(v2);
-  assert.equal(decoded.pricing?.pricingSource, "tcgplayer:retail");
-  assert.equal(decoded.pricing?.rows[0].canonicalName, "Putrefy");
-  assert.equal(decoded.pricing?.rows[0].selectedPrintingUuid, "rvr-378");
-});
-
-test("migrates v3 surge treatment into the foil-treatment dimension", () => {
-  const v3 = `#formatted=${LZString.compressToEncodedURIComponent(JSON.stringify({
-    version: 3,
-    pricing: { pricingSource: "tcgplayer:retail", rows: [{ cardName: "Fixture", treatment: "surge", finish: "foil" }] },
-  }))}`;
-  const row = decodeFormatterHash(v3).pricing?.rows[0];
-  assert.equal(row?.treatment, "standard");
-  assert.equal(row?.finish, "foil");
-  assert.equal(row?.foilTreatment, "surge");
+test("legacy v2-v4 links keep formatter items and deliberately ignore pricing rows", () => {
+  for (const version of [2, 3, 4]) {
+    const pricingItems = [{
+      index: version,
+      quantity: 2,
+      inputName: "Putrefy",
+      status: "found",
+      requestedPrinting: { setCode: "RVR", treatment: "retro" },
+      card: { name: "Putrefy" },
+    }];
+    const hash = `#formatted=${LZString.compressToEncodedURIComponent(JSON.stringify({
+      version,
+      input: `Putrefy v${version}`,
+      output: "saved output",
+      processedAt: "2026-08-20T12:00:00.000Z",
+      pricingItems,
+      pricing: {
+        pricingSource: "tcgplayer:retail",
+        rows: [{
+          cardName: "Manual pricing row",
+          manuallyCreated: true,
+          found: true,
+          selectedPrintingUuid: "legacy-exact-uuid",
+          treatment: version === 3 ? "surge" : "retro",
+          finish: "foil",
+          priceOverride: ".35",
+        }],
+      },
+    }))}`;
+    const decoded = decodeFormatterHash(hash);
+    assert.equal(decoded.input, `Putrefy v${version}`);
+    assert.equal(decoded.output, "saved output");
+    assert.deepEqual(decoded.formatterItems, pricingItems);
+    assert.equal(decoded.pricing, undefined);
+  }
 });
 
 test("continues to decode version-one formatted links", () => {
@@ -85,5 +118,99 @@ test("continues to decode version-one formatted links", () => {
   assert.equal(decoded.input, "Lightning Bolt");
   assert.equal(decoded.output, "saved output");
   assert.equal(decoded.customer?.name, "Jane Doe");
+  assert.deepEqual(decoded.formatterItems, []);
   assert.equal(decoded.pricing, undefined);
+});
+
+test("a shared processed list starts a fresh, functional Pricing Assistant session", () => {
+  const hash = encodeFormattedHash({
+    output: "processed output",
+    processedAt: "2026-08-21T12:00:00.000Z",
+    formatterItems: [{
+      index: 0,
+      quantity: 1,
+      inputName: "Raph's Jitte",
+      status: "found",
+      alternateTitle: "Raph's Jitte",
+      requestedPrinting: { setCode: "PZA", finish: "foil", treatment: "borderless" },
+      card: { name: "Umezawa's Jitte" },
+    }],
+  });
+  const decoded = decodeFormatterHash(hash);
+  const freshRows = createPricingRowsFromFormatterItems(decoded.formatterItems);
+  assert.equal(freshRows.length, 1);
+  const [freshRow] = freshRows;
+  assert.equal(freshRow.found, false);
+  assert.equal(freshRow.priceOverride, null);
+  assert.equal(freshRow.selectedPrintingUuid, "");
+  assert.equal(freshRow.displayName, "Raph's Jitte");
+  assert.equal(freshRow.canonicalName, "Umezawa's Jitte");
+
+  const card = {
+    name: "Umezawa's Jitte",
+    printings: [{
+      uuid: "pza-raph-jitte",
+      tcgplayerProductId: "679213",
+      setCode: "PZA",
+      setName: "Teenage Mutant Ninja Turtles Source Material",
+      keyruneCode: "pza",
+      releaseDate: "2026-03-06",
+      number: "19",
+      rarity: "rare",
+      flavorName: "Raph's Jitte",
+      treatments: ["borderless"],
+      finishes: ["normal", "foil"],
+      prices: {},
+      priceListings: {
+        foil: {
+          "tcgplayer:retail": { value: 9.5, source: "tcgplayer:retail", currency: "USD" },
+        },
+      },
+    }],
+  };
+  const found = initializeFoundPricingSelection(freshRow, card, "2026-08-21");
+  const automatic = priceForSelection(
+    card,
+    found.setCode,
+    found.treatment,
+    found.finish,
+    "tcgplayer:retail",
+    found.selectedPrintingUuid,
+    found.foilTreatment,
+  );
+  assert.equal(found.found, true);
+  assert.equal(found.setCode, "PZA");
+  assert.equal(found.finish, "foil");
+  assert.equal(found.treatment, "borderless");
+  assert.equal(found.selectedPrintingUuid, "pza-raph-jitte");
+  assert.equal(automatic.status, "ready");
+  assert.equal(automatic.price, 9.5);
+  assert.equal(pricingRowWarningState({
+    resolved: true,
+    found: true,
+    catalogState: "ready",
+    hydrating: false,
+    automaticStatus: automatic.status,
+    priceValid: automatic.price !== null,
+  }), "none");
+});
+
+test("saved processed-list payloads retain formatter rows for a fresh Pricing Assistant", () => {
+  const formatterItems = [{
+    index: 0,
+    quantity: 1,
+    inputName: "Lightning Bolt",
+    status: "found",
+    requestedPrinting: { setCode: "MSC" },
+    card: { name: "Lightning Bolt" },
+  }];
+  const saved = normalizePayload({
+    input: "1 Lightning Bolt - MSC",
+    output: "processed output",
+    formatterItems,
+  });
+  assert.deepEqual(saved.formatterItems, formatterItems);
+  const [freshRow] = createPricingRowsFromFormatterItems(saved.formatterItems);
+  assert.equal(freshRow.found, false);
+  assert.equal(freshRow.requestedSetCode, "MSC");
 });

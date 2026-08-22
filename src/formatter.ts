@@ -1,3 +1,5 @@
+import { treatmentsForRawPrinting } from "./printing-normalization";
+
 const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
 const SCRYFALL_SEARCH_URL = "https://api.scryfall.com/cards/search";
@@ -992,7 +994,7 @@ function printMatchesSpecialRequests(print, item) {
     if (request === "SHOWCASE") return print.frame_effects?.includes("showcase") || print.promo_types?.includes("showcase");
     if (request === "ETCHED") return print.finishes?.includes("etched");
     if (request === "SURGE FOIL") return (print.finishes?.includes("foil") || print.foil) && print.promo_types?.includes("surgefoil");
-    if (request === "RETRO FRAME") return print.frame_effects?.includes("retro") || print.promo_types?.includes("retroframe");
+    if (request === "RETRO FRAME") return treatmentsForRawPrinting(print).includes("retro");
     if (request === "ALT ART") return print.promo_types?.some((type) => /alternate|boosterfun|showcase|borderless/.test(type));
     if (request === "PROMO") return Boolean(print.promo);
     return true;
@@ -2211,6 +2213,23 @@ export function reliabilityMessage(items, options: ProviderOptions = {}) {
   if (fallbackCount) notes.push(`${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`);
   if (retryCount) notes.push(`Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`);
   return notes.join(" ");
+}
+
+/** Keeps only resolved formatter identity/intent needed to start fresh pricing. */
+export function compactFormatterItems(items: any[]) {
+  return items.map((item) => ({
+    index: item.index,
+    quantity: item.quantity,
+    inputName: item.inputName,
+    status: item.status,
+    isBasicLand: Boolean(item.isBasicLand),
+    isToken: Boolean(item.isToken),
+    alternateTitle: item.alternateTitle || "",
+    requestedDisplayName: item.requestedDisplayName || "",
+    requestedPrinting: item.requestedPrinting || undefined,
+    card: item.card?.name ? { name: item.card.name } : undefined,
+    mtgjsonCard: item.mtgjsonCard?.name ? { name: item.mtgjsonCard.name } : undefined,
+  }));
 }
 
 export async function processPullListText(text: string, options: ProcessPullListOptions = {}) {

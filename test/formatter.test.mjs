@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parsePullList } from "../api/server-formatter.mjs";
+import { compactFormatterItems, parsePullList } from "../api/server-formatter.mjs";
 
 const structuredPriceList = `Contact
 Name - Aaron Greene
@@ -88,4 +88,29 @@ test("preserves explicit structured set and printing requests for Pricing Assist
   assert.deepEqual(parsed.cards[0].requestedPrinting, { setCode: "RVR" });
   assert.deepEqual(parsed.cards[1].requestedPrinting, { finish: "foil", foilTreatment: "standard", treatment: "showcase" });
   assert.deepEqual(parsed.cards[2].requestedPrinting, { finish: "foil", foilTreatment: "surge", treatment: "borderless" });
+});
+
+test("compacts resolved formatter items without losing pricing identity or intent", () => {
+  assert.deepEqual(compactFormatterItems([{
+    index: 7,
+    quantity: 2,
+    inputName: "Raph's Jitte",
+    status: "found",
+    alternateTitle: "Raph's Jitte",
+    requestedPrinting: { setCode: "PZA", finish: "foil", treatment: "borderless" },
+    mtgjsonCard: { name: "Umezawa's Jitte", prices: { secret: 999 } },
+    prints: [{ id: "large-provider-record" }],
+  }]), [{
+    index: 7,
+    quantity: 2,
+    inputName: "Raph's Jitte",
+    status: "found",
+    isBasicLand: false,
+    isToken: false,
+    alternateTitle: "Raph's Jitte",
+    requestedDisplayName: "",
+    requestedPrinting: { setCode: "PZA", finish: "foil", treatment: "borderless" },
+    card: undefined,
+    mtgjsonCard: { name: "Umezawa's Jitte" },
+  }]);
 });

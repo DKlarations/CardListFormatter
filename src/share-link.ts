@@ -1,5 +1,4 @@
 import LZString from "lz-string";
-import { normalizePricingAssistantRow, type PricingAssistantState } from "./pricing";
 
 const INPUT_HASH_PREFIX = "#input=";
 const FORMATTED_HASH_PREFIX = "#formatted=";
@@ -18,9 +17,8 @@ export type SharedFormatterState = {
     needsReviewCount?: number;
     printFallbackCount?: number;
   };
-  /** Compact resolved items used to rebuild Pricing Assistant rows, not provider catalogs. */
-  pricingItems?: Array<Record<string, unknown>>;
-  pricing?: PricingAssistantState;
+  /** Compact formatter-resolution items used to start a fresh Pricing Assistant session. */
+  formatterItems?: Array<Record<string, unknown>>;
 };
 
 export function encodeInputHash(text: string) {
@@ -34,7 +32,7 @@ export function decodeInputHash(hash: string) {
 
 export function encodeFormattedHash(state: SharedFormatterState) {
   return `${FORMATTED_HASH_PREFIX}${LZString.compressToEncodedURIComponent(JSON.stringify({
-    version: 4,
+    version: 5,
     input: state.input || "",
     output: state.output || "",
     processedAt: state.processedAt || "",
@@ -48,11 +46,7 @@ export function encodeFormattedHash(state: SharedFormatterState) {
       needsReviewCount: state.stats?.needsReviewCount || 0,
       printFallbackCount: state.stats?.printFallbackCount || 0,
     },
-    pricingItems: Array.isArray(state.pricingItems) ? state.pricingItems : [],
-    pricing: state.pricing && Array.isArray(state.pricing.rows) ? {
-      pricingSource: state.pricing.pricingSource || "tcgplayer-listed-median",
-      rows: state.pricing.rows,
-    } : undefined,
+    formatterItems: Array.isArray(state.formatterItems) ? state.formatterItems : [],
   }))}`;
 }
 
@@ -75,13 +69,13 @@ export function decodeFormatterHash(hash: string): SharedFormatterState {
           needsReviewCount: parsed.stats?.needsReviewCount || 0,
           printFallbackCount: parsed.stats?.printFallbackCount || 0,
         },
-        pricingItems: Array.isArray(parsed.pricingItems) ? parsed.pricingItems : [],
-        pricing: parsed.version >= 2 && Array.isArray(parsed.pricing?.rows) ? {
-          pricingSource: typeof parsed.pricing.pricingSource === "string"
-            ? parsed.pricing.pricingSource
-            : "tcgplayer-listed-median",
-          rows: parsed.pricing.rows.map((row: Record<string, unknown>) => normalizePricingAssistantRow(row)),
-        } : undefined,
+        // v2-v4 called these pricingItems, but they are formatter resolution data.
+        // Deliberately ignore legacy `pricing`: every shared list starts fresh pricing work.
+        formatterItems: Array.isArray(parsed.formatterItems)
+          ? parsed.formatterItems
+          : Array.isArray(parsed.pricingItems)
+            ? parsed.pricingItems
+            : [],
       };
     } catch {
       return {};

@@ -1,5 +1,5 @@
 import LZString from "lz-string";
-import { processPullListText } from "./server-formatter.mjs";
+import { compactFormatterItems, processPullListText } from "./server-formatter.mjs";
 
 const FALLBACK_HASH_PREFIX = "input=";
 
@@ -195,6 +195,7 @@ export async function POST(request: Request) {
       reliabilityNote: processed.reliabilityNote,
       customer: processed.customer,
       stats: processedStats(processed),
+      formatterItems: compactFormatterItems(processed.items),
     };
     const saved = await saveFormattedList(request, configuredSecret, formattedState);
     const formatterUrl = formattedListUrl(formatterBaseUrl, saved.id, cardText);

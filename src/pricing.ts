@@ -63,6 +63,8 @@ export type PricingAssistantRowState = {
   requestedFinish?: PricingFinish;
   requestedFoilTreatment?: FoilTreatment;
   requestedTreatment?: string;
+  /** A staff-selected set overrides formatter/default printing preferences. */
+  setSelectionSource?: "default" | "manual";
   setCode: string;
   selectedPrintingUuid?: string;
   finish: PricingFinish;
@@ -71,9 +73,17 @@ export type PricingAssistantRowState = {
   priceOverride: string | null;
 };
 
-export type PricingAssistantState = {
-  pricingSource: string;
-  rows: PricingAssistantRowState[];
+export type FormatterPricingItem = {
+  index?: number;
+  quantity?: number;
+  inputName?: string;
+  status?: string;
+  isBasicLand?: boolean;
+  alternateTitle?: string;
+  requestedDisplayName?: string;
+  requestedPrinting?: RequestedPrintingPreference;
+  card?: { name?: string };
+  mtgjsonCard?: { name?: string };
 };
 
 export type RequestedPrintingPreference = {
@@ -112,6 +122,8 @@ export type PricingSelection = {
   message: string;
 };
 
+export type PricingRowWarningState = "none" | "loading" | "unavailable" | "ambiguous";
+
 export type TcgplayerPricePoint = {
   printingType: string;
   listedMedianPrice: number | null;
@@ -124,7 +136,7 @@ export const FINISH_LABELS: Record<PricingFinish, string> = {
   etched: "Etched",
 };
 
-export const PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION = 5;
+export const PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION = 6;
 
 export function pricingIndexSupportsPhysicalDimensions(version: unknown) {
   return Number(version) >= PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION;
@@ -573,6 +585,50 @@ export function normalizePricingPhysicalSelection(
 }
 
 /**
+ * Applies a staff-selected set as a new physical-printing root. Customer
+ * flavor/reskin intent is an initial preference, never a constraint here.
+ */
+export function selectManualPricingSet(
+  sourceRow: PricingAssistantRowState,
+  card: PricingCard | null,
+  selectedSetCode: string,
+): PricingAssistantRowState {
+  const row = normalizePricingAssistantRow(sourceRow);
+  const setCode = selectedSetCode.toUpperCase();
+  const hasSet = editionOptions(card).some((edition) => edition.setCode === setCode);
+  if (!row.resolved || !hasSet) return row;
+
+  const choices = finishChoices(card, setCode);
+  const finishChoice = choices.find((choice) => choice.finish === "normal") || choices[0];
+  if (!finishChoice) return {
+    ...row,
+    setCode,
+    setSelectionSource: "manual",
+    selectedPrintingUuid: "",
+  };
+
+  const treatments = compatibleTreatmentOptions(
+    card,
+    setCode,
+    finishChoice.finish,
+    finishChoice.foilTreatment,
+  );
+  const treatment = treatments.includes("standard") ? "standard" : treatments[0] || "standard";
+  return {
+    ...row,
+    setSelectionSource: "manual",
+    ...normalizePricingPhysicalSelection(card, {
+      setCode,
+      finish: finishChoice.finish,
+      foilTreatment: finishChoice.foilTreatment,
+      treatment,
+      // The previous set's exact art/product identity cannot cross sets.
+      selectedPrintingUuid: "",
+    }),
+  };
+}
+
+/**
  * Defensive legacy/stale-state path: an explicitly chosen exact printing is
  * authoritative for its finish technology and visual treatment. This never
  * returns or mutates card identity fields.
@@ -654,6 +710,7 @@ export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowSta
     requestedFinish: row.requestedFinish,
     requestedFoilTreatment: row.requestedFoilTreatment,
     requestedTreatment: row.requestedTreatment || "",
+    setSelectionSource: row.setSelectionSource === "manual" ? "manual" : "default",
     setCode: row.setCode || "",
     selectedPrintingUuid: row.selectedPrintingUuid || "",
     finish: row.finish || "normal",
@@ -661,6 +718,242 @@ export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowSta
     foilTreatment: legacySurge ? "surge" : row.foilTreatment || "standard",
     priceOverride: row.priceOverride ?? null,
   };
+}
+
+/** Builds a brand-new pricing session from resolved formatter data. */
+export function createPricingRowsFromFormatterItems(items: FormatterPricingItem[]): PricingAssistantRowState[] {
+  return items.map((item, order) => {
+    const inputName = item.inputName || String(order);
+    const sourceIndex = item.index ?? order;
+    const groupId = `card-${sourceIndex}-${pricingNameKey(inputName).replace(/[^a-z0-9]/g, "-")}`;
+    const requestedQuantity = Math.max(1, Number(item.quantity) || 1);
+    const canonicalName = item.card?.name
+      || item.mtgjsonCard?.name
+      || item.requestedDisplayName
+      || item.alternateTitle
+      || inputName;
+    const displayName = item.alternateTitle || item.requestedDisplayName || canonicalName;
+    return normalizePricingAssistantRow({
+      id: `${groupId}-original`,
+      groupId,
+      sourceIndex,
+      requestedQuantity,
+      isBasicLand: Boolean(item.isBasicLand),
+      quantity: requestedQuantity,
+      found: false,
+      resolved: item.status === "found",
+      displayName,
+      canonicalName,
+      requestedFlavorName: item.alternateTitle || item.requestedDisplayName || "",
+      requestedSetCode: item.requestedPrinting?.setCode || "",
+      requestedFinish: item.requestedPrinting?.finish,
+      requestedFoilTreatment: item.requestedPrinting?.foilTreatment,
+      requestedTreatment: item.requestedPrinting?.treatment || "",
+      setCode: "",
+      selectedPrintingUuid: "",
+      finish: "normal",
+      treatment: "standard",
+      foilTreatment: "standard",
+      priceOverride: null,
+    });
+  });
+}
+
+/** Refreshes formatter-owned identity without erasing in-progress staff pricing work. */
+export function reconcilePricingRowsWithFormatterItems(
+  currentRows: PricingAssistantRowState[],
+  items: FormatterPricingItem[],
+) {
+  const freshRows = createPricingRowsFromFormatterItems(items);
+  const manualRows = currentRows.filter((row) => row.manuallyCreated);
+  const formatterRows = currentRows.filter((row) => !row.manuallyCreated);
+  const identityFields = (fresh: PricingAssistantRowState) => ({
+    groupId: fresh.groupId,
+    sourceIndex: fresh.sourceIndex,
+    requestedQuantity: fresh.requestedQuantity,
+    isBasicLand: fresh.isBasicLand,
+    resolved: fresh.resolved,
+    displayName: fresh.displayName,
+    canonicalName: fresh.canonicalName,
+    requestedFlavorName: fresh.requestedFlavorName,
+    requestedSetCode: fresh.requestedSetCode,
+    requestedFinish: fresh.requestedFinish,
+    requestedFoilTreatment: fresh.requestedFoilTreatment,
+    requestedTreatment: fresh.requestedTreatment,
+  });
+  const reconciled = freshRows.flatMap((fresh) => {
+    const existing = formatterRows.filter((row) => row.sourceIndex === fresh.sourceIndex);
+    return existing.length
+      ? existing.map((row) => ({ ...row, ...identityFields(fresh) }))
+      : [fresh];
+  });
+  return [...reconciled, ...manualRows];
+}
+
+export function pricingPhysicalSelectionIsValid(
+  row: Pick<PricingAssistantRowState, "setCode" | "treatment" | "finish" | "foilTreatment" | "selectedPrintingUuid">,
+  card: PricingCard | null,
+) {
+  return matchingPrintings(
+    card,
+    row.setCode,
+    row.treatment,
+    row.finish,
+    row.selectedPrintingUuid || "",
+    row.foilTreatment || "standard",
+  ).length > 0;
+}
+
+/**
+ * Applies customer intent, valid staff choices, and deterministic physical
+ * defaults in Set -> Finish -> Treatment -> Art/UUID order.
+ */
+export function initializePricingRowSelection(
+  sourceRow: PricingAssistantRowState,
+  card: PricingCard | null,
+  referenceDate: Date | string = new Date(),
+): PricingAssistantRowState {
+  const row = normalizePricingAssistantRow(sourceRow);
+  if (!row.resolved || !card) return row;
+
+  const editions = editionOptions(card);
+  if (!editions.length) return row;
+  const hasSet = (setCode = "") => editions.some((edition) => edition.setCode === setCode.toUpperCase());
+  const hasManualSetSelection = row.setSelectionSource === "manual" && hasSet(row.setCode);
+  const useInitialPreferences = !hasManualSetSelection;
+  const requestedSetCode = row.requestedSetCode.toUpperCase();
+  const flavorPrinting = useInitialPreferences && row.requestedFlavorName
+    ? card.printings.find((printing) => (
+      pricingNameKey(printing.flavorName || "") === pricingNameKey(row.requestedFlavorName)
+    ))
+    : undefined;
+  const setCode = hasManualSetSelection
+    ? row.setCode.toUpperCase()
+    : hasSet(requestedSetCode)
+    ? requestedSetCode
+    : flavorPrinting?.setCode
+      || (hasSet(row.setCode) ? row.setCode.toUpperCase() : preferredDefaultEdition(card, referenceDate)?.setCode || "");
+  if (!setCode) return row;
+
+  const choices = finishChoices(card, setCode);
+  if (!choices.length) return row;
+  const existingDimensionsValid = matchingPrintings(
+    card,
+    row.setCode,
+    row.treatment,
+    row.finish,
+    "",
+    row.foilTreatment || "standard",
+  ).length > 0;
+  const requestedChoice = useInitialPreferences && row.requestedFinish
+    ? choices.find((choice) => (
+      choice.finish === row.requestedFinish
+        && choice.foilTreatment === (row.requestedFoilTreatment || "standard")
+        && (!row.requestedTreatment || compatibleTreatmentOptions(
+          card,
+          setCode,
+          choice.finish,
+          choice.foilTreatment,
+        ).includes(row.requestedTreatment))
+    ))
+    : undefined;
+  const requestedTreatmentChoice = useInitialPreferences && row.requestedTreatment
+    ? choices.find((choice) => compatibleTreatmentOptions(
+      card,
+      setCode,
+      choice.finish,
+      choice.foilTreatment,
+    ).includes(row.requestedTreatment))
+    : undefined;
+  const flavorChoice = useInitialPreferences && flavorPrinting?.setCode === setCode
+    ? choices.find((choice) => printingMatchesFinishChoice(
+      flavorPrinting,
+      choice.finish,
+      choice.foilTreatment,
+    ))
+    : undefined;
+  const existingChoice = existingDimensionsValid && row.setCode === setCode
+    ? choices.find((choice) => (
+      choice.finish === row.finish
+        && choice.foilTreatment === (row.foilTreatment || "standard")
+    ))
+    : undefined;
+  const finishChoice = requestedChoice
+    || requestedTreatmentChoice
+    || flavorChoice
+    || existingChoice
+    || choices.find((choice) => choice.finish === "normal")
+    || choices[0];
+
+  const treatments = compatibleTreatmentOptions(
+    card,
+    setCode,
+    finishChoice.finish,
+    finishChoice.foilTreatment,
+  );
+  if (!treatments.length) return row;
+  const flavorTreatment = useInitialPreferences && flavorPrinting?.setCode === setCode
+    ? visualTreatmentsForPrinting(flavorPrinting).find((treatment) => treatments.includes(treatment))
+    : undefined;
+  const treatment = useInitialPreferences && row.requestedTreatment && treatments.includes(row.requestedTreatment)
+    ? row.requestedTreatment
+    : flavorTreatment
+      || (existingDimensionsValid && row.setCode === setCode && treatments.includes(row.treatment)
+        ? row.treatment
+        : treatments.includes("standard") ? "standard" : treatments[0]);
+  const preferFlavorUuid = Boolean(
+    useInitialPreferences
+      && flavorPrinting
+      && flavorPrinting.setCode === setCode
+      && printingMatchesFinishChoice(flavorPrinting, finishChoice.finish, finishChoice.foilTreatment)
+      && visualTreatmentsForPrinting(flavorPrinting).includes(treatment),
+  );
+
+  return {
+    ...row,
+    ...normalizePricingPhysicalSelection(card, {
+      setCode,
+      finish: finishChoice.finish,
+      foilTreatment: finishChoice.foilTreatment,
+      treatment,
+      selectedPrintingUuid: preferFlavorUuid ? "" : row.selectedPrintingUuid || "",
+    }, useInitialPreferences ? row.requestedFlavorName : ""),
+  };
+}
+
+/** The single state transition used when staff mark a row Found. */
+export function initializeFoundPricingSelection(
+  row: PricingAssistantRowState,
+  card: PricingCard | null,
+  referenceDate: Date | string = new Date(),
+): PricingAssistantRowState {
+  return {
+    ...initializePricingRowSelection(row, card, referenceDate),
+    found: true,
+  };
+}
+
+/** Keeps catalog hydration/loading distinct from a genuinely unresolved price. */
+export function pricingRowWarningState({
+  resolved,
+  found,
+  catalogState,
+  hydrating,
+  automaticStatus,
+  priceValid,
+}: {
+  resolved: boolean;
+  found: boolean;
+  catalogState: "idle" | "loading" | "ready" | "error";
+  hydrating: boolean;
+  automaticStatus: PricingSelection["status"];
+  priceValid: boolean;
+}): PricingRowWarningState {
+  if (!resolved || catalogState === "error") return "unavailable";
+  if (!found) return "none";
+  if (hydrating || catalogState === "idle" || catalogState === "loading" || automaticStatus === "loading") return "loading";
+  if (priceValid) return "none";
+  return automaticStatus === "ambiguous" ? "ambiguous" : "unavailable";
 }
 
 export function createManualPricingRow(
@@ -872,8 +1165,14 @@ export function priceWithListedMedianFallback(
   };
 }
 
-export function tcgplayerCardSearchUrl(cardName: string, setName = "") {
-  const query = [cardName.trim(), setName.trim()].filter(Boolean).join(" ");
+export function setSearchTerm(setCode = "", setName = "") {
+  const code = setCode.trim();
+  if (code.toUpperCase() === "PLST") return "List";
+  return code || setName.trim();
+}
+
+export function tcgplayerCardSearchUrl(cardName: string, setCode = "", setName = "") {
+  const query = [cardName.trim(), setSearchTerm(setCode, setName)].filter(Boolean).join(" ");
   return `https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=${encodeURIComponent(query)}&view=grid`;
 }
 

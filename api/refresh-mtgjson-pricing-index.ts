@@ -6,7 +6,8 @@ const DEFAULT_SET_LIST_URL = "https://mtgjson.com/api/v5/SetList.json.zip";
 const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
 const DEFAULT_PRICES_URL = "https://mtgjson.com/api/v5/AllPricesToday.json.zip";
 const MANIFEST_PATHNAME = "mtgjson/pricing-index-manifest.json";
-const INDEX_VERSION = 5;
+// v6 corrects provider-treatment semantics: frame era alone is not Retro.
+const INDEX_VERSION = 6;
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,OPTIONS",

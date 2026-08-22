@@ -4,7 +4,7 @@ var FINISH_LABELS = {
   foil: "Foil",
   etched: "Etched"
 };
-var PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION = 5;
+var PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION = 6;
 function pricingIndexSupportsPhysicalDimensions(version) {
   return Number(version) >= PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION;
 }
@@ -276,6 +276,39 @@ function normalizePricingPhysicalSelection(card, selection, requestedFlavorName 
     ) : ""
   };
 }
+function selectManualPricingSet(sourceRow, card, selectedSetCode) {
+  const row = normalizePricingAssistantRow(sourceRow);
+  const setCode = selectedSetCode.toUpperCase();
+  const hasSet = editionOptions(card).some((edition) => edition.setCode === setCode);
+  if (!row.resolved || !hasSet) return row;
+  const choices = finishChoices(card, setCode);
+  const finishChoice = choices.find((choice) => choice.finish === "normal") || choices[0];
+  if (!finishChoice) return {
+    ...row,
+    setCode,
+    setSelectionSource: "manual",
+    selectedPrintingUuid: ""
+  };
+  const treatments = compatibleTreatmentOptions(
+    card,
+    setCode,
+    finishChoice.finish,
+    finishChoice.foilTreatment
+  );
+  const treatment = treatments.includes("standard") ? "standard" : treatments[0] || "standard";
+  return {
+    ...row,
+    setSelectionSource: "manual",
+    ...normalizePricingPhysicalSelection(card, {
+      setCode,
+      finish: finishChoice.finish,
+      foilTreatment: finishChoice.foilTreatment,
+      treatment,
+      // The previous set's exact art/product identity cannot cross sets.
+      selectedPrintingUuid: ""
+    })
+  };
+}
 function pricingSelectionForPrintingUuid(card, current, selectedPrintingUuid, requestedFlavorName = "") {
   if (!selectedPrintingUuid) {
     return normalizePricingPhysicalSelection(card, { ...current, selectedPrintingUuid: "" }, requestedFlavorName);
@@ -337,6 +370,7 @@ function normalizePricingAssistantRow(row) {
     requestedFinish: row.requestedFinish,
     requestedFoilTreatment: row.requestedFoilTreatment,
     requestedTreatment: row.requestedTreatment || "",
+    setSelectionSource: row.setSelectionSource === "manual" ? "manual" : "default",
     setCode: row.setCode || "",
     selectedPrintingUuid: row.selectedPrintingUuid || "",
     finish: row.finish || "normal",
@@ -344,6 +378,157 @@ function normalizePricingAssistantRow(row) {
     foilTreatment: legacySurge ? "surge" : row.foilTreatment || "standard",
     priceOverride: row.priceOverride ?? null
   };
+}
+function createPricingRowsFromFormatterItems(items) {
+  return items.map((item, order) => {
+    const inputName = item.inputName || String(order);
+    const sourceIndex = item.index ?? order;
+    const groupId = `card-${sourceIndex}-${pricingNameKey(inputName).replace(/[^a-z0-9]/g, "-")}`;
+    const requestedQuantity = Math.max(1, Number(item.quantity) || 1);
+    const canonicalName = item.card?.name || item.mtgjsonCard?.name || item.requestedDisplayName || item.alternateTitle || inputName;
+    const displayName = item.alternateTitle || item.requestedDisplayName || canonicalName;
+    return normalizePricingAssistantRow({
+      id: `${groupId}-original`,
+      groupId,
+      sourceIndex,
+      requestedQuantity,
+      isBasicLand: Boolean(item.isBasicLand),
+      quantity: requestedQuantity,
+      found: false,
+      resolved: item.status === "found",
+      displayName,
+      canonicalName,
+      requestedFlavorName: item.alternateTitle || item.requestedDisplayName || "",
+      requestedSetCode: item.requestedPrinting?.setCode || "",
+      requestedFinish: item.requestedPrinting?.finish,
+      requestedFoilTreatment: item.requestedPrinting?.foilTreatment,
+      requestedTreatment: item.requestedPrinting?.treatment || "",
+      setCode: "",
+      selectedPrintingUuid: "",
+      finish: "normal",
+      treatment: "standard",
+      foilTreatment: "standard",
+      priceOverride: null
+    });
+  });
+}
+function reconcilePricingRowsWithFormatterItems(currentRows, items) {
+  const freshRows = createPricingRowsFromFormatterItems(items);
+  const manualRows = currentRows.filter((row) => row.manuallyCreated);
+  const formatterRows = currentRows.filter((row) => !row.manuallyCreated);
+  const identityFields = (fresh) => ({
+    groupId: fresh.groupId,
+    sourceIndex: fresh.sourceIndex,
+    requestedQuantity: fresh.requestedQuantity,
+    isBasicLand: fresh.isBasicLand,
+    resolved: fresh.resolved,
+    displayName: fresh.displayName,
+    canonicalName: fresh.canonicalName,
+    requestedFlavorName: fresh.requestedFlavorName,
+    requestedSetCode: fresh.requestedSetCode,
+    requestedFinish: fresh.requestedFinish,
+    requestedFoilTreatment: fresh.requestedFoilTreatment,
+    requestedTreatment: fresh.requestedTreatment
+  });
+  const reconciled = freshRows.flatMap((fresh) => {
+    const existing = formatterRows.filter((row) => row.sourceIndex === fresh.sourceIndex);
+    return existing.length ? existing.map((row) => ({ ...row, ...identityFields(fresh) })) : [fresh];
+  });
+  return [...reconciled, ...manualRows];
+}
+function pricingPhysicalSelectionIsValid(row, card) {
+  return matchingPrintings(
+    card,
+    row.setCode,
+    row.treatment,
+    row.finish,
+    row.selectedPrintingUuid || "",
+    row.foilTreatment || "standard"
+  ).length > 0;
+}
+function initializePricingRowSelection(sourceRow, card, referenceDate = /* @__PURE__ */ new Date()) {
+  const row = normalizePricingAssistantRow(sourceRow);
+  if (!row.resolved || !card) return row;
+  const editions = editionOptions(card);
+  if (!editions.length) return row;
+  const hasSet = (setCode2 = "") => editions.some((edition) => edition.setCode === setCode2.toUpperCase());
+  const hasManualSetSelection = row.setSelectionSource === "manual" && hasSet(row.setCode);
+  const useInitialPreferences = !hasManualSetSelection;
+  const requestedSetCode = row.requestedSetCode.toUpperCase();
+  const flavorPrinting = useInitialPreferences && row.requestedFlavorName ? card.printings.find((printing) => pricingNameKey(printing.flavorName || "") === pricingNameKey(row.requestedFlavorName)) : void 0;
+  const setCode = hasManualSetSelection ? row.setCode.toUpperCase() : hasSet(requestedSetCode) ? requestedSetCode : flavorPrinting?.setCode || (hasSet(row.setCode) ? row.setCode.toUpperCase() : preferredDefaultEdition(card, referenceDate)?.setCode || "");
+  if (!setCode) return row;
+  const choices = finishChoices(card, setCode);
+  if (!choices.length) return row;
+  const existingDimensionsValid = matchingPrintings(
+    card,
+    row.setCode,
+    row.treatment,
+    row.finish,
+    "",
+    row.foilTreatment || "standard"
+  ).length > 0;
+  const requestedChoice = useInitialPreferences && row.requestedFinish ? choices.find((choice) => choice.finish === row.requestedFinish && choice.foilTreatment === (row.requestedFoilTreatment || "standard") && (!row.requestedTreatment || compatibleTreatmentOptions(
+    card,
+    setCode,
+    choice.finish,
+    choice.foilTreatment
+  ).includes(row.requestedTreatment))) : void 0;
+  const requestedTreatmentChoice = useInitialPreferences && row.requestedTreatment ? choices.find((choice) => compatibleTreatmentOptions(
+    card,
+    setCode,
+    choice.finish,
+    choice.foilTreatment
+  ).includes(row.requestedTreatment)) : void 0;
+  const flavorChoice = useInitialPreferences && flavorPrinting?.setCode === setCode ? choices.find((choice) => printingMatchesFinishChoice(
+    flavorPrinting,
+    choice.finish,
+    choice.foilTreatment
+  )) : void 0;
+  const existingChoice = existingDimensionsValid && row.setCode === setCode ? choices.find((choice) => choice.finish === row.finish && choice.foilTreatment === (row.foilTreatment || "standard")) : void 0;
+  const finishChoice = requestedChoice || requestedTreatmentChoice || flavorChoice || existingChoice || choices.find((choice) => choice.finish === "normal") || choices[0];
+  const treatments = compatibleTreatmentOptions(
+    card,
+    setCode,
+    finishChoice.finish,
+    finishChoice.foilTreatment
+  );
+  if (!treatments.length) return row;
+  const flavorTreatment = useInitialPreferences && flavorPrinting?.setCode === setCode ? visualTreatmentsForPrinting(flavorPrinting).find((treatment2) => treatments.includes(treatment2)) : void 0;
+  const treatment = useInitialPreferences && row.requestedTreatment && treatments.includes(row.requestedTreatment) ? row.requestedTreatment : flavorTreatment || (existingDimensionsValid && row.setCode === setCode && treatments.includes(row.treatment) ? row.treatment : treatments.includes("standard") ? "standard" : treatments[0]);
+  const preferFlavorUuid = Boolean(
+    useInitialPreferences && flavorPrinting && flavorPrinting.setCode === setCode && printingMatchesFinishChoice(flavorPrinting, finishChoice.finish, finishChoice.foilTreatment) && visualTreatmentsForPrinting(flavorPrinting).includes(treatment)
+  );
+  return {
+    ...row,
+    ...normalizePricingPhysicalSelection(card, {
+      setCode,
+      finish: finishChoice.finish,
+      foilTreatment: finishChoice.foilTreatment,
+      treatment,
+      selectedPrintingUuid: preferFlavorUuid ? "" : row.selectedPrintingUuid || ""
+    }, useInitialPreferences ? row.requestedFlavorName : "")
+  };
+}
+function initializeFoundPricingSelection(row, card, referenceDate = /* @__PURE__ */ new Date()) {
+  return {
+    ...initializePricingRowSelection(row, card, referenceDate),
+    found: true
+  };
+}
+function pricingRowWarningState({
+  resolved,
+  found,
+  catalogState,
+  hydrating,
+  automaticStatus,
+  priceValid
+}) {
+  if (!resolved || catalogState === "error") return "unavailable";
+  if (!found) return "none";
+  if (hydrating || catalogState === "idle" || catalogState === "loading" || automaticStatus === "loading") return "loading";
+  if (priceValid) return "none";
+  return automaticStatus === "ambiguous" ? "ambiguous" : "unavailable";
 }
 function createManualPricingRow(id, groupId, displayName, canonicalName, requestedFlavorName = "") {
   return normalizePricingAssistantRow({
@@ -477,8 +662,13 @@ function priceWithListedMedianFallback(listedMedian, mtgjson) {
     message: `Using MTGJSON fallback (${mtgjson.message}) because ${listedMedian.message}`
   };
 }
-function tcgplayerCardSearchUrl(cardName, setName = "") {
-  const query = [cardName.trim(), setName.trim()].filter(Boolean).join(" ");
+function setSearchTerm(setCode = "", setName = "") {
+  const code = setCode.trim();
+  if (code.toUpperCase() === "PLST") return "List";
+  return code || setName.trim();
+}
+function tcgplayerCardSearchUrl(cardName, setCode = "", setName = "") {
+  const query = [cardName.trim(), setSearchTerm(setCode, setName)].filter(Boolean).join(" ");
   return `https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=${encodeURIComponent(query)}&view=grid`;
 }
 function receiptTreatment(treatment, finish, foilTreatment = "standard") {
@@ -498,6 +688,7 @@ export {
   compatibleTreatmentOptions,
   convertCurrencyPrice,
   createManualPricingRow,
+  createPricingRowsFromFormatterItems,
   editionOptions,
   exactPrintingUuidForSelection,
   finishChoiceKey,
@@ -505,6 +696,8 @@ export {
   finishOptions,
   foilTreatmentForPrinting,
   formatPrice,
+  initializeFoundPricingSelection,
+  initializePricingRowSelection,
   listedMedianPriceForFinish,
   matchingPrintings,
   minimumPriceForSelection,
@@ -522,16 +715,21 @@ export {
   pricingDisplayName,
   pricingIndexSupportsPhysicalDimensions,
   pricingNameKey,
+  pricingPhysicalSelectionIsValid,
   pricingQuantityMaximum,
+  pricingRowWarningState,
   pricingSelectionForPrintingUuid,
   pricingShardKey,
   pricingVariantOptions,
   printingMatchesFinishChoice,
   printingsForSelection,
   receiptTreatment,
+  reconcilePricingRowsWithFormatterItems,
   remainingRequestedQuantity,
   requiresPriceVarianceReview,
+  selectManualPricingSet,
   selectableMtgjsonPriceSources,
+  setSearchTerm,
   shouldShowPricingVariant,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,

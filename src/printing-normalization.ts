@@ -4,19 +4,31 @@
  * one place for the MTGJSON index and Scryfall fallback paths.
  */
 export function treatmentsForRawPrinting(print: Record<string, any>) {
-  const values = [
+  const frameEffectValues = [
     ...(Array.isArray(print.frameEffects) ? print.frameEffects : []),
     ...(Array.isArray(print.frame_effects) ? print.frame_effects : []),
+  ];
+  const promoTypeValues = [
     ...(Array.isArray(print.promoTypes) ? print.promoTypes : []),
     ...(Array.isArray(print.promo_types) ? print.promo_types : []),
   ];
-  const effects = new Set(values.map((value) => String(value).toLowerCase().replace(/[^a-z]/g, "")));
-  const frameVersion = String(print.frameVersion ?? print.frame_version ?? print.frame ?? "");
+  const normalizeValues = (values: unknown[]) => new Set(
+    values.map((value) => String(value).toLowerCase().replace(/[^a-z]/g, "")),
+  );
+  const frameEffects = normalizeValues(frameEffectValues);
+  const promoTypes = normalizeValues(promoTypeValues);
+  const effects = new Set([...frameEffects, ...promoTypes]);
+  const frameVersion = String(print.frameVersion ?? print.frame_version ?? print.frame ?? "").trim();
   const borderless = String(print.borderColor ?? print.border_color ?? "").toLowerCase() === "borderless"
     || effects.has("borderless");
-  // The original Magic card frame is a reliable retro signal. boosterfun alone
-  // is deliberately not: it also covers showcase, borderless, and other variants.
-  if (frameVersion === "1997" || effects.has("retroframe") || effects.has("oldframe") || effects.has("retro")) return ["retro"];
+  const explicitlyRetro = effects.has("retroframe")
+    || effects.has("oldframe")
+    || effects.has("oldborder")
+    || effects.has("retro");
+  // A 1997 frame can simply reproduce an older card, as The List does. Treat it
+  // as a marketed Retro variant only when the provider also marks it booster-fun.
+  // Conversely, boosterfun alone covers many unrelated treatments.
+  if (explicitlyRetro || (frameVersion === "1997" && promoTypes.has("boosterfun"))) return ["retro"];
   // Explicit frame effects are more specific than generic full-art/border metadata.
   // In particular, never turn one extended-art record into both Extended Art and
   // Borderless merely because a provider also describes its border as borderless.

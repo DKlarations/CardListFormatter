@@ -17,6 +17,7 @@ type SavedFormattedList = {
     needsReviewCount?: number;
     printFallbackCount?: number;
   };
+  formatterItems?: Array<Record<string, unknown>>;
 };
 
 let redis: Redis | null = null;
@@ -76,7 +77,7 @@ function cleanNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
 }
 
-function normalizePayload(payload: any): SavedFormattedList {
+export function normalizePayload(payload: any): SavedFormattedList {
   return {
     input: cleanText(payload?.input),
     output: cleanText(payload?.output),
@@ -91,6 +92,9 @@ function normalizePayload(payload: any): SavedFormattedList {
       needsReviewCount: cleanNumber(payload?.stats?.needsReviewCount),
       printFallbackCount: cleanNumber(payload?.stats?.printFallbackCount),
     },
+    formatterItems: Array.isArray(payload?.formatterItems)
+      ? payload.formatterItems.filter((item: unknown) => Boolean(item) && typeof item === "object")
+      : [],
   };
 }
 

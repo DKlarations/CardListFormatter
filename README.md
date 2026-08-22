@@ -1,6 +1,6 @@
 # CardListFormatter
 
-CardListFormatter turns a customer Magic: The Gathering pull list into a readable, printable work list, then helps staff record what was found, select its printing details, price it, and print or share the priced result.
+CardListFormatter turns a customer Magic: The Gathering pull list into a readable, printable work list, then helps staff record what was found, select its printing details, price it, and print the priced result.
 
 ## Workflow
 
@@ -10,7 +10,7 @@ CardListFormatter turns a customer Magic: The Gathering pull list into a readabl
 4. Mark cards found.
 5. Select printing details.
 6. Price cards.
-7. Print or share the priced result.
+7. Print the priced result or copy a link to the processed pull list for a fresh pricing session.
 
 ## Technology
 
@@ -21,7 +21,7 @@ React, TypeScript, Vite, Vercel API routes, MTGJSON, Scryfall, and a TCGplayer p
 - `src/formatter.ts` — pull-list parsing, resolution, enrichment, sorting, and printable output.
 - `src/pricing.ts` — pure pricing, printing-selection, price-entry, and TCGplayer URL helpers.
 - `src/PricingPanel.tsx` — Pricing Assistant state and UI.
-- `src/share-link.ts` — compressed, versioned input/formatted/pricing share state.
+- `src/share-link.ts` — compressed, versioned processed-formatter share state; pricing-session work is intentionally excluded.
 - `src/printing-normalization.ts` — provider-record treatment normalization shared by price-index and fallback paths.
 - `api/refresh-mtgjson-index.ts` — normal formatter MTGJSON index refresh.
 - `api/refresh-mtgjson-pricing-index.ts` — UUID-keyed pricing index refresh.

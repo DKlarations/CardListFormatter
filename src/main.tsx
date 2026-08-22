@@ -5,14 +5,13 @@ import {
   Check,
   CircleX,
   Clipboard,
-  Copy,
   Bug,
   Download,
+  Link2,
   Loader2,
   Printer,
   RefreshCw,
   Search,
-  Share2,
   Send,
   Sparkles,
   Trash2,
@@ -20,6 +19,7 @@ import {
 import {
   beginScryfallRun,
   clearMtgjsonIndexCache,
+  compactFormatterItems,
   createSampleList,
   endScryfallRun,
   enrichPrintHistories,
@@ -32,7 +32,6 @@ import {
   safeFileName,
 } from "./formatter";
 import { decodeFormatterHash, encodeFormattedHash } from "./share-link";
-import type { PricingAssistantState } from "./pricing";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
 import receiptLogo from "../images/Logo-LineArt.png";
@@ -53,7 +52,7 @@ const PRODUCTION_ORIGIN = "https://card-list-formatter.vercel.app";
 
 function IconButton({ children, onClick, title, disabled = false, variant = "secondary" }: IconButtonProps) {
   return (
-    <button className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
+    <button type="button" className={`icon-button ${variant}`} onClick={onClick} title={title} disabled={disabled}>
       {children}
     </button>
   );
@@ -95,21 +94,6 @@ function formatterApiOrigin() {
   return window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
     ? PRODUCTION_ORIGIN
     : window.location.origin;
-}
-
-function pricingShareItems(items: any[]) {
-  return items.map((item) => ({
-    index: item.index,
-    quantity: item.quantity,
-    inputName: item.inputName,
-    status: item.status,
-    isBasicLand: Boolean(item.isBasicLand),
-    isToken: Boolean(item.isToken),
-    alternateTitle: item.alternateTitle || "",
-    requestedDisplayName: item.requestedDisplayName || "",
-    requestedPrinting: item.requestedPrinting || undefined,
-    card: item.card?.name ? { name: item.card.name } : undefined,
-  }));
 }
 
 function formatMtgjsonManifestLabel(manifest) {
@@ -264,7 +248,7 @@ function App() {
   const [mtgjsonUpdateLabel, setMtgjsonUpdateLabel] = useState("MTGJSON update unknown");
   const [message, setMessage] = useState(() => (
     sharedFormatterState.output
-      ? "Formatted list loaded from Teams."
+      ? "Shared processed list loaded."
       : sharedListId
         ? "Loading saved formatted list..."
       : sharedFormatterState.input
@@ -272,8 +256,7 @@ function App() {
         : "Paste a customer list, then process."
   ));
   const [reliabilityNote, setReliabilityNote] = useState(() => sharedFormatterState.reliabilityNote || "");
-  const [pricingItems, setPricingItems] = useState<any[]>(() => sharedFormatterState.pricingItems || []);
-  const [pricingState, setPricingState] = useState<PricingAssistantState | null>(() => sharedFormatterState.pricing || null);
+  const [formatterItems, setFormatterItems] = useState<any[]>(() => sharedFormatterState.formatterItems || []);
   const abortControllerRef = useRef(null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
@@ -329,8 +312,9 @@ function App() {
         setPreloadedStats(saved.stats || null);
         setReliabilityNote(saved.reliabilityNote || "");
         setResolvedItems([]);
-        setPricingItems(Array.isArray(saved.pricingItems) ? saved.pricingItems : []);
-        setPricingState(saved.pricing?.rows ? saved.pricing : null);
+        setFormatterItems(Array.isArray(saved.formatterItems)
+          ? saved.formatterItems
+          : Array.isArray(saved.pricingItems) ? saved.pricingItems : []);
         setMessage("Formatted list loaded from Teams.");
       } catch (error) {
         if (ignore) return;
@@ -413,8 +397,7 @@ function App() {
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
       setResolvedItems(inferred.items);
-      setPricingItems(inferred.items);
-      setPricingState(null);
+      setFormatterItems(inferred.items);
       setPreloadedOutput("");
       setPreloadedStats(null);
       setProcessedAt(new Date().toISOString());
@@ -470,7 +453,7 @@ function App() {
       });
 
       setResolvedItems(nextItems);
-      setPricingItems(nextItems);
+      setFormatterItems(nextItems);
       const reviewCount = nextItems.filter((item) => item.status !== "found").length;
       setReliabilityNote(reliabilityMessage(nextItems, providerOptions));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
@@ -489,15 +472,8 @@ function App() {
     setMessage("Canceling current Scryfall work...");
   }
 
-  // Copies the formatted text to the clipboard for quick paste-and-go store work.
-  async function copyOutput() {
-    if (!output) return;
-    await navigator.clipboard.writeText(output);
-    setMessage("Output copied.");
-  }
-
-  function sharedPricingItems() {
-    return pricingItems.length ? pricingItems : resolvedItems;
+  function sharedFormatterItems() {
+    return formatterItems.length ? formatterItems : resolvedItems;
   }
 
   function sharedUrl() {
@@ -508,8 +484,7 @@ function App() {
       reliabilityNote,
       customer: outputCustomer,
       stats: { resolvedCount, needsReviewCount: needsReview, printFallbackCount: printFallbacks },
-      pricingItems: pricingShareItems(sharedPricingItems()),
-      pricing: pricingState || undefined,
+      formatterItems: compactFormatterItems(sharedFormatterItems()),
     });
     return `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
   }
@@ -518,24 +493,9 @@ function App() {
     if (!showPricing) return;
     try {
       await navigator.clipboard.writeText(sharedUrl());
-      setMessage("Share link copied. It includes the pull list and current Pricing Assistant selections.");
+      setMessage("Link copied.");
     } catch {
       setMessage("Could not copy the share link. Your browser may block clipboard access.");
-    }
-  }
-
-  async function shareProcessedList() {
-    if (!showPricing) return;
-    const url = sharedUrl();
-    if (!navigator.share) {
-      await copyShareLink();
-      return;
-    }
-    try {
-      await navigator.share({ title: document.title, url });
-      setMessage("Share link ready.");
-    } catch (error) {
-      if ((error as DOMException)?.name !== "AbortError") await copyShareLink();
     }
   }
 
@@ -595,8 +555,7 @@ function App() {
     setPreloadedOutput("");
     setPreloadedStats(null);
     setReliabilityNote("");
-    setPricingItems([]);
-    setPricingState(null);
+    setFormatterItems([]);
     setMessage("Input changed. Process again when ready.");
   }
 
@@ -764,21 +723,15 @@ function App() {
                 />
                 Case Check
               </label>
-              <IconButton onClick={copyOutput} title="Copy output" disabled={!output}>
-                <Copy size={18} />
+              <IconButton onClick={copyShareLink} title="Copy a link to this processed pull list" disabled={!showPricing}>
+                <Link2 size={18} /><span>Copy Link</span>
               </IconButton>
               <IconButton onClick={downloadOutput} title="Download .txt" disabled={!output}>
                 <Download size={18} />
               </IconButton>
-              <IconButton onClick={printOutput} title="Print output" disabled={!output}>
+              <IconButton onClick={printOutput} title="Print output" disabled={!output} variant="primary">
                 <Printer size={18} /><span>Print Pull List</span>
               </IconButton>
-              {showPricing && <IconButton onClick={shareProcessedList} title="Share processed pull list">
-                <Share2 size={18} /><span>Share</span>
-              </IconButton>}
-              {showPricing && <IconButton onClick={copyShareLink} title="Copy a link with pricing selections">
-                <Copy size={18} /><span>Copy Link</span>
-              </IconButton>}
             </div>
           </div>
 
@@ -794,15 +747,14 @@ function App() {
         {showPricing && (
           <Suspense fallback={showPricing ? <div className="pricing-loading-panel">Loading pricing assistant…</div> : null}>
             <PricingPanel
+              key={processedAt}
               visible
-              items={pricingItems.length ? pricingItems : resolvedItems}
+              items={formatterItems.length ? formatterItems : resolvedItems}
               customer={outputCustomer || {}}
               processedAt={processedAt}
               apiOrigin={formatterApiOrigin()}
               logoUrl={receiptLogo}
               onMessage={setMessage}
-              initialState={pricingState}
-              onStateChange={setPricingState}
             />
           </Suspense>
         )}
