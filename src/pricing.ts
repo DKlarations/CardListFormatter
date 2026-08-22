@@ -1,4 +1,5 @@
 export type PricingFinish = "normal" | "foil" | "etched";
+export type FoilTreatment = "standard" | "surge";
 
 export type PricingValue = {
   value: number;
@@ -23,7 +24,11 @@ export type PricingPrinting = {
   releaseDate: string;
   number: string;
   rarity: string;
+  flavorName?: string;
+  artist?: string;
   treatments: string[];
+  /** Provider foil technology; deliberately separate from visual treatments. */
+  foilTreatment?: FoilTreatment;
   finishes: PricingFinish[];
   prices: Partial<Record<PricingFinish, PricingValue>>;
   priceListings?: Partial<Record<PricingFinish, Record<string, PricingValue>>>;
@@ -35,6 +40,70 @@ export type PricingCard = {
 };
 
 export type PricingCatalog = Record<string, PricingCard>;
+
+/** Serializable Pricing Assistant work; market data is rehydrated separately. */
+export type PricingAssistantRowState = {
+  id: string;
+  groupId: string;
+  sourceIndex: number;
+  requestedQuantity: number;
+  isBasicLand: boolean;
+  quantity: number;
+  found: boolean;
+  resolved: boolean;
+  /** Customer/staff-facing title. */
+  displayName: string;
+  /** Canonical name used to retrieve the catalog and price data. */
+  canonicalName: string;
+  /** Legacy v2 share-link field; normalize it on restore rather than reusing it. */
+  cardName?: string;
+  manuallyCreated?: boolean;
+  requestedFlavorName?: string;
+  requestedSetCode?: string;
+  requestedFinish?: PricingFinish;
+  requestedFoilTreatment?: FoilTreatment;
+  requestedTreatment?: string;
+  setCode: string;
+  selectedPrintingUuid?: string;
+  finish: PricingFinish;
+  treatment: string;
+  foilTreatment?: FoilTreatment;
+  priceOverride: string | null;
+};
+
+export type PricingAssistantState = {
+  pricingSource: string;
+  rows: PricingAssistantRowState[];
+};
+
+export type RequestedPrintingPreference = {
+  setCode?: string;
+  treatment?: string;
+  finish?: PricingFinish;
+  foilTreatment?: FoilTreatment;
+  /** A customer-facing reskin/flavor title that can identify an exact printing. */
+  flavorName?: string;
+};
+
+export type PricingFinishChoice = {
+  key: string;
+  label: string;
+  finish: PricingFinish;
+  foilTreatment: FoilTreatment;
+};
+
+export type PricingVariantOption = {
+  uuid: string;
+  label: string;
+};
+
+export type PricingPhysicalSelection = {
+  setCode: string;
+  finish: PricingFinish;
+  foilTreatment: FoilTreatment;
+  treatment: string;
+  selectedPrintingUuid: string;
+};
 
 export type PricingSelection = {
   status: "ready" | "loading" | "select-printing" | "unavailable" | "ambiguous";
@@ -50,10 +119,16 @@ export type TcgplayerPricePoint = {
 };
 
 export const FINISH_LABELS: Record<PricingFinish, string> = {
-  normal: "Nonfoil",
+  normal: "Non-Foil",
   foil: "Foil",
   etched: "Etched",
 };
+
+export const PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION = 5;
+
+export function pricingIndexSupportsPhysicalDimensions(version: unknown) {
+  return Number(version) >= PRICING_INDEX_PHYSICAL_DIMENSIONS_VERSION;
+}
 
 export const TREATMENT_LABELS: Record<string, string> = {
   standard: "Standard",
@@ -150,6 +225,34 @@ export function cardFromCatalog(catalog: PricingCatalog, name: string) {
   return catalog[pricingNameKey(name)] || null;
 }
 
+/** Reads v3 surge-in-treatment records as the v4 orthogonal representation. */
+export function visualTreatmentsForPrinting(printing: PricingPrinting) {
+  const visual = (printing.treatments || []).filter((treatment) => treatment !== "surge");
+  return visual.length ? visual : ["standard"];
+}
+
+export function foilTreatmentForPrinting(printing: PricingPrinting): FoilTreatment {
+  return printing.foilTreatment || ((printing.treatments || []).includes("surge") ? "surge" : "standard");
+}
+
+/** The single gate used by Finish, Treatment, Art, price, and product selection. */
+export function printingMatchesFinishChoice(
+  printing: PricingPrinting,
+  finish: PricingFinish,
+  foilTreatment: FoilTreatment = "standard",
+) {
+  const printingFoilTreatment = foilTreatmentForPrinting(printing);
+  if (printingFoilTreatment === "surge") {
+    return finish === "foil"
+      && foilTreatment === "surge"
+      && printing.finishes.includes("foil");
+  }
+  if (finish === "foil") {
+    return foilTreatment === "standard" && printing.finishes.includes("foil");
+  }
+  return printing.finishes.includes(finish);
+}
+
 export function editionOptions(card: PricingCard | null) {
   if (!card) return [];
 
@@ -209,9 +312,9 @@ export function treatmentOptions(card: PricingCard | null, setCode: string) {
   const values = new Set(
     card.printings
       .filter((printing) => printing.setCode === setCode)
-      .flatMap((printing) => printing.treatments || ["standard"]),
+      .flatMap(visualTreatmentsForPrinting),
   );
-  values.add("standard");
+  if (!values.size) values.add("standard");
   return Array.from(values).sort((a, b) => {
     if (a === "standard") return -1;
     if (b === "standard") return 1;
@@ -219,38 +322,386 @@ export function treatmentOptions(card: PricingCard | null, setCode: string) {
   });
 }
 
+function sortTreatmentValues(values: Iterable<string>) {
+  return Array.from(new Set(values)).sort((a, b) => {
+    if (a === "standard") return -1;
+    if (b === "standard") return 1;
+    return (TREATMENT_LABELS[a] || a).localeCompare(TREATMENT_LABELS[b] || b);
+  });
+}
+
+export function compatibleTreatmentOptions(
+  card: PricingCard | null,
+  setCode: string,
+  finish: PricingFinish,
+  foilTreatment: FoilTreatment = "standard",
+) {
+  if (!card || !setCode) return [];
+  const values = new Set(
+    card.printings
+      .filter((printing) => printing.setCode === setCode)
+      .filter((printing) => printingMatchesFinishChoice(printing, finish, foilTreatment))
+      .flatMap(visualTreatmentsForPrinting),
+  );
+  return sortTreatmentValues(values);
+}
+
+/** Keeps visual treatment valid after a staff-facing finish change. */
+export function treatmentForFinishChoice(
+  card: PricingCard | null,
+  setCode: string,
+  currentTreatment: string,
+  finish: PricingFinish,
+  foilTreatment: FoilTreatment = "standard",
+) {
+  const compatible = compatibleTreatmentOptions(card, setCode, finish, foilTreatment);
+  if (compatible.includes(currentTreatment)) return currentTreatment;
+  return compatible.includes("standard") ? "standard" : compatible[0] || currentTreatment;
+}
+
+export function preferredDefaultTreatment(card: PricingCard | null, setCode: string) {
+  const treatments = treatmentOptions(card, setCode);
+  return treatments.includes("standard") ? "standard" : treatments[0] || "standard";
+}
+
 export function finishOptions(card: PricingCard | null, setCode: string, treatment: string) {
   if (!card || !setCode) return ["normal", "foil", "etched"] as PricingFinish[];
   const values = new Set<PricingFinish>();
   card.printings
     .filter((printing) => printing.setCode === setCode)
-    .filter((printing) => printing.treatments.includes(treatment))
+    .filter((printing) => visualTreatmentsForPrinting(printing).includes(treatment))
     .forEach((printing) => printing.finishes.forEach((finish) => values.add(finish)));
   if (!values.size) values.add("normal");
   return (["normal", "foil", "etched"] as PricingFinish[]).filter((finish) => values.has(finish));
 }
 
-export function printingsForSelection(
+export function finishChoices(card: PricingCard | null, setCode: string, _treatment = ""): PricingFinishChoice[] {
+  if (!card || !setCode) return [];
+  const records = card.printings
+    .filter((printing) => printing.setCode === setCode);
+  const choices: PricingFinishChoice[] = [];
+  if (records.some((printing) => printingMatchesFinishChoice(printing, "normal"))) {
+    choices.push({ key: "nonfoil", label: "Non-Foil", finish: "normal", foilTreatment: "standard" });
+  }
+  if (records.some((printing) => printingMatchesFinishChoice(printing, "foil", "standard"))) {
+    choices.push({ key: "foil", label: "Foil", finish: "foil", foilTreatment: "standard" });
+  }
+  if (records.some((printing) => printingMatchesFinishChoice(printing, "foil", "surge"))) {
+    choices.push({ key: "surge", label: "Surge", finish: "foil", foilTreatment: "surge" });
+  }
+  if (records.some((printing) => printingMatchesFinishChoice(printing, "etched"))) {
+    choices.push({ key: "etched", label: "Etched", finish: "etched", foilTreatment: "standard" });
+  }
+  return choices;
+}
+
+export function finishChoiceKey(finish: PricingFinish, foilTreatment: FoilTreatment = "standard") {
+  if (finish === "foil") return foilTreatment === "surge" ? "surge" : "foil";
+  return finish === "normal" ? "nonfoil" : "etched";
+}
+
+/** Chooses only valid catalog values, preserving an explicit customer preference first. */
+export function preferredPrintingSelection(
+  card: PricingCard | null,
+  requested: RequestedPrintingPreference = {},
+  referenceDate: Date | string = new Date(),
+) {
+  const editions = editionOptions(card);
+  const flavorPrinting = requested.flavorName
+    ? card?.printings.find((printing) => (
+      pricingNameKey(printing.flavorName || "") === pricingNameKey(requested.flavorName || "")
+    ))
+    : undefined;
+  const setCode = editions.some((edition) => edition.setCode === requested.setCode)
+    ? requested.setCode || ""
+    : flavorPrinting?.setCode || preferredDefaultEdition(card, referenceDate)?.setCode || "";
+  if (!setCode) return null;
+  const choices = finishChoices(card, setCode);
+  const flavorChoice = flavorPrinting
+    ? choices.find((choice) => printingMatchesFinishChoice(
+      flavorPrinting,
+      choice.finish,
+      choice.foilTreatment,
+    ))
+    : undefined;
+  const requestedChoice = choices.find((choice) => (
+    choice.finish === requested.finish
+      && choice.foilTreatment === (requested.foilTreatment || "standard")
+      && (!requested.treatment || compatibleTreatmentOptions(
+        card,
+        setCode,
+        choice.finish,
+        choice.foilTreatment,
+      ).includes(requested.treatment))
+  ));
+  const requestedTreatmentChoice = requested.treatment
+    ? choices.find((choice) => compatibleTreatmentOptions(
+      card,
+      setCode,
+      choice.finish,
+      choice.foilTreatment,
+    ).includes(requested.treatment || ""))
+    : undefined;
+  const finishChoice = requestedChoice
+    || requestedTreatmentChoice
+    || flavorChoice
+    || choices.find((choice) => choice.finish === "normal")
+    || choices[0];
+  if (!finishChoice) return null;
+  const treatments = compatibleTreatmentOptions(card, setCode, finishChoice.finish, finishChoice.foilTreatment);
+  const flavorTreatment = flavorPrinting
+    ? visualTreatmentsForPrinting(flavorPrinting).find((candidate) => treatments.includes(candidate))
+    : undefined;
+  const treatment = requested.treatment && treatments.includes(requested.treatment)
+    ? requested.treatment
+    : flavorTreatment || (treatments.includes("standard") ? "standard" : treatments[0]);
+  if (!treatment) return null;
+  return {
+    setCode,
+    treatment,
+    finish: finishChoice.finish,
+    foilTreatment: finishChoice.foilTreatment,
+  };
+}
+
+export function matchingPrintings(
   card: PricingCard | null,
   setCode: string,
   treatment: string,
   finish: PricingFinish,
+  selectedPrintingUuid = "",
+  foilTreatment: FoilTreatment = "standard",
 ) {
   if (!card || !setCode) return [];
   return card.printings
     .filter((printing) => printing.setCode === setCode)
-    .filter((printing) => printing.treatments.includes(treatment))
-    .filter((printing) => printing.finishes.includes(finish));
+    .filter((printing) => visualTreatmentsForPrinting(printing).includes(treatment))
+    .filter((printing) => printingMatchesFinishChoice(printing, finish, foilTreatment))
+    .filter((printing) => !selectedPrintingUuid || printing.uuid === selectedPrintingUuid);
 }
 
-export function tcgplayerProductIdForSelection(
+export const printingsForSelection = matchingPrintings;
+
+export function exactPrintingUuidForSelection(
   card: PricingCard | null,
   setCode: string,
   treatment: string,
   finish: PricingFinish,
+  currentUuid = "",
+  requestedFlavorName = "",
+  foilTreatment: FoilTreatment = "standard",
 ) {
-  const productIds = Array.from(new Set(
-    printingsForSelection(card, setCode, treatment, finish)
+  const candidates = matchingPrintings(card, setCode, treatment, finish, "", foilTreatment);
+  if (candidates.some((printing) => printing.uuid === currentUuid)) return currentUuid;
+  const flavorMatch = requestedFlavorName && candidates.find((printing) => (
+    pricingNameKey(printing.flavorName || "") === pricingNameKey(requestedFlavorName)
+  ));
+  if (flavorMatch) return flavorMatch.uuid;
+  const variants = pricingVariantOptions(card, setCode, treatment, finish, foilTreatment);
+  return variants.length === 1 ? variants[0].uuid : "";
+}
+
+export function pricingVariantOptions(
+  card: PricingCard | null,
+  setCode: string,
+  treatment: string,
+  finish: PricingFinish,
+  foilTreatment: FoilTreatment = "standard",
+): PricingVariantOption[] {
+  const groups = new Map<string, PricingPrinting[]>();
+  matchingPrintings(card, setCode, treatment, finish, "", foilTreatment).forEach((printing) => {
+    const key = [printing.number || "", pricingNameKey(printing.flavorName || ""), pricingNameKey(printing.artist || "")].join("|");
+    groups.set(key, [...(groups.get(key) || []), printing]);
+  });
+  return Array.from(groups.values()).map((group) => {
+    const printing = [...group].sort((a, b) => a.uuid.localeCompare(b.uuid))[0];
+    const details = [
+      printing.number ? `#${printing.number}` : "",
+      printing.flavorName || "",
+      printing.artist || "",
+    ].filter(Boolean);
+    return {
+      uuid: printing.uuid,
+      label: details.length ? details.join(" — ") : "Distinct printing",
+    };
+  });
+}
+
+export function shouldShowPricingVariant(found: boolean, options: PricingVariantOption[]) {
+  return found && options.length > 1;
+}
+
+/**
+ * Resolves the staff-facing physical dimensions in their UI order. The selected
+ * UUID is retained only when it still belongs to Set -> Finish -> Treatment;
+ * otherwise a lone remaining human variant is selected deterministically.
+ */
+export function normalizePricingPhysicalSelection(
+  card: PricingCard | null,
+  selection: Partial<PricingPhysicalSelection>,
+  requestedFlavorName = "",
+): PricingPhysicalSelection {
+  const setCode = selection.setCode || "";
+  const choices = finishChoices(card, setCode);
+  const currentChoice = choices.find((choice) => (
+    choice.finish === selection.finish
+      && choice.foilTreatment === (selection.foilTreatment || "standard")
+  ));
+  const choice = currentChoice || choices[0];
+  const finish = choice?.finish || selection.finish || "normal";
+  const foilTreatment = choice?.foilTreatment || (finish === "foil" ? selection.foilTreatment || "standard" : "standard");
+  const treatment = choice
+    ? treatmentForFinishChoice(card, setCode, selection.treatment || "standard", finish, foilTreatment)
+    : selection.treatment || "standard";
+  return {
+    setCode,
+    finish,
+    foilTreatment,
+    treatment,
+    selectedPrintingUuid: choice
+      ? exactPrintingUuidForSelection(
+        card,
+        setCode,
+        treatment,
+        finish,
+        selection.selectedPrintingUuid || "",
+        requestedFlavorName,
+        foilTreatment,
+      )
+      : "",
+  };
+}
+
+/**
+ * Defensive legacy/stale-state path: an explicitly chosen exact printing is
+ * authoritative for its finish technology and visual treatment. This never
+ * returns or mutates card identity fields.
+ */
+export function pricingSelectionForPrintingUuid(
+  card: PricingCard | null,
+  current: PricingPhysicalSelection,
+  selectedPrintingUuid: string,
+  requestedFlavorName = "",
+): PricingPhysicalSelection {
+  if (!selectedPrintingUuid) {
+    return normalizePricingPhysicalSelection(card, { ...current, selectedPrintingUuid: "" }, requestedFlavorName);
+  }
+  const printing = card?.printings.find((candidate) => (
+    candidate.uuid === selectedPrintingUuid && candidate.setCode === current.setCode
+  ));
+  if (!printing) {
+    return normalizePricingPhysicalSelection(card, { ...current, selectedPrintingUuid: "" }, requestedFlavorName);
+  }
+
+  let finish = current.finish;
+  let foilTreatment = current.foilTreatment;
+  const exactFoilTreatment = foilTreatmentForPrinting(printing);
+  if (printing.finishes.includes("foil") && exactFoilTreatment === "surge") {
+    finish = "foil";
+    foilTreatment = "surge";
+  } else if (!printing.finishes.includes(finish)
+    || (finish === "foil" && foilTreatment !== exactFoilTreatment)) {
+    if (printing.finishes.includes("foil")) {
+      finish = "foil";
+      foilTreatment = exactFoilTreatment;
+    } else if (printing.finishes.includes("normal")) {
+      finish = "normal";
+      foilTreatment = "standard";
+    } else {
+      finish = printing.finishes.includes("etched") ? "etched" : current.finish;
+      foilTreatment = "standard";
+    }
+  } else if (finish !== "foil") {
+    foilTreatment = "standard";
+  }
+
+  const exactTreatments = visualTreatmentsForPrinting(printing);
+  const treatment = exactTreatments.includes(current.treatment)
+    ? current.treatment
+    : exactTreatments.includes("standard") ? "standard" : exactTreatments[0] || current.treatment;
+  return normalizePricingPhysicalSelection(card, {
+    setCode: current.setCode,
+    finish,
+    foilTreatment,
+    treatment,
+    selectedPrintingUuid,
+  }, requestedFlavorName);
+}
+
+export function pricingDisplayName(displayName: string, canonicalName: string) {
+  return pricingNameKey(displayName) === pricingNameKey(canonicalName)
+    ? displayName
+    : `${displayName} (${canonicalName})`;
+}
+
+export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowState>): PricingAssistantRowState {
+  const canonicalName = row.canonicalName || row.cardName || row.displayName || "";
+  const legacySurge = row.treatment === "surge" && row.finish === "foil";
+  return {
+    id: row.id || "",
+    groupId: row.groupId || "",
+    sourceIndex: Number(row.sourceIndex) || 0,
+    requestedQuantity: Math.max(1, Number(row.requestedQuantity) || 1),
+    isBasicLand: Boolean(row.isBasicLand),
+    quantity: Math.max(0, Number(row.quantity) || 0),
+    found: Boolean(row.found),
+    resolved: Boolean(row.resolved),
+    displayName: row.displayName || row.cardName || canonicalName,
+    canonicalName,
+    manuallyCreated: Boolean(row.manuallyCreated),
+    requestedFlavorName: row.requestedFlavorName || "",
+    requestedSetCode: row.requestedSetCode || "",
+    requestedFinish: row.requestedFinish,
+    requestedFoilTreatment: row.requestedFoilTreatment,
+    requestedTreatment: row.requestedTreatment || "",
+    setCode: row.setCode || "",
+    selectedPrintingUuid: row.selectedPrintingUuid || "",
+    finish: row.finish || "normal",
+    treatment: legacySurge ? "standard" : row.treatment || "standard",
+    foilTreatment: legacySurge ? "surge" : row.foilTreatment || "standard",
+    priceOverride: row.priceOverride ?? null,
+  };
+}
+
+export function createManualPricingRow(
+  id: string,
+  groupId: string,
+  displayName: string,
+  canonicalName: string,
+  requestedFlavorName = "",
+): PricingAssistantRowState {
+  return normalizePricingAssistantRow({
+    id,
+    groupId,
+    sourceIndex: Number.MAX_SAFE_INTEGER,
+    requestedQuantity: 1,
+    isBasicLand: false,
+    quantity: 1,
+    found: false,
+    resolved: true,
+    displayName,
+    canonicalName,
+    manuallyCreated: true,
+    requestedFlavorName,
+    setCode: "",
+    selectedPrintingUuid: "",
+    finish: "normal",
+    treatment: "standard",
+    foilTreatment: "standard",
+    priceOverride: null,
+  });
+}
+
+export function tcgplayerProductIdsForSelection(
+  card: PricingCard | null,
+  setCode: string,
+  treatment: string,
+  finish: PricingFinish,
+  selectedPrintingUuid = "",
+  foilTreatment: FoilTreatment = "standard",
+) {
+  return Array.from(new Set(
+    printingsForSelection(card, setCode, treatment, finish, selectedPrintingUuid, foilTreatment)
       .map((printing) => (
         finish === "etched"
           ? printing.tcgplayerEtchedProductId || printing.tcgplayerProductId
@@ -258,6 +709,17 @@ export function tcgplayerProductIdForSelection(
       ))
       .filter(Boolean),
   ));
+}
+
+export function tcgplayerProductIdForSelection(
+  card: PricingCard | null,
+  setCode: string,
+  treatment: string,
+  finish: PricingFinish,
+  selectedPrintingUuid = "",
+  foilTreatment: FoilTreatment = "standard",
+) {
+  const productIds = tcgplayerProductIdsForSelection(card, setCode, treatment, finish, selectedPrintingUuid, foilTreatment);
   return productIds.length === 1 ? productIds[0] : "";
 }
 
@@ -283,6 +745,8 @@ export function priceForSelection(
   treatment: string,
   finish: PricingFinish,
   priceSource = "tcgplayer:retail",
+  selectedPrintingUuid = "",
+  foilTreatment: FoilTreatment = "standard",
 ): PricingSelection {
   if (!setCode) {
     return {
@@ -301,7 +765,7 @@ export function priceForSelection(
     };
   }
 
-  const candidates = printingsForSelection(card, setCode, treatment, finish);
+  const candidates = printingsForSelection(card, setCode, treatment, finish, selectedPrintingUuid, foilTreatment);
   const priced = candidates
     .map((printing) => {
       const indexedPrice = printing.priceListings?.[finish]?.[priceSource];
@@ -354,7 +818,7 @@ export function priceForSelection(
 export function parsePrice(value: string | number | null | undefined) {
   if (typeof value === "number") return Number.isFinite(value) && value >= 0 ? value : null;
   const cleaned = String(value ?? "").trim().replace(/^\$/, "");
-  if (!/^\d+(?:\.\d{0,2})?$/.test(cleaned)) return null;
+  if (!/^(?:\d+(?:\.\d{0,2})?|\.\d{1,2})$/.test(cleaned)) return null;
   const parsed = Number(cleaned);
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
@@ -408,13 +872,14 @@ export function priceWithListedMedianFallback(
   };
 }
 
-export function tcgplayerCardSearchUrl(cardName: string) {
-  return `https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=${encodeURIComponent(cardName.trim())}&view=grid`;
+export function tcgplayerCardSearchUrl(cardName: string, setName = "") {
+  const query = [cardName.trim(), setName.trim()].filter(Boolean).join(" ");
+  return `https://www.tcgplayer.com/search/magic/product?productLineName=magic&q=${encodeURIComponent(query)}&view=grid`;
 }
 
-export function receiptTreatment(treatment: string, finish: PricingFinish) {
+export function receiptTreatment(treatment: string, finish: PricingFinish, foilTreatment: FoilTreatment = "standard") {
   const treatmentLabel = TREATMENT_ABBREVIATIONS[treatment] || TREATMENT_LABELS[treatment] || treatment || "Std";
-  if (finish === "foil") return `${treatmentLabel} Foil`;
+  if (finish === "foil") return `${treatmentLabel}${foilTreatment === "surge" ? " Surge Foil" : " Foil"}`;
   if (finish === "etched") return `${treatmentLabel} Etched`;
   return treatmentLabel;
 }

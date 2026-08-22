@@ -1,11 +1,12 @@
 import { put } from "@vercel/blob";
 import { strFromU8, unzipSync } from "fflate";
+import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "../src/printing-normalization";
 
 const DEFAULT_SET_LIST_URL = "https://mtgjson.com/api/v5/SetList.json.zip";
 const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
 const DEFAULT_PRICES_URL = "https://mtgjson.com/api/v5/AllPricesToday.json.zip";
 const MANIFEST_PATHNAME = "mtgjson/pricing-index-manifest.json";
-const INDEX_VERSION = 3;
+const INDEX_VERSION = 5;
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,OPTIONS",
@@ -27,7 +28,10 @@ type IndexedPrinting = {
   releaseDate: string;
   number: string;
   rarity: string;
+  flavorName?: string;
+  artist?: string;
   treatments: string[];
+  foilTreatment: "standard" | "surge";
   finishes: PriceFinish[];
   prices: Partial<Record<PriceFinish, IndexedPrice>>;
   priceListings: Partial<Record<PriceFinish, Record<string, IndexedPrice>>>;
@@ -166,18 +170,7 @@ function normalizeFinish(value: string): PriceFinish | "" {
 }
 
 export function treatmentsForCard(card: MtgjsonRecord) {
-  const treatments: string[] = [];
-  const frameEffects = stringArray(card.frameEffects).map((value) => value.toLowerCase().replace(/[^a-z]/g, ""));
-  const promoTypes = stringArray(card.promoTypes).map((value) => value.toLowerCase().replace(/[^a-z]/g, ""));
-  const effects = new Set([...frameEffects, ...promoTypes]);
-
-  if (card.isFullArt || effects.has("fullart")) treatments.push("full-art");
-  if (effects.has("showcase")) treatments.push("showcase");
-  if (String(card.borderColor || "").toLowerCase() === "borderless" || effects.has("borderless")) treatments.push("borderless");
-  if (effects.has("extendedart")) treatments.push("extended-art");
-  if (effects.has("retroframe") || effects.has("oldframe")) treatments.push("retro");
-
-  return treatments.length ? uniqueStrings(treatments) : ["standard"];
+  return treatmentsForRawPrinting(card);
 }
 
 function finishesForCard(card: MtgjsonRecord, priceRecord: MtgjsonRecord | undefined) {
@@ -250,7 +243,10 @@ function addCardToShards(
       releaseDate: firstString(card.originalReleaseDate, set.releaseDate),
       number: firstString(card.number),
       rarity: firstString(card.rarity),
+      flavorName: firstString(card.flavorName),
+      artist: firstString(card.artist),
       treatments: treatmentsForCard(card),
+      foilTreatment: foilTreatmentForRawPrinting(card),
       finishes,
       prices,
       priceListings,

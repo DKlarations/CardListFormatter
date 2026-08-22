@@ -37,6 +37,12 @@ type PullItem = Record<string, any> & {
   inputName: string;
   statedRarities: string[];
   specialRequests: string[];
+  requestedPrinting?: {
+    setCode?: string;
+    finish?: "normal" | "foil" | "etched";
+    foilTreatment?: "standard" | "surge";
+    treatment?: string;
+  };
   lookupKey: string;
   note?: string;
   presetStatus?: string;
@@ -299,6 +305,7 @@ const TOKEN_COLOR_PATTERNS: LabeledPattern[] = [
   ["Colorless", /\bcolorless\b/i],
 ];
 const SPECIAL_REQUEST_PATTERNS = [
+  { label: "SURGE FOIL", pattern: /\bsurge\s+foil\b/i },
   { label: "FOIL", pattern: /\b(?:foil|foiled)\b/i },
   { label: "NONFOIL", pattern: /\b(?:non[-\s]?foil|nonfoil)\b/i },
   { label: "SHOWCASE", pattern: /\bshowcase\b/i },
@@ -741,7 +748,10 @@ function parseStructuredPriceRow(line) {
   const rarity = parseRarity(match[2]);
   if (!name || !rarity) return null;
 
-  return { name, rarity };
+  const setCodes = match[4].split("/").map((value) => value.trim().toUpperCase()).filter(Boolean);
+  // A single explicitly-delimited set code is safe intent. A slash means the
+  // source listed alternatives, so leave the selection unset rather than guess.
+  return { name, rarity, setCode: setCodes.length === 1 ? setCodes[0] : "" };
 }
 
 function splitTableFields(line) {
@@ -930,6 +940,39 @@ function mergeSpecialRequests(a = [], b = []) {
   return Array.from(new Set([...a, ...b]));
 }
 
+function requestedPrintingFor(specialRequests: string[], setCode = ""): PullItem["requestedPrinting"] {
+  const requests = new Set(specialRequests);
+  const treatment = requests.has("RETRO FRAME") ? "retro"
+    : requests.has("SHOWCASE") ? "showcase"
+      : requests.has("BORDERLESS") ? "borderless"
+        : requests.has("EXTENDED ART") ? "extended-art"
+          : requests.has("FULL ART") ? "full-art"
+            : "";
+  const finish: PullItem["requestedPrinting"]["finish"] = requests.has("SURGE FOIL") ? "foil"
+    : requests.has("ETCHED") ? "etched"
+    : requests.has("FOIL") ? "foil"
+      : requests.has("NONFOIL") ? "normal"
+        : undefined;
+  const foilTreatment: PullItem["requestedPrinting"]["foilTreatment"] = requests.has("SURGE FOIL") ? "surge"
+    : requests.has("FOIL") ? "standard"
+      : undefined;
+  const requestedPrinting = {
+    ...(setCode ? { setCode: setCode.toUpperCase() } : {}),
+    ...(finish ? { finish } : {}),
+    ...(foilTreatment ? { foilTreatment } : {}),
+    ...(treatment ? { treatment } : {}),
+  };
+  return Object.keys(requestedPrinting).length ? requestedPrinting : undefined;
+}
+
+function mergeRequestedPrinting(a, b) {
+  const shared = { ...(a || {}), ...(b || {}) };
+  // A slash-separated row is intentionally not a set selection; likewise do
+  // not choose between two grouped lines that explicitly requested different sets.
+  if (a?.setCode && b?.setCode && a.setCode !== b.setCode) delete shared.setCode;
+  return Object.keys(shared).length ? shared : undefined;
+}
+
 // Checks whether an item needs a specific printing style beyond plain old nonfoil.
 function hasSpecialPrintRequest(item) {
   return (item.specialRequests || []).some((request) => request !== "NONFOIL");
@@ -948,6 +991,7 @@ function printMatchesSpecialRequests(print, item) {
     if (request === "EXTENDED ART") return print.frame_effects?.includes("extendedart") || print.promo_types?.includes("extendedart");
     if (request === "SHOWCASE") return print.frame_effects?.includes("showcase") || print.promo_types?.includes("showcase");
     if (request === "ETCHED") return print.finishes?.includes("etched");
+    if (request === "SURGE FOIL") return (print.finishes?.includes("foil") || print.foil) && print.promo_types?.includes("surgefoil");
     if (request === "RETRO FRAME") return print.frame_effects?.includes("retro") || print.promo_types?.includes("retroframe");
     if (request === "ALT ART") return print.promo_types?.some((type) => /alternate|boosterfun|showcase|borderless/.test(type));
     if (request === "PROMO") return Boolean(print.promo);
@@ -1068,9 +1112,11 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
 
   const statedRarities = [];
   const structuredPriceRow = parseStructuredPriceRow(line);
+  let requestedSetCode = "";
   if (structuredPriceRow) {
     line = structuredPriceRow.name;
     statedRarities.push(structuredPriceRow.rarity);
+    requestedSetCode = structuredPriceRow.setCode;
   }
 
   const specialRequests = extractSpecialRequests(line);
@@ -1107,13 +1153,15 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
   if (isToken) inputName = applyTokenColors(cleanTokenName(inputName), tokenColors);
   if (!inputName) return null;
 
+  const uniqueSpecialRequests = Array.from(new Set(specialRequests));
   return {
     index,
     original: rawLine,
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
     inputName,
     statedRarities: Array.from(new Set(statedRarities)),
-    specialRequests: Array.from(new Set(specialRequests)),
+    specialRequests: uniqueSpecialRequests,
+    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, requestedSetCode),
     lookupKey: isToken ? normalizeName(`${inputName} ${tokenDetails.join(" ")}`) : normalizeName(inputName),
     ...(isToken ? {
       status: "found",
@@ -1142,6 +1190,7 @@ export function parsePullList(text: string) {
       existing.originals.push(item.original);
       existing.statedRarities = Array.from(new Set([...existing.statedRarities, ...item.statedRarities]));
       existing.specialRequests = mergeSpecialRequests(existing.specialRequests, item.specialRequests);
+      existing.requestedPrinting = mergeRequestedPrinting(existing.requestedPrinting, item.requestedPrinting);
       existing.tokenDetails = Array.from(new Set([...(existing.tokenDetails || []), ...(item.tokenDetails || [])]));
       existing.tokenColors = Array.from(new Set([...(existing.tokenColors || []), ...(item.tokenColors || [])]));
       existing.presetStatus = existing.presetStatus || item.presetStatus;
@@ -1185,7 +1234,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit: HeadersInit | undefined) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.4.4");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.4.6");
   }
   return headers;
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
   AlertCircle,
@@ -9,32 +9,40 @@ import {
   ExternalLink,
   Loader2,
   Printer,
+  Plus,
   RefreshCw,
+  Search,
   RotateCcw,
   Settings,
   Trash2,
 } from "lucide-react";
 import "keyrune/css/keyrune.css";
-import { outputDisplayName, sortItemsForOutput } from "./formatter";
+import { enrichPrintHistories, outputDisplayName, resolveCardNames, sortItemsForOutput } from "./formatter";
 import {
   applyMinimumPrice,
   cardFromCatalog,
+  compatibleTreatmentOptions,
   convertCurrencyPrice,
   editionOptions,
-  FINISH_LABELS,
-  finishOptions,
+  finishChoiceKey,
+  finishChoices,
   formatPrice,
   LEGACY_MTGJSON_PRICE_SOURCES,
   listedMedianPriceForFinish,
   minimumPriceForSelection,
   mtgjsonPriceSourceLabel,
   parsePrice,
-  preferredDefaultEdition,
+  preferredDefaultTreatment,
+  preferredPrintingSelection,
   priceCurrencySymbol,
   priceVarianceRatio,
   priceWithListedMedianFallback,
   priceForSelection,
+  pricingDisplayName,
+  pricingVariantOptions,
+  shouldShowPricingVariant,
   pricingNameKey,
+  pricingIndexSupportsPhysicalDimensions,
   pricingQuantityMaximum,
   pricingShardKey,
   remainingRequestedQuantity,
@@ -44,27 +52,22 @@ import {
   TREATMENT_LABELS,
   tcgplayerCardSearchUrl,
   tcgplayerProductIdForSelection,
+  tcgplayerProductIdsForSelection,
   treatmentOptions,
+  treatmentForFinishChoice,
+  createManualPricingRow,
+  normalizePricingAssistantRow,
+  normalizePricingPhysicalSelection,
+  pricingSelectionForPrintingUuid,
   type MtgjsonPriceSourceOption,
   type PricingCatalog,
+  type PricingAssistantRowState,
+  type PricingAssistantState,
   type PricingFinish,
 } from "./pricing";
+import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
 
-type PricingRow = {
-  id: string;
-  groupId: string;
-  sourceIndex: number;
-  requestedQuantity: number;
-  isBasicLand: boolean;
-  quantity: number;
-  found: boolean;
-  resolved: boolean;
-  cardName: string;
-  setCode: string;
-  finish: PricingFinish;
-  treatment: string;
-  priceOverride: string | null;
-};
+type PricingRow = PricingAssistantRowState;
 
 type PricingPanelProps = {
   visible: boolean;
@@ -74,9 +77,12 @@ type PricingPanelProps = {
   apiOrigin: string;
   logoUrl: string;
   onMessage: (message: string) => void;
+  initialState?: PricingAssistantState | null;
+  onStateChange?: (state: PricingAssistantState) => void;
 };
 
 type PricingManifest = {
+  version?: number;
   generatedAt?: string;
   priceSources?: MtgjsonPriceSourceOption[];
   shards?: Record<string, { url?: string } | string>;
@@ -91,6 +97,12 @@ type ListedMedianPoint = {
 type ListedMedianEntry = {
   status: "loading" | "ready" | "error";
   points: ListedMedianPoint[];
+  message?: string;
+};
+
+type ListedMedianFetchResult = {
+  prices: Record<string, ListedMedianPoint[]>;
+  errors: Record<string, string>;
 };
 
 type EurUsdRate = {
@@ -116,6 +128,8 @@ function createPricingRows(items: any[]): PricingRow[] {
     const groupId = `card-${item.index ?? order}-${pricingNameKey(item.inputName || String(order)).replace(/[^a-z0-9]/g, "-")}`;
     const requestedQuantity = Math.max(1, Number(item.quantity) || 1);
     const isBasicLand = Boolean(item.isBasicLand);
+    const canonicalName = item.card?.name || outputDisplayName(item);
+    const displayName = item.alternateTitle || item.requestedDisplayName || canonicalName;
     return {
       id: `${groupId}-original`,
       groupId,
@@ -125,10 +139,18 @@ function createPricingRows(items: any[]): PricingRow[] {
       quantity: pricingQuantityMaximum(requestedQuantity, 0),
       found: false,
       resolved: item.status === "found",
-      cardName: outputDisplayName(item),
+      displayName,
+      canonicalName,
+      requestedFlavorName: item.alternateTitle || item.requestedDisplayName || "",
+      requestedSetCode: item.requestedPrinting?.setCode || "",
+      requestedFinish: item.requestedPrinting?.finish,
+      requestedFoilTreatment: item.requestedPrinting?.foilTreatment,
+      requestedTreatment: item.requestedPrinting?.treatment || "",
       setCode: "",
+      selectedPrintingUuid: "",
       finish: "normal",
       treatment: "standard",
+      foilTreatment: "standard",
       priceOverride: null,
     };
   });
@@ -162,37 +184,52 @@ function manifestShardUrl(manifest: PricingManifest, key: string) {
 }
 
 async function fetchStorefrontMedianPoints(productIds: string[]) {
-  if (!productIds.length) return {} as Record<string, ListedMedianPoint[]>;
+  if (!productIds.length) return { prices: {}, errors: {} } as ListedMedianFetchResult;
   const isLocalPreview = ["localhost", "127.0.0.1"].includes(window.location.hostname);
   if (isLocalPreview) {
-    const entries = await Promise.all(productIds.map(async (productId) => {
-      const [detailsResponse, pricePointsResponse] = await Promise.all([
-        fetch(`/tcgplayer-details-api/v1/product/${encodeURIComponent(productId)}/details`, {
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        }),
-        fetch(`/tcgplayer-pricepoints-api/v2/product/${encodeURIComponent(productId)}/pricepoints`, {
-          cache: "no-store",
-          headers: { Accept: "application/json" },
-        }),
-      ]);
-      if (!detailsResponse.ok) throw new Error(`TCGplayer returned ${detailsResponse.status} for product ${productId}.`);
-      const details = await detailsResponse.json();
-      const pricePointsPayload = pricePointsResponse.ok ? await pricePointsResponse.json() : {};
-      const rawComparisonPoints = Array.isArray(pricePointsPayload)
-        ? pricePointsPayload
-        : Array.isArray(pricePointsPayload?.value) ? pricePointsPayload.value : [];
-      const comparisonPoints = rawComparisonPoints
-        .filter((point: unknown) => point && typeof point === "object") as ListedMedianPoint[];
-      return [productId, [
-        {
-          printingType: "Storefront",
-          listedMedianPrice: typeof details.medianPrice === "number" ? details.medianPrice : null,
-        },
-        ...comparisonPoints,
-      ]] as [string, ListedMedianPoint[]];
+    const results = await Promise.all(productIds.map(async (productId) => {
+      try {
+        const [detailsResponse, pricePointsResponse] = await Promise.all([
+          fetch(`/tcgplayer-details-api/v1/product/${encodeURIComponent(productId)}/details`, {
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+          }),
+          fetch(`/tcgplayer-pricepoints-api/v2/product/${encodeURIComponent(productId)}/pricepoints`, {
+            cache: "no-store",
+            headers: { Accept: "application/json" },
+          }),
+        ]);
+        if (!detailsResponse.ok) throw new Error(`TCGplayer returned ${detailsResponse.status} for product ${productId}.`);
+        const details = await detailsResponse.json();
+        const pricePointsPayload = pricePointsResponse.ok ? await pricePointsResponse.json() : {};
+        const rawComparisonPoints = Array.isArray(pricePointsPayload)
+          ? pricePointsPayload
+          : Array.isArray(pricePointsPayload?.value) ? pricePointsPayload.value : [];
+        const comparisonPoints = rawComparisonPoints
+          .filter((point: unknown) => point && typeof point === "object") as ListedMedianPoint[];
+        return {
+          productId,
+          points: [
+            {
+              printingType: "Storefront",
+              listedMedianPrice: typeof details.medianPrice === "number" ? details.medianPrice : null,
+            },
+            ...comparisonPoints,
+          ] as ListedMedianPoint[],
+          error: "",
+        };
+      } catch (error) {
+        return {
+          productId,
+          points: [] as ListedMedianPoint[],
+          error: error instanceof Error ? error.message : `TCGplayer pricing failed for product ${productId}.`,
+        };
+      }
     }));
-    return Object.fromEntries(entries) as Record<string, ListedMedianPoint[]>;
+    return {
+      prices: Object.fromEntries(results.filter((result) => !result.error).map((result) => [result.productId, result.points])),
+      errors: Object.fromEntries(results.filter((result) => result.error).map((result) => [result.productId, result.error])),
+    };
   }
 
   const response = await fetch(`/api/tcgplayer-listed-median?productIds=${encodeURIComponent(productIds.join(","))}`, {
@@ -200,21 +237,11 @@ async function fetchStorefrontMedianPoints(productIds: string[]) {
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.error || "TCGplayer Listed Median pricing failed.");
-  return payload.prices || {};
+  return { prices: payload.prices || {}, errors: payload.errors || {} };
 }
 
 function fallbackTreatments(print: any) {
-  const effects = new Set([
-    ...(Array.isArray(print.frame_effects) ? print.frame_effects : []),
-    ...(Array.isArray(print.promo_types) ? print.promo_types : []),
-  ].map((value) => String(value).toLowerCase().replace(/[^a-z]/g, "")));
-  const treatments = [];
-  if (print.full_art || effects.has("fullart")) treatments.push("full-art");
-  if (effects.has("showcase")) treatments.push("showcase");
-  if (print.border_color === "borderless" || effects.has("borderless")) treatments.push("borderless");
-  if (effects.has("extendedart")) treatments.push("extended-art");
-  if (effects.has("retroframe") || effects.has("oldframe")) treatments.push("retro");
-  return treatments.length ? treatments : ["standard"];
+  return treatmentsForRawPrinting(print);
 }
 
 function fallbackCatalogFromItems(items: any[]): PricingCatalog {
@@ -243,7 +270,10 @@ function fallbackCatalogFromItems(items: any[]): PricingCatalog {
           releaseDate: String(print.released_at || ""),
           number: String(print.collector_number || ""),
           rarity: String(print.rarity || ""),
+          flavorName: String(print.flavor_name || ""),
+          artist: String(print.artist || ""),
           treatments: fallbackTreatments(print),
+          foilTreatment: foilTreatmentForRawPrinting(print),
           finishes: finishes.length ? finishes : ["normal" as PricingFinish],
           prices: {},
         };
@@ -257,14 +287,56 @@ function fallbackCatalogFromItems(items: any[]): PricingCatalog {
 function rowsWithDefaultPrintings(rows: PricingRow[], catalog: PricingCatalog) {
   return rows.map((row) => {
     if (!row.resolved) return row;
-    const card = cardFromCatalog(catalog, row.cardName);
+    const card = cardFromCatalog(catalog, row.canonicalName);
     const editions = editionOptions(card);
-    if (!editions.length || editions.some((edition) => edition.setCode === row.setCode)) return row;
-    const setCode = preferredDefaultEdition(card)?.setCode || "";
+    if (!editions.length) return row;
+    const requestedDefault = preferredPrintingSelection(card, {
+      setCode: row.requestedSetCode,
+      treatment: row.requestedTreatment,
+      finish: row.requestedFinish,
+      foilTreatment: row.requestedFoilTreatment,
+      flavorName: row.requestedFlavorName,
+    });
+    const setCode = editions.some((edition) => edition.setCode === row.setCode)
+      ? row.setCode
+      : requestedDefault?.setCode || "";
     if (!setCode) return row;
-    const finishes = finishOptions(card, setCode, "standard");
-    const finish = finishes.includes("normal") ? "normal" : finishes[0];
-    return { ...row, setCode, treatment: "standard", finish };
+    const treatments = treatmentOptions(card, setCode);
+    const treatment = row.setCode && treatments.includes(row.treatment)
+      ? row.treatment
+      : requestedDefault && treatments.includes(requestedDefault.treatment)
+        ? requestedDefault.treatment
+        : preferredDefaultTreatment(card, setCode);
+    const choices = finishChoices(card, setCode);
+    const currentChoice = choices.find((choice) => choice.finish === row.finish && choice.foilTreatment === row.foilTreatment);
+    const requestedChoice = choices.find((choice) => (
+      choice.finish === requestedDefault?.finish
+        && choice.foilTreatment === (requestedDefault?.foilTreatment || "standard")
+    ));
+    const finishChoice = currentChoice || requestedChoice || choices[0];
+    if (!finishChoice) return row;
+    const storedPhysicalSelection = {
+      setCode,
+      treatment,
+      finish: finishChoice.finish,
+      foilTreatment: finishChoice.foilTreatment,
+      selectedPrintingUuid: row.selectedPrintingUuid || "",
+    };
+    const hasStoredExactPrinting = Boolean(row.selectedPrintingUuid && card?.printings.some((printing) => (
+      printing.uuid === row.selectedPrintingUuid && printing.setCode === setCode
+    )));
+    const physicalSelection = hasStoredExactPrinting
+      ? pricingSelectionForPrintingUuid(
+        card,
+        storedPhysicalSelection,
+        row.selectedPrintingUuid || "",
+        row.requestedFlavorName,
+      )
+      : normalizePricingPhysicalSelection(card, storedPhysicalSelection, row.requestedFlavorName);
+    return {
+      ...row,
+      ...physicalSelection,
+    };
   });
 }
 
@@ -276,14 +348,16 @@ export default function PricingPanel({
   apiOrigin,
   logoUrl,
   onMessage,
+  initialState,
+  onStateChange,
 }: PricingPanelProps) {
-  const [rows, setRows] = useState<PricingRow[]>([]);
+  const [rows, setRows] = useState<PricingRow[]>(() => (initialState?.rows || []).map(normalizePricingAssistantRow));
   const [catalog, setCatalog] = useState<PricingCatalog>({});
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [loadMessage, setLoadMessage] = useState("Pricing data loads after a list is processed.");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hydratingRows, setHydratingRows] = useState<Set<string>>(new Set());
-  const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
+  const [pricingSource, setPricingSource] = useState(() => initialState?.pricingSource || "tcgplayer-listed-median");
   const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
   const [includeNotFound, setIncludeNotFound] = useState(true);
   const [receiptSettingsOpen, setReceiptSettingsOpen] = useState(false);
@@ -291,6 +365,10 @@ export default function PricingPanel({
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
   const [listedMedianByProduct, setListedMedianByProduct] = useState<Record<string, ListedMedianEntry>>({});
+  const [isAddingCard, setIsAddingCard] = useState(false);
+  const [manualCardName, setManualCardName] = useState("");
+  const [isResolvingManualCard, setIsResolvingManualCard] = useState(false);
+  const [manualCardError, setManualCardError] = useState("");
   const manifestRef = useRef<PricingManifest | null>(null);
   const catalogRef = useRef<PricingCatalog>({});
   const loadedShardsRef = useRef(new Set<string>());
@@ -323,11 +401,17 @@ export default function PricingPanel({
     }
     if (initializedAtRef.current === processedAt) return;
     initializedAtRef.current = processedAt;
-    setRows(createPricingRows(items));
+    setRows(initialState?.rows?.length
+      ? initialState.rows.map(normalizePricingAssistantRow)
+      : createPricingRows(items));
   }, [items, processedAt]);
 
+  useEffect(() => {
+    onStateChange?.({ pricingSource, rows });
+  }, [onStateChange, pricingSource, rows]);
+
   const cardNames = useMemo(
-    () => Array.from(new Set(rows.filter((row) => row.resolved).map((row) => row.cardName))),
+    () => Array.from(new Set(rows.filter((row) => row.resolved).map((row) => row.canonicalName))),
     [rows],
   );
   const cardNameSignature = cardNames.join("|");
@@ -357,6 +441,9 @@ export default function PricingPanel({
         });
         const manifest = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(manifest.error || "Pricing index is unavailable.");
+        if (!pricingIndexSupportsPhysicalDimensions(manifest.version)) {
+          throw new Error("The published pricing index predates exact finish classification.");
+        }
         manifestRef.current = manifest;
         if (Array.isArray(manifest.priceSources) && manifest.priceSources.length) {
           setMtgjsonPriceSources(selectableMtgjsonPriceSources(manifest.priceSources));
@@ -471,10 +558,12 @@ export default function PricingPanel({
     const productIds = Array.from(new Set(rows
       .filter((row) => row.found && row.quantity > 0)
       .map((row) => tcgplayerProductIdForSelection(
-        cardFromCatalog(catalog, row.cardName),
+        cardFromCatalog(catalog, row.canonicalName),
         row.setCode,
         row.treatment,
         row.finish,
+        row.selectedPrintingUuid,
+        row.foilTreatment,
       ))
       .filter(Boolean)))
       .filter((productId) => !requestedMedianIdsRef.current.has(productId));
@@ -486,12 +575,13 @@ export default function PricingPanel({
       ...Object.fromEntries(productIds.map((productId) => [productId, { status: "loading", points: [] }])),
     }));
 
-    void fetchStorefrontMedianPoints(productIds).then((prices) => {
+    void fetchStorefrontMedianPoints(productIds).then(({ prices, errors }) => {
       setListedMedianByProduct((current) => ({
         ...current,
         ...Object.fromEntries(productIds.map((productId) => [productId, {
-          status: "ready",
+          status: errors[productId] ? "error" : "ready",
           points: Array.isArray(prices[productId]) ? prices[productId] : [],
+          message: errors[productId] || "",
         }])),
       }));
     }).catch((error) => {
@@ -511,17 +601,113 @@ export default function PricingPanel({
     )));
   }
 
+  function updatePrintingSelection(id: string, update: Partial<PricingRow>) {
+    setRows((current) => current.map((row) => {
+      if (row.id !== id) return row;
+      const next = { ...row, ...update };
+      const card = cardFromCatalog(catalog, next.canonicalName);
+      return {
+        ...next,
+        ...normalizePricingPhysicalSelection(card, {
+          setCode: next.setCode,
+          treatment: next.treatment,
+          finish: next.finish,
+          foilTreatment: next.foilTreatment,
+          selectedPrintingUuid: update.selectedPrintingUuid === undefined
+            ? row.selectedPrintingUuid || ""
+            : update.selectedPrintingUuid || "",
+        }, next.requestedFlavorName),
+      };
+    }));
+  }
+
+  function selectArtVariant(row: PricingRow, selectedPrintingUuid: string) {
+    const card = cardFromCatalog(catalog, row.canonicalName);
+    const physicalSelection = pricingSelectionForPrintingUuid(card, {
+      setCode: row.setCode,
+      treatment: row.treatment,
+      finish: row.finish,
+      foilTreatment: row.foilTreatment || "standard",
+      selectedPrintingUuid: row.selectedPrintingUuid || "",
+    }, selectedPrintingUuid, row.requestedFlavorName);
+    updateRow(row.id, physicalSelection);
+  }
+
+  function updateQuantity(row: PricingRow, quantity: number) {
+    if (!row.manuallyCreated) {
+      updateRow(row.id, { quantity, found: quantity ? row.found : false });
+      return;
+    }
+    setRows((current) => {
+      const otherQuantity = current
+        .filter((candidate) => candidate.groupId === row.groupId && candidate.id !== row.id)
+        .reduce((sum, candidate) => sum + candidate.quantity, 0);
+      const requestedQuantity = Math.max(1, otherQuantity + quantity);
+      return current.map((candidate) => candidate.groupId === row.groupId
+        ? {
+          ...candidate,
+          requestedQuantity,
+          ...(candidate.id === row.id ? { quantity, found: quantity ? candidate.found : false } : {}),
+        }
+        : candidate);
+    });
+  }
+
+  async function addManualCard() {
+    const inputName = manualCardName.trim();
+    if (!inputName || isResolvingManualCard) return;
+    setIsResolvingManualCard(true);
+    setManualCardError("");
+    setLoadMessage(`Resolving ${inputName}...`);
+    try {
+      const candidate = {
+        index: Date.now(),
+        original: inputName,
+        originals: [inputName],
+        quantity: 1,
+        inputName,
+        statedRarities: [],
+        specialRequests: [],
+        lookupKey: pricingNameKey(inputName),
+      };
+      const providerOptions = { useMtgjson: true, useScryfall: true, pricingMode: true };
+      const resolved = await resolveCardNames([candidate], setLoadMessage, false, providerOptions);
+      const enriched = await enrichPrintHistories(resolved, false, [], setLoadMessage, false, providerOptions);
+      const item = enriched[0];
+      const canonicalName = item?.card?.name || item?.mtgjsonCard?.name || "";
+      if (!item || item.status !== "found" || !canonicalName) {
+        throw new Error(item?.note || `Could not resolve ${inputName}. Check the spelling and try again.`);
+      }
+      const groupId = `manual-${Date.now()}-${pricingNameKey(canonicalName).replace(/[^a-z0-9]/g, "-")}`;
+      const row = createManualPricingRow(
+        `${groupId}-original`,
+        groupId,
+        item.alternateTitle || canonicalName,
+        canonicalName,
+        item.alternateTitle || "",
+      );
+      setRows((current) => [...current, row]);
+      setManualCardName("");
+      setIsAddingCard(false);
+      setLoadMessage(`${row.displayName} added. Choose the printing when it is found.`);
+    } catch (error) {
+      setManualCardError(error instanceof Error ? error.message : "Could not resolve that card.");
+    } finally {
+      setIsResolvingManualCard(false);
+    }
+  }
+
   async function hydrateLivePrice(row: PricingRow, setCode = row.setCode) {
     if (!usingLiveFallbackRef.current || !setCode || hydratingRows.has(row.id)) return;
     setHydratingRows((current) => new Set(current).add(row.id));
     setLoadMessage(`Loading ${setCode.toUpperCase()} pricing from MTGJSON...`);
     try {
       const { loadLiveMtgjsonPrintings } = await import("./mtgjson-live-pricing");
-      const livePrintings = await loadLiveMtgjsonPrintings(row.cardName, setCode);
-      if (!livePrintings.length) throw new Error(`MTGJSON did not match ${row.cardName} in ${setCode.toUpperCase()}.`);
+      const livePrintings = await loadLiveMtgjsonPrintings(row.canonicalName, setCode);
+      if (!livePrintings.length) throw new Error(`MTGJSON did not match ${row.canonicalName} in ${setCode.toUpperCase()}.`);
 
-      const cardKey = pricingNameKey(row.cardName);
-      const currentCard = catalogRef.current[cardKey] || { name: row.cardName, printings: [] };
+      const cardKey = pricingNameKey(row.canonicalName);
+      const currentCard = catalogRef.current[cardKey] || { name: row.canonicalName, printings: [] };
       const normalizedSetCode = setCode.toUpperCase();
       const nextCatalog = {
         ...catalogRef.current,
@@ -551,6 +737,7 @@ export default function PricingPanel({
   }
 
   function quantityMaximum(row: PricingRow) {
+    if (row.manuallyCreated) return 99;
     const otherQuantity = rows
       .filter((candidate) => candidate.groupId === row.groupId && candidate.id !== row.id)
       .reduce((sum, candidate) => sum + candidate.quantity, 0);
@@ -561,12 +748,11 @@ export default function PricingPanel({
     setRows((current) => {
       const groupRows = current.filter((row) => row.groupId === source.groupId);
       const currentTotal = groupRows.reduce((sum, row) => sum + row.quantity, 0);
-      let duplicateQuantity = pricingQuantityMaximum(
-        source.requestedQuantity,
-        currentTotal,
-      );
+      let duplicateQuantity = source.manuallyCreated
+        ? (source.quantity > 1 ? 1 : 0)
+        : pricingQuantityMaximum(source.requestedQuantity, currentTotal);
       let next = current;
-      if (!duplicateQuantity && source.quantity > 1) {
+      if ((source.manuallyCreated && source.quantity > 1) || (!duplicateQuantity && source.quantity > 1)) {
         duplicateQuantity = 1;
         next = current.map((row) => row.id === source.id ? { ...row, quantity: row.quantity - 1 } : row);
       }
@@ -582,24 +768,36 @@ export default function PricingPanel({
   }
 
   function removeRow(id: string) {
-    setRows((current) => current.filter((row) => row.id !== id));
+    setRows((current) => {
+      const removed = current.find((row) => row.id === id);
+      const next = current.filter((row) => row.id !== id);
+      if (!removed?.manuallyCreated) return next;
+      const remaining = next.filter((row) => row.groupId === removed.groupId);
+      if (!remaining.length) return next;
+      const requestedQuantity = Math.max(1, remaining.reduce((sum, row) => sum + row.quantity, 0));
+      return next.map((row) => row.groupId === removed.groupId ? { ...row, requestedQuantity } : row);
+    });
   }
 
   function listedMedianPricing(row: PricingRow) {
     if (!row.setCode) {
       return { status: "select-printing" as const, price: null, source: "" as const, message: "Choose a printing before pricing this card." };
     }
-    const card = cardFromCatalog(catalog, row.cardName);
-    const productId = tcgplayerProductIdForSelection(card, row.setCode, row.treatment, row.finish);
-    if (!productId) {
+    const card = cardFromCatalog(catalog, row.canonicalName);
+    const productIds = tcgplayerProductIdsForSelection(card, row.setCode, row.treatment, row.finish, row.selectedPrintingUuid, row.foilTreatment);
+    if (!productIds.length) {
       return { status: "unavailable" as const, price: null, source: "" as const, message: "No exact TCGplayer product matched this selection. Use the TCGplayer link when available or enter a price manually." };
     }
+    if (productIds.length > 1) {
+      return { status: "ambiguous" as const, price: null, source: "" as const, message: `${productIds.length} TCGplayer products match this printing and finish. Open the set-specific search and enter the correct price manually.` };
+    }
+    const [productId] = productIds;
     const entry = listedMedianByProduct[productId];
     if (!entry || entry.status === "loading") {
       return { status: "loading" as const, price: null, source: "" as const, message: `Loading TCGplayer pricing for product #${productId}...` };
     }
     if (entry.status === "error") {
-      return { status: "unavailable" as const, price: null, source: "" as const, message: `TCGplayer pricing could not be loaded for product #${productId}.` };
+      return { status: "unavailable" as const, price: null, source: "" as const, message: entry.message || `TCGplayer pricing could not be loaded for product #${productId}.` };
     }
     const listedMedianPrice = listedMedianPriceForFinish(entry.points, row.finish);
     if (listedMedianPrice === null) {
@@ -629,11 +827,11 @@ export default function PricingPanel({
   const currencySymbol = priceCurrencySymbol(selectedCurrency);
 
   function effectivePricing(row: PricingRow) {
-    const card = cardFromCatalog(catalog, row.cardName);
+    const card = cardFromCatalog(catalog, row.canonicalName);
     const selectedSource = pricingSource === "tcgplayer-listed-median" ? "tcgplayer:retail" : pricingSource;
-    let mtgjsonPricing = priceForSelection(card, row.setCode, row.treatment, row.finish, selectedSource);
+    let mtgjsonPricing = priceForSelection(card, row.setCode, row.treatment, row.finish, selectedSource, row.selectedPrintingUuid, row.foilTreatment);
     if (pricingSource === "tcgplayer-listed-median" && mtgjsonPricing.status === "unavailable") {
-      const cardKingdomFallback = priceForSelection(card, row.setCode, row.treatment, row.finish, "cardkingdom:retail");
+      const cardKingdomFallback = priceForSelection(card, row.setCode, row.treatment, row.finish, "cardkingdom:retail", row.selectedPrintingUuid, row.foilTreatment);
       if (cardKingdomFallback.status === "ready") mtgjsonPricing = cardKingdomFallback;
     }
     const listedMedian = pricingSource === "tcgplayer-listed-median" && row.found
@@ -707,7 +905,7 @@ export default function PricingPanel({
   const notFoundCards = groups.map((group) => {
     const requestedQuantity = group[0]?.requestedQuantity || 0;
     return {
-      cardName: group[0]?.cardName || "Unknown card",
+      cardName: group[0]?.displayName || "Unknown card",
       quantity: remainingRequestedQuantity(
         requestedQuantity,
         group.filter((row) => row.found).map((row) => row.quantity),
@@ -760,11 +958,11 @@ export default function PricingPanel({
         <div class="card-row">
           <div class="card-main">
             <strong>${row.quantity}</strong>
-            <span class="card-name">${escapeHtml(row.cardName)}</span>
+            <span class="card-name">${escapeHtml(row.displayName)}</span>
           </div>
           <div class="card-meta">
             <span class="set-code">${escapeHtml(row.setCode.toUpperCase())}</span>
-            <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish))}</span>
+            <span class="treatment">${escapeHtml(receiptTreatment(row.treatment, row.finish, row.foilTreatment))}</span>
             <span class="unit-price">${row.quantity > 1 ? `${escapeHtml(currencySymbol)}${unitPrice.toFixed(2)} ea.` : ""}</span>
             <span class="line-total">${escapeHtml(currencySymbol)}${lineTotal.toFixed(2)}</span>
           </div>
@@ -830,7 +1028,7 @@ export default function PricingPanel({
     <section className="pricing-section">
       <div className="section-heading pricing-heading">
         <div>
-          <h2>Pricing Assistant <span className="experimental-pill">THIS IS STILL EXPERIMENTAL</span></h2>
+          <h2>Pricing Assistant</h2>
         </div>
         <div className="actions">
           <select
@@ -884,6 +1082,27 @@ export default function PricingPanel({
         </div>
       </div>
 
+      {isAddingCard && (
+        <form className="pricing-add-card" onSubmit={(event) => { event.preventDefault(); void addManualCard(); }}>
+          <label>
+            <span>Add Card</span>
+            <input
+              autoFocus
+              value={manualCardName}
+              onChange={(event) => setManualCardName(event.target.value)}
+              placeholder="Card name, including a flavor name if applicable"
+              aria-label="Card name to add to Pricing Assistant"
+            />
+          </label>
+          <button className="icon-button primary" type="submit" disabled={!manualCardName.trim() || isResolvingManualCard}>
+            {isResolvingManualCard ? <Loader2 size={17} className="spin" /> : <Search size={17} />}
+            <span>{isResolvingManualCard ? "Resolving" : "Add / Resolve"}</span>
+          </button>
+          <button className="icon-button" type="button" onClick={() => { setIsAddingCard(false); setManualCardError(""); }}><span>Cancel</span></button>
+          {manualCardError && <span className="pricing-add-card-error" role="alert">{manualCardError}</span>}
+        </form>
+      )}
+
       {!rows.length ? (
         <div className="pricing-empty">
           <strong>Process the pull list to begin pricing.</strong>
@@ -901,8 +1120,9 @@ export default function PricingPanel({
                   const pricing = effectivePricing(row);
                   const editions = editionOptions(pricing.card);
                   const selectedEdition = editions.find((edition) => edition.setCode === row.setCode);
-                  const treatments = treatmentOptions(pricing.card, row.setCode);
-                  const finishes = finishOptions(pricing.card, row.setCode, row.treatment);
+                  const treatments = compatibleTreatmentOptions(pricing.card, row.setCode, row.finish, row.foilTreatment);
+                  const finishChoiceOptions = finishChoices(pricing.card, row.setCode, row.treatment);
+                  const variantOptions = pricingVariantOptions(pricing.card, row.setCode, row.treatment, row.finish, row.foilTreatment);
                   const priceValue = row.found
                     ? (row.priceOverride === null ? formatPrice(pricing.automatic.price) : row.priceOverride)
                     : "";
@@ -933,18 +1153,20 @@ export default function PricingPanel({
                       : isPriceLoading
                         ? pricing.automatic.message || "Loading this printing's current price."
                         : pricing.automatic.message || "This found card still needs a price.";
-                  const groupCanRemove = group.length > 1;
+                  const groupCanRemove = group.length > 1 || row.manuallyCreated;
                   const maxQuantity = quantityMaximum(row);
                   const tcgplayerProductId = tcgplayerProductIdForSelection(
                     pricing.card,
                     row.setCode,
                     row.treatment,
                     row.finish,
+                    row.selectedPrintingUuid,
+                    row.foilTreatment,
                   );
                   const tcgplayerUrl = tcgplayerProductId
                     ? `https://www.tcgplayer.com/product/${encodeURIComponent(tcgplayerProductId)}`
                     : "";
-                  const tcgplayerSearchUrl = tcgplayerCardSearchUrl(row.cardName);
+                  const tcgplayerSearchUrl = tcgplayerCardSearchUrl(row.canonicalName, row.setCode || selectedEdition?.setName);
                   const needsVarianceReview = pricingSource === "tcgplayer-listed-median"
                     && !pricing.isManual
                     && requiresPriceVarianceReview(pricing.listedMedianPrice, pricing.comparisonPrice);
@@ -956,7 +1178,8 @@ export default function PricingPanel({
                     : "";
 
                   return (
-                    <div className={`pricing-row ${!row.found ? "is-awaiting-found" : ""} ${needsVarianceReview ? "is-price-review" : ""}`} key={row.id}>
+                    <Fragment key={row.id}>
+                    <div className={`pricing-row ${!row.found ? "is-awaiting-found" : ""} ${needsVarianceReview ? "is-price-review" : ""}`}>
                       <div className="pricing-found-cell">
                         <input
                           type="checkbox"
@@ -967,7 +1190,7 @@ export default function PricingPanel({
                             updateRow(row.id, { found });
                             if (found) void hydrateLivePrice(row);
                           }}
-                          aria-label={`Found ${row.cardName}`}
+                          aria-label={`Found ${row.displayName}`}
                           title={canMarkFound ? "I found this card; enable its pricing controls" : warningMessage}
                         />
                       </div>
@@ -975,25 +1198,22 @@ export default function PricingPanel({
                         className="pricing-quantity"
                         value={row.quantity}
                         disabled={!controlsEnabled}
-                        onChange={(event) => {
-                          const quantity = Number(event.target.value);
-                          updateRow(row.id, { quantity, found: quantity ? row.found : false });
-                        }}
-                        aria-label={`Quantity found for ${row.cardName}`}
+                          onChange={(event) => updateQuantity(row, Number(event.target.value))}
+                          aria-label={`Quantity found for ${row.displayName}`}
                       >
                         {Array.from({ length: maxQuantity + 1 }, (_, quantity) => <option value={quantity} key={quantity}>{quantity}</option>)}
                       </select>
 
                       <div className="pricing-card-name">
                         {group.length > 1 && <span className="pricing-connector" aria-hidden="true">{rowIndex ? "↳" : "●"}</span>}
-                        <strong>{row.cardName}</strong>
+                        <strong>{pricingDisplayName(row.displayName, row.canonicalName)}</strong>
                         {showYellowWarning && (
                           <span
                             className="pricing-fallback-warning"
                             title={yellowWarningMessage}
                             aria-label={foilNeedsDoubleCheck
-                              ? `${row.cardName} foil price should be double-checked`
-                              : `${row.cardName} is using MTGJSON fallback pricing`}
+                              ? `${row.displayName} foil price should be double-checked`
+                              : `${row.displayName} is using MTGJSON fallback pricing`}
                           ><AlertTriangle size={18} /></span>
                         )}
                         {needsWarning && (
@@ -1003,7 +1223,7 @@ export default function PricingPanel({
                             target="_blank"
                             rel="noreferrer"
                             title={`${warningMessage} Search TCGplayer for this card.`}
-                            aria-label={`Search TCGplayer for ${row.cardName}`}
+                            aria-label={`Search TCGplayer for ${row.displayName}`}
                           ><AlertCircle size={17} /></a>
                         )}
                       </div>
@@ -1037,7 +1257,7 @@ export default function PricingPanel({
                             });
                             setOpenPrintingRowId(row.id);
                           }}
-                          aria-label={`Printing for ${row.cardName}`}
+                          aria-label={`Printing for ${row.displayName}`}
                           aria-haspopup="listbox"
                           aria-expanded={openPrintingRowId === row.id}
                         >
@@ -1056,7 +1276,7 @@ export default function PricingPanel({
                             data-printing-row={row.id}
                             data-printing-menu={row.id}
                             role="listbox"
-                            aria-label={`Available printings for ${row.cardName}`}
+                            aria-label={`Available printings for ${row.displayName}`}
                             style={{
                               top: printingMenuPosition.top,
                               left: printingMenuPosition.left,
@@ -1073,11 +1293,14 @@ export default function PricingPanel({
                                 key={edition.setCode}
                                 onClick={() => {
                                   const setCode = edition.setCode;
-                                  const availableFinishes = finishOptions(pricing.card, setCode, "standard");
-                                  updateRow(row.id, {
+                                  const treatment = preferredDefaultTreatment(pricing.card, setCode);
+                                  const choice = finishChoices(pricing.card, setCode)[0];
+                                  if (!choice) return;
+                                  updatePrintingSelection(row.id, {
                                     setCode,
-                                    treatment: "standard",
-                                    finish: availableFinishes.includes("normal") ? "normal" : availableFinishes[0],
+                                    treatment: treatmentForFinishChoice(pricing.card, setCode, treatment, choice.finish, choice.foilTreatment),
+                                    finish: choice.finish,
+                                    foilTreatment: choice.foilTreatment,
                                   });
                                   setOpenPrintingRowId(null);
                                   setPrintingMenuPosition(null);
@@ -1096,25 +1319,28 @@ export default function PricingPanel({
                       </div>
 
                       <select
-                        value={row.finish}
+                        value={finishChoiceKey(row.finish, row.foilTreatment)}
                         disabled={!controlsEnabled}
-                        onChange={(event) => updateRow(row.id, { finish: event.target.value as PricingFinish })}
-                        aria-label={`Finish for ${row.cardName}`}
+                        onChange={(event) => {
+                          const choice = finishChoiceOptions.find((candidate) => candidate.key === event.target.value);
+                          if (choice) updatePrintingSelection(row.id, {
+                            finish: choice.finish,
+                            foilTreatment: choice.foilTreatment,
+                            treatment: treatmentForFinishChoice(pricing.card, row.setCode, row.treatment, choice.finish, choice.foilTreatment),
+                          });
+                        }}
+                        aria-label={`Finish for ${row.displayName}`}
                       >
-                        {finishes.map((finish) => <option value={finish} key={finish}>{FINISH_LABELS[finish]}</option>)}
+                        {finishChoiceOptions.map((choice) => <option value={choice.key} key={choice.key}>{choice.label}</option>)}
                       </select>
                       <select
                         value={row.treatment}
                         disabled={!controlsEnabled}
                         onChange={(event) => {
                           const treatment = event.target.value;
-                          const nextFinishes = finishOptions(pricing.card, row.setCode, treatment);
-                          updateRow(row.id, {
-                            treatment,
-                            finish: nextFinishes.includes(row.finish) ? row.finish : nextFinishes[0],
-                          });
+                          updatePrintingSelection(row.id, { treatment });
                         }}
-                        aria-label={`Treatment for ${row.cardName}`}
+                        aria-label={`Treatment for ${row.displayName}`}
                       >
                         {treatments.map((treatment) => <option value={treatment} key={treatment}>{TREATMENT_LABELS[treatment] || treatment}</option>)}
                       </select>
@@ -1122,7 +1348,7 @@ export default function PricingPanel({
                       <select
                         value="near-mint"
                         disabled
-                        aria-label={`Condition for ${row.cardName}; condition pricing is coming soon`}
+                        aria-label={`Condition for ${row.displayName}; condition pricing is coming soon`}
                         title="Condition pricing is coming soon"
                       >
                         <option value="near-mint">NM</option>
@@ -1153,7 +1379,7 @@ export default function PricingPanel({
                             }
                           }}
                           placeholder={isPriceLoading ? "Loading..." : "0.00"}
-                          aria-label={`Price for one ${row.cardName}`}
+                          aria-label={`Price for one ${row.displayName}`}
                           title={row.priceOverride !== null
                             ? `Manual price · minimum ${currencySymbol}${minimumPriceForSelection(row.isBasicLand, row.treatment, row.finish).toFixed(2)}`
                             : pricing.automatic.message}
@@ -1165,7 +1391,7 @@ export default function PricingPanel({
                           </button>
                         )}
                         {!isPriceLoading && row.priceOverride === null && row.found && tcgplayerUrl && (
-                          <a href={tcgplayerUrl} target="_blank" rel="noreferrer" title={`Open exact TCGplayer product #${tcgplayerProductId}`} aria-label={`Open ${row.cardName} ${row.setCode} on TCGplayer`}>
+                          <a href={tcgplayerUrl} target="_blank" rel="noreferrer" title={`Open exact TCGplayer product #${tcgplayerProductId}`} aria-label={`Open ${row.displayName} ${row.setCode} on TCGplayer`}>
                             <ExternalLink size={13} />
                           </a>
                         )}
@@ -1182,19 +1408,41 @@ export default function PricingPanel({
                             aria-label={`${varianceMessage} Open TCGplayer to review.`}
                           ><AlertTriangle size={18} /></a>
                         )}
-                        <button type="button" disabled={!controlsEnabled} onClick={() => duplicateRow(row)} title="Break out into another printing" aria-label={`Break out ${row.cardName} into another printing`}><CornerDownLeft size={17} /></button>
-                        {groupCanRemove && <button type="button" onClick={() => removeRow(row.id)} title="Remove this split row" aria-label={`Remove split ${row.cardName}`}><Trash2 size={16} /></button>}
+                        <button type="button" disabled={!controlsEnabled} onClick={() => duplicateRow(row)} title="Break out into another printing" aria-label={`Break out ${row.displayName} into another printing`}><CornerDownLeft size={17} /></button>
+                        {groupCanRemove && <button type="button" onClick={() => removeRow(row.id)} title={row.manuallyCreated ? "Remove manually added card" : "Remove this split row"} aria-label={`Remove ${row.displayName}`}><Trash2 size={16} /></button>}
                       </div>
                     </div>
+                    {shouldShowPricingVariant(row.found, variantOptions) && (
+                      <div className="pricing-variant-subrow">
+                        <label>
+                          <span>↳ Art / Variant</span>
+                          <select
+                            value={row.selectedPrintingUuid || ""}
+                            disabled={!controlsEnabled}
+                            onChange={(event) => selectArtVariant(row, event.target.value)}
+                            aria-label={`Art or variant for ${row.displayName}`}
+                          >
+                            <option value="">Choose art / variant</option>
+                            {variantOptions.map((option) => <option value={option.uuid} key={option.uuid}>{option.label}</option>)}
+                          </select>
+                        </label>
+                      </div>
+                    )}
+                    </Fragment>
                   );
                 })}
               </div>
             ))}
           </div>
           <footer className="pricing-total-bar">
-            <div><strong>{foundCount}/{requestedCount}</strong><span>cards found</span></div>
-            {unpricedFoundCount > 0 && <span className="pricing-incomplete">{unpricedFoundCount} found row{unpricedFoundCount === 1 ? "" : "s"} still need pricing</span>}
-            <div className="pricing-grand-total"><span>Total</span><strong>{currencySymbol}{totalPrice.toFixed(2)}</strong></div>
+            <button className="icon-button pricing-add-card-action" type="button" onClick={() => { setIsAddingCard((open) => !open); setManualCardError(""); }} title="Add a card without reprocessing the pull list">
+              <Plus size={17} /><span>Add Card</span>
+            </button>
+            <div className="pricing-totals-summary">
+              <div className="pricing-found-summary"><strong>{foundCount}/{requestedCount}</strong><span>cards found</span></div>
+              {unpricedFoundCount > 0 && <span className="pricing-incomplete">{unpricedFoundCount} found row{unpricedFoundCount === 1 ? "" : "s"} still need pricing</span>}
+              <div className="pricing-grand-total"><span>Total</span><strong>{currencySymbol}{totalPrice.toFixed(2)}</strong></div>
+            </div>
           </footer>
         </>
       )}

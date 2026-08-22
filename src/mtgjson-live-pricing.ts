@@ -1,5 +1,6 @@
 import { strFromU8, unzipSync } from "fflate";
 import { pricingNameKey, type PricingFinish, type PricingPrinting, type PricingValue } from "./pricing";
+import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
 
 const MTGJSON_API = "https://mtgjson.com/api/v5";
 const PRICES_URL = `${MTGJSON_API}/AllPricesToday.json.zip`;
@@ -91,18 +92,7 @@ function normalizeFinish(value: string): PricingFinish | "" {
 }
 
 function treatmentsForCard(card: MtgjsonRecord) {
-  const treatments: string[] = [];
-  const effects = new Set([
-    ...stringArray(card.frameEffects),
-    ...stringArray(card.promoTypes),
-  ].map((value) => value.toLowerCase().replace(/[^a-z]/g, "")));
-
-  if (card.isFullArt || effects.has("fullart")) treatments.push("full-art");
-  if (effects.has("showcase")) treatments.push("showcase");
-  if (String(card.borderColor || "").toLowerCase() === "borderless" || effects.has("borderless")) treatments.push("borderless");
-  if (effects.has("extendedart")) treatments.push("extended-art");
-  if (effects.has("retroframe") || effects.has("oldframe")) treatments.push("retro");
-  return treatments.length ? Array.from(new Set(treatments)) : ["standard"];
+  return treatmentsForRawPrinting(card);
 }
 
 function isEnglishPaperCard(card: MtgjsonRecord) {
@@ -161,7 +151,10 @@ function printingsForCard(
         releaseDate: firstString(card.originalReleaseDate, setData.releaseDate),
         number: firstString(card.number),
         rarity: firstString(card.rarity),
+        flavorName: firstString(card.flavorName),
+        artist: firstString(card.artist),
         treatments: treatmentsForCard(card),
+        foilTreatment: foilTreatmentForRawPrinting(card),
         finishes,
         prices,
         priceListings,

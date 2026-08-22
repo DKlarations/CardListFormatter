@@ -1,9 +1,10 @@
 import LZString from "lz-string";
+import { normalizePricingAssistantRow, type PricingAssistantState } from "./pricing";
 
 const INPUT_HASH_PREFIX = "#input=";
 const FORMATTED_HASH_PREFIX = "#formatted=";
 
-type SharedFormattedState = {
+export type SharedFormatterState = {
   input?: string;
   output?: string;
   processedAt?: string;
@@ -17,6 +18,9 @@ type SharedFormattedState = {
     needsReviewCount?: number;
     printFallbackCount?: number;
   };
+  /** Compact resolved items used to rebuild Pricing Assistant rows, not provider catalogs. */
+  pricingItems?: Array<Record<string, unknown>>;
+  pricing?: PricingAssistantState;
 };
 
 export function encodeInputHash(text: string) {
@@ -28,9 +32,9 @@ export function decodeInputHash(hash: string) {
   return LZString.decompressFromEncodedURIComponent(hash.slice(INPUT_HASH_PREFIX.length)) || "";
 }
 
-export function encodeFormattedHash(state: SharedFormattedState) {
+export function encodeFormattedHash(state: SharedFormatterState) {
   return `${FORMATTED_HASH_PREFIX}${LZString.compressToEncodedURIComponent(JSON.stringify({
-    version: 1,
+    version: 4,
     input: state.input || "",
     output: state.output || "",
     processedAt: state.processedAt || "",
@@ -44,10 +48,15 @@ export function encodeFormattedHash(state: SharedFormattedState) {
       needsReviewCount: state.stats?.needsReviewCount || 0,
       printFallbackCount: state.stats?.printFallbackCount || 0,
     },
+    pricingItems: Array.isArray(state.pricingItems) ? state.pricingItems : [],
+    pricing: state.pricing && Array.isArray(state.pricing.rows) ? {
+      pricingSource: state.pricing.pricingSource || "tcgplayer-listed-median",
+      rows: state.pricing.rows,
+    } : undefined,
   }))}`;
 }
 
-export function decodeFormatterHash(hash: string): SharedFormattedState {
+export function decodeFormatterHash(hash: string): SharedFormatterState {
   if (hash.startsWith(FORMATTED_HASH_PREFIX)) {
     try {
       const raw = LZString.decompressFromEncodedURIComponent(hash.slice(FORMATTED_HASH_PREFIX.length));
@@ -66,6 +75,13 @@ export function decodeFormatterHash(hash: string): SharedFormattedState {
           needsReviewCount: parsed.stats?.needsReviewCount || 0,
           printFallbackCount: parsed.stats?.printFallbackCount || 0,
         },
+        pricingItems: Array.isArray(parsed.pricingItems) ? parsed.pricingItems : [],
+        pricing: parsed.version >= 2 && Array.isArray(parsed.pricing?.rows) ? {
+          pricingSource: typeof parsed.pricing.pricingSource === "string"
+            ? parsed.pricing.pricingSource
+            : "tcgplayer-listed-median",
+          rows: parsed.pricing.rows.map((row: Record<string, unknown>) => normalizePricingAssistantRow(row)),
+        } : undefined,
       };
     } catch {
       return {};

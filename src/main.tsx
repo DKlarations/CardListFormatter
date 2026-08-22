@@ -12,6 +12,7 @@ import {
   Printer,
   RefreshCw,
   Search,
+  Share2,
   Send,
   Sparkles,
   Trash2,
@@ -30,7 +31,8 @@ import {
   resolveCardNames,
   safeFileName,
 } from "./formatter";
-import { decodeFormatterHash } from "./share-link";
+import { decodeFormatterHash, encodeFormattedHash } from "./share-link";
+import type { PricingAssistantState } from "./pricing";
 import "./styles.css";
 import rrgLogo from "../images/LOGO_PNG_HEADER.png";
 import receiptLogo from "../images/Logo-LineArt.png";
@@ -93,6 +95,21 @@ function formatterApiOrigin() {
   return window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost"
     ? PRODUCTION_ORIGIN
     : window.location.origin;
+}
+
+function pricingShareItems(items: any[]) {
+  return items.map((item) => ({
+    index: item.index,
+    quantity: item.quantity,
+    inputName: item.inputName,
+    status: item.status,
+    isBasicLand: Boolean(item.isBasicLand),
+    isToken: Boolean(item.isToken),
+    alternateTitle: item.alternateTitle || "",
+    requestedDisplayName: item.requestedDisplayName || "",
+    requestedPrinting: item.requestedPrinting || undefined,
+    card: item.card?.name ? { name: item.card.name } : undefined,
+  }));
 }
 
 function formatMtgjsonManifestLabel(manifest) {
@@ -173,7 +190,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.4.4</span>
+              <span>v0.4.6</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -255,6 +272,8 @@ function App() {
         : "Paste a customer list, then process."
   ));
   const [reliabilityNote, setReliabilityNote] = useState(() => sharedFormatterState.reliabilityNote || "");
+  const [pricingItems, setPricingItems] = useState<any[]>(() => sharedFormatterState.pricingItems || []);
+  const [pricingState, setPricingState] = useState<PricingAssistantState | null>(() => sharedFormatterState.pricing || null);
   const abortControllerRef = useRef(null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
@@ -275,6 +294,12 @@ function App() {
     ? resolvedItems.filter((item) => item.status === "found" && item.printLookupFailed).length
     : preloadedStats?.printFallbackCount || 0;
   const rows = useMemo(() => diagnosticRows(parsed.cards, resolvedItems), [parsed.cards, resolvedItems]);
+
+  useEffect(() => {
+    document.title = processedCustomer?.name
+      ? `${processedCustomer.name} — RRG Pull List`
+      : "RRG Pull List Formatter";
+  }, [processedCustomer?.name]);
 
   useEffect(() => {
     if (!sharedListId || sharedFormatterState.output) return;
@@ -304,6 +329,8 @@ function App() {
         setPreloadedStats(saved.stats || null);
         setReliabilityNote(saved.reliabilityNote || "");
         setResolvedItems([]);
+        setPricingItems(Array.isArray(saved.pricingItems) ? saved.pricingItems : []);
+        setPricingState(saved.pricing?.rows ? saved.pricing : null);
         setMessage("Formatted list loaded from Teams.");
       } catch (error) {
         if (ignore) return;
@@ -386,6 +413,8 @@ function App() {
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       setProcessedCustomer(inferred.customer);
       setResolvedItems(inferred.items);
+      setPricingItems(inferred.items);
+      setPricingState(null);
       setPreloadedOutput("");
       setPreloadedStats(null);
       setProcessedAt(new Date().toISOString());
@@ -441,6 +470,7 @@ function App() {
       });
 
       setResolvedItems(nextItems);
+      setPricingItems(nextItems);
       const reviewCount = nextItems.filter((item) => item.status !== "found").length;
       setReliabilityNote(reliabilityMessage(nextItems, providerOptions));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
@@ -464,6 +494,49 @@ function App() {
     if (!output) return;
     await navigator.clipboard.writeText(output);
     setMessage("Output copied.");
+  }
+
+  function sharedPricingItems() {
+    return pricingItems.length ? pricingItems : resolvedItems;
+  }
+
+  function sharedUrl() {
+    const hash = encodeFormattedHash({
+      input,
+      output,
+      processedAt: processedAt || "",
+      reliabilityNote,
+      customer: outputCustomer,
+      stats: { resolvedCount, needsReviewCount: needsReview, printFallbackCount: printFallbacks },
+      pricingItems: pricingShareItems(sharedPricingItems()),
+      pricing: pricingState || undefined,
+    });
+    return `${window.location.origin}${window.location.pathname}${window.location.search}${hash}`;
+  }
+
+  async function copyShareLink() {
+    if (!showPricing) return;
+    try {
+      await navigator.clipboard.writeText(sharedUrl());
+      setMessage("Share link copied. It includes the pull list and current Pricing Assistant selections.");
+    } catch {
+      setMessage("Could not copy the share link. Your browser may block clipboard access.");
+    }
+  }
+
+  async function shareProcessedList() {
+    if (!showPricing) return;
+    const url = sharedUrl();
+    if (!navigator.share) {
+      await copyShareLink();
+      return;
+    }
+    try {
+      await navigator.share({ title: document.title, url });
+      setMessage("Share link ready.");
+    } catch (error) {
+      if ((error as DOMException)?.name !== "AbortError") await copyShareLink();
+    }
   }
 
   // Downloads the formatted output as a plain text file.
@@ -522,6 +595,8 @@ function App() {
     setPreloadedOutput("");
     setPreloadedStats(null);
     setReliabilityNote("");
+    setPricingItems([]);
+    setPricingState(null);
     setMessage("Input changed. Process again when ready.");
   }
 
@@ -574,7 +649,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>RRG Pull List Formatter</h1>
-              <span>v0.4.4</span>
+              <span>v0.4.6</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -696,8 +771,14 @@ function App() {
                 <Download size={18} />
               </IconButton>
               <IconButton onClick={printOutput} title="Print output" disabled={!output}>
-                <Printer size={18} />
+                <Printer size={18} /><span>Print Pull List</span>
               </IconButton>
+              {showPricing && <IconButton onClick={shareProcessedList} title="Share processed pull list">
+                <Share2 size={18} /><span>Share</span>
+              </IconButton>}
+              {showPricing && <IconButton onClick={copyShareLink} title="Copy a link with pricing selections">
+                <Copy size={18} /><span>Copy Link</span>
+              </IconButton>}
             </div>
           </div>
 
@@ -714,12 +795,14 @@ function App() {
           <Suspense fallback={showPricing ? <div className="pricing-loading-panel">Loading pricing assistant…</div> : null}>
             <PricingPanel
               visible
-              items={resolvedItems}
+              items={pricingItems.length ? pricingItems : resolvedItems}
               customer={outputCustomer || {}}
               processedAt={processedAt}
               apiOrigin={formatterApiOrigin()}
               logoUrl={receiptLogo}
               onMessage={setMessage}
+              initialState={pricingState}
+              onStateChange={setPricingState}
             />
           </Suspense>
         )}

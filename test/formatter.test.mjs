@@ -82,3 +82,10 @@ Lightning Bolt`);
   });
   assert.deepEqual(parsed.cards.map((card) => card.inputName), ["Lightning Bolt"]);
 });
+
+test("preserves explicit structured set and printing requests for Pricing Assistant defaults", () => {
+  const parsed = parsePullList(`Putrefy - Rare - $0.35 - RVR - Black/Green\nSol Ring FOIL SHOWCASE\nCloud, Midgar Mercenary SURGE FOIL BORDERLESS`);
+  assert.deepEqual(parsed.cards[0].requestedPrinting, { setCode: "RVR" });
+  assert.deepEqual(parsed.cards[1].requestedPrinting, { finish: "foil", foilTreatment: "standard", treatment: "showcase" });
+  assert.deepEqual(parsed.cards[2].requestedPrinting, { finish: "foil", foilTreatment: "surge", treatment: "borderless" });
+});
