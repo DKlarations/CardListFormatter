@@ -257,7 +257,9 @@ function App() {
   ));
   const [reliabilityNote, setReliabilityNote] = useState(() => sharedFormatterState.reliabilityNote || "");
   const [formatterItems, setFormatterItems] = useState<any[]>(() => sharedFormatterState.formatterItems || []);
+  const [copyLinkLabel, setCopyLinkLabel] = useState("Copy Link");
   const abortControllerRef = useRef(null);
+  const copyLinkResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
   const outputCustomer = processedCustomer || parsed.customer;
@@ -283,6 +285,10 @@ function App() {
       ? `${processedCustomer.name} — RRG Pull List`
       : "RRG Pull List Formatter";
   }, [processedCustomer?.name]);
+
+  useEffect(() => () => {
+    if (copyLinkResetRef.current) clearTimeout(copyLinkResetRef.current);
+  }, []);
 
   useEffect(() => {
     if (!sharedListId || sharedFormatterState.output) return;
@@ -494,8 +500,18 @@ function App() {
     try {
       await navigator.clipboard.writeText(sharedUrl());
       setMessage("Link copied.");
+      setCopyLinkLabel("Copied");
+      if (copyLinkResetRef.current) clearTimeout(copyLinkResetRef.current);
+      copyLinkResetRef.current = setTimeout(() => {
+        setCopyLinkLabel("Copy Link");
+      }, 1200);
     } catch {
       setMessage("Could not copy the share link. Your browser may block clipboard access.");
+      setCopyLinkLabel("Copy Failed");
+      if (copyLinkResetRef.current) clearTimeout(copyLinkResetRef.current);
+      copyLinkResetRef.current = setTimeout(() => {
+        setCopyLinkLabel("Copy Link");
+      }, 1200);
     }
   }
 
@@ -724,7 +740,7 @@ function App() {
                 Case Check
               </label>
               <IconButton onClick={copyShareLink} title="Copy a link to this processed pull list" disabled={!showPricing}>
-                <Link2 size={18} /><span>Copy Link</span>
+                <Link2 size={18} /><span>{copyLinkLabel}</span>
               </IconButton>
               <IconButton onClick={downloadOutput} title="Download .txt" disabled={!output}>
                 <Download size={18} />
