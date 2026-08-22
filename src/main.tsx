@@ -282,7 +282,7 @@ function App() {
 
   useEffect(() => {
     document.title = processedCustomer?.name
-      ? `${processedCustomer.name} — RRG Pull List`
+      ? `${processedCustomer.name} | RRG Pull List`
       : "RRG Pull List Formatter";
   }, [processedCustomer?.name]);
 
