@@ -1,6 +1,6 @@
 import { put } from "@vercel/blob";
 import { strFromU8, unzipSync } from "fflate";
-import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "../src/printing-normalization";
+import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "../src/printing-normalization.js";
 
 const DEFAULT_SET_LIST_URL = "https://mtgjson.com/api/v5/SetList.json.zip";
 const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
