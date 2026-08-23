@@ -69,6 +69,22 @@ import {
 } from "./pricing";
 import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
 import { pricingAssistantViewState } from "./pricing-ui-state";
+import {
+  applyPricingCatalogToRows,
+  completedPricingCatalogCoverage,
+  isCurrentPricingLoad,
+  pendingPricingCatalogCoverage,
+  pricingCatalogControlsAvailable,
+  pricingCatalogCoverageCounts,
+  pricingCatalogLoadStateForCoverage,
+  pricingCatalogRowPresentation,
+  pricingCatalogRowState,
+  type PricingCatalogCoverage,
+} from "./pricing-catalog-state";
+import type {
+  PricingDataDiagnostic,
+  PricingDataDiagnosticReporter,
+} from "./pricing-data-diagnostics";
 import { customerContactText, type Customer } from "./customer";
 import {
   normalizeSavedPricingState,
@@ -88,6 +104,7 @@ type PricingPanelProps = {
   initialPricingState?: SavedPricingState | null;
   sessionKey: string;
   onPricingStateChange?: (state: SavedPricingState) => void;
+  onPricingDataDiagnostic?: PricingDataDiagnosticReporter;
 };
 
 type PricingManifest = {
@@ -95,6 +112,13 @@ type PricingManifest = {
   generatedAt?: string;
   priceSources?: MtgjsonPriceSourceOption[];
   shards?: Record<string, { url?: string } | string>;
+};
+
+type PricingShardLoadResult = {
+  key: string;
+  cards: PricingCatalog;
+  status?: number;
+  error?: string;
 };
 
 type ListedMedianPoint = {
@@ -293,14 +317,6 @@ async function fallbackCatalogWithPrintHistories(
   return fallbackCatalog;
 }
 
-function rowsWithDefaultPrintings(rows: PricingRow[], catalog: PricingCatalog) {
-  return rows.map((row) => {
-    if (!row.resolved) return row;
-    const card = cardFromCatalog(catalog, row.canonicalName);
-    return initializePricingRowSelection(row, card);
-  });
-}
-
 export default function PricingPanel({
   visible,
   items,
@@ -312,11 +328,13 @@ export default function PricingPanel({
   initialPricingState = null,
   sessionKey,
   onPricingStateChange = () => {},
+  onPricingDataDiagnostic = () => {},
 }: PricingPanelProps) {
   const [rows, setRows] = useState<PricingRow[]>([]);
   const [catalog, setCatalog] = useState<PricingCatalog>({});
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [loadMessage, setLoadMessage] = useState("Pricing data loads when cards are added.");
+  const [catalogCoverage, setCatalogCoverage] = useState<PricingCatalogCoverage>({});
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hydratingRows, setHydratingRows] = useState<Set<string>>(new Set());
   const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
@@ -333,6 +351,7 @@ export default function PricingPanel({
   const [manualCardError, setManualCardError] = useState("");
   const manifestRef = useRef<PricingManifest | null>(null);
   const catalogRef = useRef<PricingCatalog>({});
+  const catalogCoverageRef = useRef<PricingCatalogCoverage>({});
   const loadedShardsRef = useRef(new Set<string>());
   const usingLiveFallbackRef = useRef(false);
   const loadGenerationRef = useRef(0);
@@ -356,6 +375,8 @@ export default function PricingPanel({
     setIncludeNotFound(restored.includeNotFound);
     setCatalog({});
     catalogRef.current = {};
+    setCatalogCoverage({});
+    catalogCoverageRef.current = {};
     manifestRef.current = null;
     loadedShardsRef.current.clear();
     requestedMedianIdsRef.current.clear();
@@ -422,16 +443,51 @@ export default function PricingPanel({
   );
   const cardNameSignature = cardNames.join("|");
 
+  function reportPricingDataDiagnostic(event: Omit<PricingDataDiagnostic, "timestamp">) {
+    onPricingDataDiagnostic({ timestamp: new Date().toISOString(), ...event });
+  }
+
+  function commitCatalogCoverage(coverage: PricingCatalogCoverage) {
+    catalogCoverageRef.current = coverage;
+    setCatalogCoverage(coverage);
+  }
+
   async function loadPricingData(force = false) {
     const loadGeneration = ++loadGenerationRef.current;
+    const requestedCardNames = cardNames;
+    const requestedShardKeys = Array.from(new Set(requestedCardNames.map(pricingShardKey)));
+    const reusableFallbackCatalog = force && usingLiveFallbackRef.current
+      ? catalogRef.current
+      : {};
     if (!cardNames.length) {
+      commitCatalogCoverage({});
       setLoadState("ready");
       setLoadMessage("Unresolved cards can be entered manually.");
       return;
     }
 
+    commitCatalogCoverage(pendingPricingCatalogCoverage(
+      requestedCardNames,
+      catalogRef.current,
+      catalogCoverageRef.current,
+      force,
+    ));
     setLoadState("loading");
     setLoadMessage("Loading MTGJSON pricing printings...");
+    if (force) {
+      reportPricingDataDiagnostic({
+        stage: "retry",
+        outcome: "started",
+        requested: requestedCardNames.length,
+        cataloged: 0,
+        missing: requestedCardNames.length,
+        message: "Staff requested a fresh pricing catalog load.",
+      });
+    }
+
+    let failedShardKeys = new Set<string>();
+    let loadFailureMessage = "Pricing data failed to load.";
+    let manifestFailureReported = false;
     try {
       if (force) {
         hydrationGenerationRef.current += 1;
@@ -450,79 +506,225 @@ export default function PricingPanel({
           headers: { Accept: "application/json" },
         });
         const manifest = await response.json().catch(() => ({}));
-        if (loadGeneration !== loadGenerationRef.current) return;
-        if (!response.ok) throw new Error(manifest.error || "Pricing index is unavailable.");
+        if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
+        if (!response.ok) {
+          loadFailureMessage = manifest.error || "Pricing index is unavailable.";
+          reportPricingDataDiagnostic({
+            stage: "manifest",
+            outcome: "failed",
+            status: response.status,
+            requested: requestedCardNames.length,
+            cataloged: 0,
+            missing: requestedCardNames.length,
+            message: loadFailureMessage,
+          });
+          manifestFailureReported = true;
+          throw new Error(loadFailureMessage);
+        }
         if (!pricingIndexSupportsPhysicalDimensions(manifest.version)) {
-          throw new Error("The published pricing index predates the current physical-printing model.");
+          loadFailureMessage = "The published pricing index predates the current physical-printing model.";
+          reportPricingDataDiagnostic({
+            stage: "manifest",
+            outcome: "failed",
+            status: response.status,
+            requested: requestedCardNames.length,
+            cataloged: 0,
+            missing: requestedCardNames.length,
+            message: loadFailureMessage,
+          });
+          manifestFailureReported = true;
+          throw new Error(loadFailureMessage);
         }
         manifestRef.current = manifest;
+        reportPricingDataDiagnostic({
+          stage: "manifest",
+          outcome: "success",
+          status: response.status,
+          requested: requestedCardNames.length,
+          cataloged: 0,
+          missing: requestedCardNames.length,
+          message: "Pricing manifest loaded.",
+        });
         if (Array.isArray(manifest.priceSources) && manifest.priceSources.length) {
           setMtgjsonPriceSources(selectableMtgjsonPriceSources(manifest.priceSources));
         }
       }
 
-      const shardKeys = Array.from(new Set(cardNames.map(pricingShardKey)))
+      const shardKeys = requestedShardKeys
         .filter((key) => !loadedShardsRef.current.has(key));
-      const shards = await Promise.all(shardKeys.map(async (key) => {
+      const shards: PricingShardLoadResult[] = await Promise.all(shardKeys.map(async (key) => {
         const url = manifestShardUrl(manifestRef.current!, key);
-        if (!url) return { key, cards: {} };
+        if (!url) return { key, cards: {}, status: 200 };
         const separator = url.includes("?") ? "&" : "?";
-        const response = await fetch(`${url}${separator}v=${encodeURIComponent(manifestRef.current?.generatedAt || "latest")}`);
-        if (!response.ok) throw new Error(`Pricing shard ${key.toUpperCase()} failed to load.`);
-        const shard = await response.json();
-        return { key, cards: shard.cards || {} };
+        try {
+          const response = await fetch(`${url}${separator}v=${encodeURIComponent(manifestRef.current?.generatedAt || "latest")}`);
+          if (!response.ok) {
+            return {
+              key,
+              cards: {},
+              status: response.status,
+              error: `Pricing shard ${key.toUpperCase()} failed to load.`,
+            };
+          }
+          const shard = await response.json();
+          return { key, cards: shard.cards || {}, status: response.status };
+        } catch (error) {
+          return {
+            key,
+            cards: {},
+            error: error instanceof Error ? error.message : `Pricing shard ${key.toUpperCase()} failed to load.`,
+          };
+        }
       }));
-      if (loadGeneration !== loadGenerationRef.current) return;
+      if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
 
       const nextCatalog = { ...catalogRef.current };
-      shards.forEach(({ key, cards }) => {
+      const successfulShards = shards.filter((shard) => !shard.error);
+      const failedShards = shards.filter((shard) => shard.error);
+      successfulShards.forEach(({ key, cards }) => {
         Object.assign(nextCatalog, cards);
         loadedShardsRef.current.add(key);
       });
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
-      setRows((current) => rowsWithDefaultPrintings(current, nextCatalog));
+      setRows((current) => applyPricingCatalogToRows(current, nextCatalog));
+
+      failedShardKeys = new Set(failedShards.map((shard) => shard.key));
+      failedShards.forEach((shard) => reportPricingDataDiagnostic({
+        stage: "shard",
+        outcome: "failed",
+        ...(shard.status ? { status: shard.status } : {}),
+        shardKey: shard.key,
+        requested: requestedCardNames.filter((name) => pricingShardKey(name) === shard.key).length,
+        cataloged: 0,
+        missing: requestedCardNames.filter((name) => pricingShardKey(name) === shard.key).length,
+        message: shard.error || `Pricing shard ${shard.key.toUpperCase()} failed to load.`,
+      }));
+      if (shards.length) {
+        reportPricingDataDiagnostic({
+          stage: "shard",
+          outcome: failedShards.length ? "partial" : "success",
+          requested: requestedCardNames.length,
+          cataloged: requestedCardNames.filter((name) => editionOptions(cardFromCatalog(nextCatalog, name)).length > 0).length,
+          missing: requestedCardNames.filter((name) => !editionOptions(cardFromCatalog(nextCatalog, name)).length).length,
+          message: failedShards.length
+            ? `${successfulShards.length}/${shards.length} pricing shards loaded before recovery.`
+            : `${successfulShards.length} pricing shard${successfulShards.length === 1 ? "" : "s"} loaded.`,
+        });
+      }
+      if (failedShards.length) {
+        loadFailureMessage = failedShards[0].error || "One or more pricing shards failed to load.";
+        throw new Error(loadFailureMessage);
+      }
+
+      const coverage = completedPricingCatalogCoverage(requestedCardNames, nextCatalog, {
+        completedShardKeys: loadedShardsRef.current,
+      });
+      commitCatalogCoverage(coverage);
       usingLiveFallbackRef.current = false;
       setLoadState("ready");
       setLoadMessage(pricingSource === "tcgplayer-listed-median"
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
         : "Using the selected MTGJSON price listing.");
     } catch (error) {
-      if (loadGeneration !== loadGenerationRef.current) return;
+      if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
+      loadFailureMessage = error instanceof Error ? error.message : loadFailureMessage;
+      if (!manifestRef.current && !manifestFailureReported) {
+        reportPricingDataDiagnostic({
+          stage: "manifest",
+          outcome: "failed",
+          requested: requestedCardNames.length,
+          cataloged: 0,
+          missing: requestedCardNames.length,
+          message: loadFailureMessage,
+        });
+      }
       // Compact shared items intentionally omit provider catalogs. Recover their
       // print histories through the existing throttled/cached enrichment path.
       // Keep manually resolved cards already merged into the local catalog too.
       let fallbackCatalog: PricingCatalog;
       try {
-        fallbackCatalog = await fallbackCatalogWithPrintHistories(items, catalogRef.current, setLoadMessage);
-      } catch {
+        fallbackCatalog = await fallbackCatalogWithPrintHistories(
+          items,
+          { ...reusableFallbackCatalog, ...catalogRef.current },
+          (message) => {
+            if (isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) setLoadMessage(message);
+          },
+        );
+      } catch (fallbackError) {
+        const message = fallbackError instanceof Error ? fallbackError.message : "Printing-history recovery failed.";
+        reportPricingDataDiagnostic({
+          stage: "recovery",
+          outcome: "failed",
+          requested: requestedCardNames.length,
+          cataloged: 0,
+          missing: requestedCardNames.length,
+          message,
+        });
         fallbackCatalog = { ...fallbackCatalogFromItems(items), ...catalogRef.current };
       }
-      if (loadGeneration !== loadGenerationRef.current) return;
-      if (Object.keys(fallbackCatalog).length) {
-        const foundRowsToHydrate = force
-          ? rowsWithDefaultPrintings(rows, fallbackCatalog).filter((row) => row.found && row.setCode)
-          : [];
-        catalogRef.current = fallbackCatalog;
-        setCatalog(fallbackCatalog);
-        setRows((current) => rowsWithDefaultPrintings(current, fallbackCatalog));
-        usingLiveFallbackRef.current = true;
+      if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
+      // A live-price hydration may have completed while print-history recovery
+      // was in flight. Exact current catalog records remain authoritative.
+      fallbackCatalog = { ...fallbackCatalog, ...catalogRef.current };
+      const coverage = completedPricingCatalogCoverage(requestedCardNames, fallbackCatalog, {
+        completedShardKeys: loadedShardsRef.current,
+        failedShardKeys: failedShardKeys.size ? failedShardKeys : requestedShardKeys,
+        recoveryAttempted: true,
+        errorMessage: loadFailureMessage,
+      });
+      const counts = pricingCatalogCoverageCounts(coverage);
+      const completedCount = counts.cataloged + counts.unavailable;
+      const fallbackOutcome = counts.errors
+        ? (completedCount ? "partial" : "failed")
+        : "success";
+      reportPricingDataDiagnostic({
+        stage: "fallback",
+        outcome: fallbackOutcome,
+        requested: counts.requested,
+        cataloged: counts.cataloged,
+        missing: counts.errors + counts.pending,
+        message: counts.errors
+          ? `${counts.cataloged}/${counts.requested} cards cataloged; ${counts.errors} unresolved after fallback.`
+          : "Fallback printing histories completed catalog coverage.",
+      });
+
+      const foundRowsToHydrate = force
+        ? applyPricingCatalogToRows(rows, fallbackCatalog).filter((row) => row.found && row.setCode)
+        : [];
+      catalogRef.current = fallbackCatalog;
+      setCatalog(fallbackCatalog);
+      setRows((current) => applyPricingCatalogToRows(current, fallbackCatalog));
+      commitCatalogCoverage(coverage);
+      usingLiveFallbackRef.current = counts.cataloged > 0;
+      const coverageLoadState = pricingCatalogLoadStateForCoverage(coverage);
+      if (coverageLoadState === "ready") {
         setLoadState("ready");
         setLoadMessage(pricingSource === "tcgplayer-listed-median"
           ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
           : "Printing history is ready. MTGJSON prices load automatically when a card is marked Found.");
-        foundRowsToHydrate.forEach((row) => void hydrateLivePrice(row));
       } else {
-        setLoadState("error");
-        setLoadMessage(error instanceof Error ? error.message : "Pricing data failed to load.");
+        setLoadState(coverageLoadState);
+        setLoadMessage("Pricing data could not be fully loaded.");
       }
+      foundRowsToHydrate.forEach((row) => void hydrateLivePrice(row));
     }
   }
 
   useEffect(() => {
-    if (!visible || !rows.length) return;
-    loadPricingData();
-  }, [visible, cardNameSignature, processedAt]);
+    if (!rows.length) {
+      loadGenerationRef.current += 1;
+      commitCatalogCoverage({});
+      setLoadState("idle");
+      setLoadMessage("Pricing data loads when cards are added.");
+      return;
+    }
+    if (!visible) {
+      loadGenerationRef.current += 1;
+      return;
+    }
+    void loadPricingData();
+  }, [visible, cardNameSignature, processedAt, sessionKey]);
 
   useEffect(() => () => {
     loadGenerationRef.current += 1;
@@ -748,6 +950,11 @@ export default function PricingPanel({
       const nextCatalog = { ...catalogRef.current, ...manualCatalog };
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
+      usingLiveFallbackRef.current = true;
+      const manualCoverage = completedPricingCatalogCoverage([canonicalName], nextCatalog, {
+        completedShardKeys: [pricingShardKey(canonicalName)],
+      });
+      commitCatalogCoverage({ ...catalogCoverageRef.current, ...manualCoverage });
       const initializedRow = initializePricingRowSelection(
         row,
         cardFromCatalog(nextCatalog, canonicalName),
@@ -791,6 +998,10 @@ export default function PricingPanel({
       };
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
+      const recoveredCoverage = completedPricingCatalogCoverage([row.canonicalName], nextCatalog, {
+        completedShardKeys: [pricingShardKey(row.canonicalName)],
+      });
+      commitCatalogCoverage({ ...catalogCoverageRef.current, ...recoveredCoverage });
       setRows((current) => current.map((candidate) => (
         pricingNameKey(candidate.canonicalName) === cardKey
           ? initializePricingRowSelection(candidate, nextCatalog[cardKey])
@@ -799,10 +1010,28 @@ export default function PricingPanel({
       setLoadMessage(pricingSource === "tcgplayer-listed-median"
         ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
         : "Live MTGJSON pricing loaded: TCGplayer retail, with Card Kingdom retail fallback.");
+      reportPricingDataDiagnostic({
+        stage: "recovery",
+        outcome: "success",
+        shardKey: pricingShardKey(row.canonicalName),
+        requested: 1,
+        cataloged: 1,
+        missing: 0,
+        message: `${normalizedSetCode} live pricing loaded.`,
+      });
     } catch (error) {
       if (hydrationGeneration !== hydrationGenerationRef.current) return;
       const message = error instanceof Error ? error.message : "MTGJSON pricing failed to load.";
       setLoadMessage(`${message} This row can still be priced manually.`);
+      reportPricingDataDiagnostic({
+        stage: "recovery",
+        outcome: "failed",
+        shardKey: pricingShardKey(row.canonicalName),
+        requested: 1,
+        cataloged: 0,
+        missing: 1,
+        message,
+      });
     } finally {
       if (hydrationGeneration === hydrationGenerationRef.current) {
         hydratingKeysRef.current.delete(hydrationKey);
@@ -1162,6 +1391,20 @@ export default function PricingPanel({
         </div>
       </div>
 
+      {loadState === "loading" && cardNames.length > 0 && (
+        <div className="pricing-catalog-status is-loading" role="status">
+          <Loader2 size={14} className="spin" aria-hidden="true" />
+          <span>Loading printing data…</span>
+        </div>
+      )}
+      {loadState === "error" && (
+        <div className="pricing-catalog-status is-error" role="alert" title={loadMessage}>
+          <AlertCircle size={15} aria-hidden="true" />
+          <span>Pricing data could not be fully loaded.</span>
+          <button type="button" onClick={() => loadPricingData(true)}>Retry</button>
+        </div>
+      )}
+
       {isAddingCard && (
         <form className="pricing-add-card" onSubmit={(event) => { event.preventDefault(); void addManualCard(); }}>
           <label>
@@ -1204,6 +1447,9 @@ export default function PricingPanel({
                   const treatments = compatibleTreatmentOptions(pricing.card, row.setCode, row.finish, row.foilTreatment);
                   const finishChoiceOptions = finishChoices(pricing.card, row.setCode, row.treatment);
                   const variantOptions = pricingVariantOptions(pricing.card, row.setCode, row.treatment, row.finish, row.foilTreatment);
+                  const catalogRowState = pricingCatalogRowState(row, catalogCoverage, catalog);
+                  const displayedEdition = catalogRowState === "ready" ? selectedEdition : undefined;
+                  const catalogPresentation = pricingCatalogRowPresentation(catalogRowState, Boolean(displayedEdition));
                   const priceValue = row.found
                     ? (row.priceOverride === null ? formatPrice(pricing.automatic.price) : row.priceOverride)
                     : "";
@@ -1212,15 +1458,16 @@ export default function PricingPanel({
                   const warningState = pricingRowWarningState({
                     resolved: row.resolved,
                     found: row.found,
-                    catalogState: loadState,
+                    catalogState: catalogRowState === "loading"
+                      ? "loading"
+                      : catalogRowState === "load-error" ? "error" : "ready",
                     hydrating: isHydrating,
                     automaticStatus: pricing.automatic.status,
                     priceValid: priceIsValid,
                   });
                   const isPriceLoading = row.found && warningState === "loading";
                   const canMarkFound = row.resolved
-                    && loadState === "ready"
-                    && (editions.length > 0 || row.isBasicLand);
+                    && pricingCatalogControlsAvailable(catalogRowState, row.isBasicLand);
                   const controlsEnabled = row.found && canMarkFound;
                   const needsWarning = warningState === "unavailable" || warningState === "ambiguous";
                   const usingMtgjsonFallback = pricingSource === "tcgplayer-listed-median"
@@ -1234,9 +1481,9 @@ export default function PricingPanel({
                     ? `${pricing.automatic.message || "Foil comparison price selected."} Double-check this foil price before printing.`
                     : pricing.automatic.message;
                   const warningMessage = !row.resolved
-                    ? "This card needs review before it can be priced."
-                    : loadState === "error"
-                      ? loadMessage
+                    ? catalogPresentation.title
+                    : catalogRowState !== "ready"
+                      ? catalogPresentation.title
                       : isPriceLoading
                         ? pricing.automatic.message || "Loading this printing's current price."
                         : pricing.automatic.message || "This found card still needs a price.";
@@ -1270,7 +1517,10 @@ export default function PricingPanel({
 
                   return (
                     <Fragment key={row.id}>
-                    <div className={`pricing-row ${!row.found ? "is-awaiting-found" : ""} ${needsVarianceReview ? "is-price-review" : ""}`}>
+                    <div
+                      className={`pricing-row ${!row.found ? "is-awaiting-found" : ""} ${needsVarianceReview ? "is-price-review" : ""}`}
+                      title={!canMarkFound ? catalogPresentation.title : undefined}
+                    >
                       <div className="pricing-found-cell">
                         <input
                           type="checkbox"
@@ -1323,8 +1573,9 @@ export default function PricingPanel({
                       >
                         <button
                           type="button"
-                          className="pricing-printing-trigger"
+                          className={`pricing-printing-trigger is-${catalogRowState}`}
                           disabled={!controlsEnabled || !editions.length}
+                          title={catalogPresentation.title}
                           onClick={(event) => {
                             if (openPrintingRowId === row.id) {
                               setOpenPrintingRowId(null);
@@ -1350,12 +1601,14 @@ export default function PricingPanel({
                           aria-haspopup="listbox"
                           aria-expanded={openPrintingRowId === row.id}
                         >
-                          {selectedEdition
-                            ? <i className={`ss ss-${selectedEdition.keyruneCode} ss-fw`} aria-hidden="true" />
+                          {catalogPresentation.loading
+                            ? <Loader2 size={14} className="spin pricing-printing-loader" aria-hidden="true" />
+                            : displayedEdition
+                            ? <i className={`ss ss-${displayedEdition.keyruneCode} ss-fw`} aria-hidden="true" />
                             : <span className="set-symbol-placeholder" aria-hidden="true">—</span>}
                           <span className="pricing-printing-trigger-label">
-                            <strong>{selectedEdition?.setCode || (row.resolved ? "Unavailable" : "Needs review")}</strong>
-                            {selectedEdition && <span>: {selectedEdition.setName}</span>}
+                            <strong>{displayedEdition?.setCode || catalogPresentation.label}</strong>
+                            {displayedEdition && <span>: {displayedEdition.setName}</span>}
                           </span>
                           <ChevronDown size={14} aria-hidden="true" />
                         </button>

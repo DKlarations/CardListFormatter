@@ -59,6 +59,14 @@ import {
   type SavedPullListDiagnosticReporter,
 } from "./saved-pull-list-diagnostics";
 import {
+  addPricingDataDiagnostic,
+  formatPricingDataDiagnosticReport,
+  pricingDataDiagnosticOutcomeLabel,
+  pricingDataDiagnosticStageLabel,
+  type PricingDataDiagnostic,
+  type PricingDataDiagnosticReporter,
+} from "./pricing-data-diagnostics";
+import {
   emptySavedPricingState,
   isGeneratedSamplePullListJobDraft,
   normalizePullListJobDraft,
@@ -324,6 +332,52 @@ function SavedPullListReport({ events }: { events: SavedPullListDiagnostic[] }) 
   );
 }
 
+function PricingDataReport({ events }: { events: PricingDataDiagnostic[] }) {
+  const [copyLabel, setCopyLabel] = useState("Copy Pricing Report");
+
+  async function copyReport() {
+    try {
+      await navigator.clipboard.writeText(formatPricingDataDiagnosticReport(events));
+      setCopyLabel("Copied");
+      window.setTimeout(() => setCopyLabel("Copy Pricing Report"), 1500);
+    } catch {
+      setCopyLabel("Copy failed");
+      window.setTimeout(() => setCopyLabel("Copy Pricing Report"), 1500);
+    }
+  }
+
+  return (
+    <section className="saved-pull-list-report pricing-data-report" aria-label="Pricing Data Report">
+      <div className="saved-pull-list-report-heading">
+        <h3>Pricing Data Report</h3>
+        <IconButton onClick={copyReport} title={copyLabel} ariaLabel="Copy Pricing Data Report" className="saved-pull-list-report-copy">
+          <Clipboard size={14} aria-hidden="true" /><span>{copyLabel}</span>
+        </IconButton>
+      </div>
+      {!events.length && <p className="saved-pull-list-report-empty">No pricing-data events recorded this session.</p>}
+      {events.length > 0 && (
+        <div className="saved-pull-list-report-list">
+          {events.map((event, index) => (
+            <article className={`saved-pull-list-report-event is-${event.outcome}`} key={`${event.timestamp}-${event.stage}-${index}`}>
+              <div className="saved-pull-list-report-event-meta">
+                <time dateTime={event.timestamp}>{formatSavedPullListDiagnosticTime(event.timestamp)}</time>
+                <strong>{pricingDataDiagnosticStageLabel(event.stage)}</strong>
+                {event.status && <span>HTTP {event.status}</span>}
+                {event.shardKey && <span>Shard {event.shardKey}</span>}
+                <b>{pricingDataDiagnosticOutcomeLabel(event.outcome)}</b>
+              </div>
+              {event.requested !== undefined && (
+                <p>{event.cataloged || 0}/{event.requested} cards cataloged · {event.missing || 0} unresolved</p>
+              )}
+              <p>{event.message}</p>
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function formatMtgjsonManifestLabel(manifest) {
   const generatedAt = manifest?.generatedAt || manifest?.source?.downloadedAt || "";
   const date = generatedAt ? new Date(generatedAt) : null;
@@ -489,6 +543,7 @@ function App() {
   const [currentJobId, setCurrentJobId] = useState("");
   const [saveState, setSaveState] = useState<SavedJobSaveState>("idle");
   const [savedPullListDiagnostics, setSavedPullListDiagnostics] = useState<SavedPullListDiagnostic[]>([]);
+  const [pricingDataDiagnostics, setPricingDataDiagnostics] = useState<PricingDataDiagnostic[]>([]);
   const [duplicateJob, setDuplicateJob] = useState<SavedJobSummary | null>(null);
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
@@ -555,6 +610,10 @@ function App() {
 
   const recordSavedPullListDiagnostic = useCallback<SavedPullListDiagnosticReporter>((event) => {
     setSavedPullListDiagnostics((current) => addSavedPullListDiagnostic(current, event));
+  }, []);
+
+  const recordPricingDataDiagnostic = useCallback<PricingDataDiagnosticReporter>((event) => {
+    setPricingDataDiagnostics((current) => addPricingDataDiagnostic(current, event));
   }, []);
 
   const persistJobDraft = useCallback(async (draft: PullListJobDraft, id = "") => {
@@ -1399,6 +1458,7 @@ function App() {
               initialPricingState={initialPricingState}
               sessionKey={pricingSessionKey}
               onPricingStateChange={handlePricingStateChange}
+              onPricingDataDiagnostic={recordPricingDataDiagnostic}
             />
         </Suspense>
 
@@ -1444,6 +1504,7 @@ function App() {
                 </tbody>
               </table>
             </div>
+            <PricingDataReport events={pricingDataDiagnostics} />
             <SavedPullListReport events={savedPullListDiagnostics} />
           </section>
         )}

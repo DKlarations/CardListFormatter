@@ -808,6 +808,11 @@ h2 {
   border-left-color: #d2a756;
 }
 
+.saved-pull-list-report-event.is-partial,
+.saved-pull-list-report-event.is-started {
+  border-left-color: #d2a756;
+}
+
 .saved-pull-list-report-event.is-failed {
   border-left-color: #df6672;
 }
@@ -834,6 +839,11 @@ h2 {
 }
 
 .saved-pull-list-report-event.is-duplicate .saved-pull-list-report-event-meta b {
+  color: #f2ca78;
+}
+
+.saved-pull-list-report-event.is-partial .saved-pull-list-report-event-meta b,
+.saved-pull-list-report-event.is-started .saved-pull-list-report-event-meta b {
   color: #f2ca78;
 }
 
@@ -1052,6 +1062,50 @@ h2 {
 .pricing-section {
   --pricing-grid-columns: 48px 60px minmax(190px, 1.5fr) minmax(145px, 0.9fr) 100px 134px 92px 142px 72px;
   --pricing-grid-gap: 8px;
+}
+
+.pricing-catalog-status {
+  display: flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: #b9cce0;
+  background: #102033;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.pricing-catalog-status.is-loading svg {
+  color: #69bde9;
+}
+
+.pricing-catalog-status.is-error {
+  color: #ffd0d4;
+  background: rgba(112, 28, 39, 0.42);
+}
+
+.pricing-catalog-status.is-error svg {
+  color: #ff8f98;
+}
+
+.pricing-catalog-status button {
+  margin-left: 3px;
+  padding: 2px 7px;
+  border: 1px solid rgba(255, 157, 167, 0.58);
+  border-radius: 5px;
+  color: #ffe4e7;
+  background: rgba(151, 42, 54, 0.62);
+  cursor: pointer;
+  font: inherit;
+}
+
+.pricing-catalog-status button:hover,
+.pricing-catalog-status button:focus-visible {
+  border-color: #ffb0b8;
+  background: rgba(178, 50, 64, 0.8);
+  outline: none;
 }
 
 .pricing-grid-columns,
@@ -1402,6 +1456,23 @@ h2 {
   background: #0b1420;
   cursor: not-allowed;
   opacity: 0.48;
+}
+
+.pricing-printing-trigger.is-load-error:disabled {
+  border-color: rgba(238, 86, 96, 0.55);
+  color: #ff9da7;
+  background: rgba(92, 24, 34, 0.42);
+  opacity: 0.82;
+}
+
+.pricing-printing-trigger.is-unavailable:disabled {
+  color: #7f91a3;
+  opacity: 0.58;
+}
+
+.pricing-printing-trigger > .pricing-printing-loader {
+  justify-self: center;
+  color: #69bde9;
 }
 
 .pricing-printing-trigger > svg {
