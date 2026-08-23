@@ -37,7 +37,7 @@ export function pendingPricingCatalogCoverage(
     const card = cardFromCatalog(catalog, cardName);
     const existing = previous[key];
     if (!force && editionOptions(card).length) return [key, { status: "ready" as const }];
-    if (!force && existing?.status === "missing") return [key, existing];
+    if (!force && (existing?.status === "missing" || existing?.status === "error")) return [key, existing];
     return [key, { status: "pending" as const }];
   }));
 }

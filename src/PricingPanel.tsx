@@ -81,6 +81,16 @@ import {
   pricingCatalogRowState,
   type PricingCatalogCoverage,
 } from "./pricing-catalog-state";
+import {
+  claimPricingCatalogRecoveryCards,
+  completedPricingCatalogRecoveryCoverage,
+  foundPricingRowsForListedMedian,
+  mergeRecoveredPricingCatalog,
+  pendingPricingCatalogRecoveryCoverage,
+  preserveConsumedPricingCatalogRecoveryCoverage,
+  resetPricingCatalogRecoveryAttempts,
+  summarizePricingCatalogRecoveryBatch,
+} from "./pricing-catalog-recovery";
 import type {
   PricingDataDiagnostic,
   PricingDataDiagnosticReporter,
@@ -284,24 +294,41 @@ function fallbackCatalogFromItems(items: any[]): PricingCatalog {
   return catalog;
 }
 
+type PrintHistoryRecoveryResult = {
+  catalog: PricingCatalog;
+  failedCardKeys: Set<string>;
+};
+
+function canonicalPricingNameForItem(item: any) {
+  return item.card?.name || item.mtgjsonCard?.name || outputDisplayName(item);
+}
+
 async function fallbackCatalogWithPrintHistories(
   items: any[],
   currentCatalog: PricingCatalog,
+  targetCardNames: string[],
   setMessage: (message: string) => void,
-) {
+): Promise<PrintHistoryRecoveryResult> {
   // Formatter/Scryfall fallback records intentionally have no MTGJSON prices.
   // Never let them replace an already hydrated exact-printing catalog entry.
-  let fallbackCatalog = { ...fallbackCatalogFromItems(items), ...currentCatalog };
-  const missingItems = items.filter((item) => {
-    if (item.status !== "found") return false;
-    const canonicalName = item.card?.name || item.mtgjsonCard?.name || outputDisplayName(item);
-    return !cardFromCatalog(fallbackCatalog, canonicalName);
+  const targetNamesByKey = new Map(targetCardNames.map((cardName) => [pricingNameKey(cardName), cardName]));
+  const sourceItemsByKey = new Map<string, any>();
+  items.forEach((item) => {
+    if (item.status !== "found") return;
+    const key = pricingNameKey(canonicalPricingNameForItem(item));
+    if (targetNamesByKey.has(key) && !sourceItemsByKey.has(key)) sourceItemsByKey.set(key, item);
   });
-  if (!missingItems.length) return fallbackCatalog;
+  const failedCardKeys = new Set(
+    Array.from(targetNamesByKey.keys()).filter((key) => !sourceItemsByKey.has(key)),
+  );
+  const recoveryEntries = Array.from(targetNamesByKey.keys())
+    .filter((key) => sourceItemsByKey.has(key))
+    .map((key) => ({ key, item: sourceItemsByKey.get(key) }));
+  if (!recoveryEntries.length) return { catalog: currentCatalog, failedCardKeys };
 
   setMessage("Restoring printing histories for this processed list...");
   const enriched = await enrichPrintHistories(
-    missingItems.map((item) => ({
+    recoveryEntries.map(({ item }) => ({
       ...item,
       // Compact shared items retain canonical identity but not Scryfall's URI.
       // This asks the existing protected enrichment path to recover it exactly.
@@ -313,8 +340,24 @@ async function fallbackCatalogWithPrintHistories(
     false,
     { useMtgjson: true, useScryfall: true, pricingMode: true },
   );
-  fallbackCatalog = { ...fallbackCatalog, ...fallbackCatalogFromItems(enriched) };
-  return fallbackCatalog;
+  if (!Array.isArray(enriched) || enriched.length !== recoveryEntries.length) {
+    throw new Error("Printing-history recovery returned an incomplete response.");
+  }
+  const catalogableItems = enriched.flatMap((item, index) => {
+    const key = recoveryEntries[index].key;
+    if (!item || item.printLookupFailed || !Array.isArray(item.prints)) {
+      failedCardKeys.add(key);
+      return [];
+    }
+    // The card is already canonically resolved. Recovery only supplies its
+    // physical print history; it does not rerun or revise formatter resolution.
+    return [{ ...item, status: "found" }];
+  });
+  const recoveredCatalog = fallbackCatalogFromItems(catalogableItems);
+  return {
+    catalog: mergeRecoveredPricingCatalog(currentCatalog, recoveredCatalog),
+    failedCardKeys,
+  };
 }
 
 export default function PricingPanel({
@@ -358,6 +401,7 @@ export default function PricingPanel({
   const hydrationGenerationRef = useRef(0);
   const hydratingKeysRef = useRef(new Set<string>());
   const requestedMedianIdsRef = useRef(new Set<string>());
+  const autoRecoveryAttemptedRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
   const reportedSessionKeyRef = useRef(sessionKey);
@@ -380,6 +424,7 @@ export default function PricingPanel({
     manifestRef.current = null;
     loadedShardsRef.current.clear();
     requestedMedianIdsRef.current.clear();
+    resetPricingCatalogRecoveryAttempts(autoRecoveryAttemptedRef.current);
     setListedMedianByProduct({});
     setHydratingRows(new Set());
     usingLiveFallbackRef.current = false;
@@ -617,15 +662,110 @@ export default function PricingPanel({
         throw new Error(loadFailureMessage);
       }
 
-      const coverage = completedPricingCatalogCoverage(requestedCardNames, nextCatalog, {
+      const completedPrimaryCoverage = completedPricingCatalogCoverage(requestedCardNames, nextCatalog, {
         completedShardKeys: loadedShardsRef.current,
       });
-      commitCatalogCoverage(coverage);
-      usingLiveFallbackRef.current = false;
-      setLoadState("ready");
-      setLoadMessage(pricingSource === "tcgplayer-listed-median"
-        ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
-        : "Using the selected MTGJSON price listing.");
+      const primaryCoverage = force
+        ? completedPrimaryCoverage
+        : preserveConsumedPricingCatalogRecoveryCoverage(
+          completedPrimaryCoverage,
+          catalogCoverageRef.current,
+          autoRecoveryAttemptedRef.current,
+        );
+      const basicLandCardKeys = new Set(rows
+        .filter((row) => row.resolved && row.isBasicLand)
+        .map((row) => pricingNameKey(row.canonicalName)));
+      const recoveryCardNames = claimPricingCatalogRecoveryCards(
+        requestedCardNames,
+        primaryCoverage,
+        nextCatalog,
+        autoRecoveryAttemptedRef.current,
+        { force, excludedCardKeys: basicLandCardKeys },
+      );
+      if (recoveryCardNames.length) {
+        commitCatalogCoverage(pendingPricingCatalogRecoveryCoverage(primaryCoverage, recoveryCardNames));
+        setLoadState("loading");
+        setLoadMessage(force
+          ? `Retrying printing histories for ${recoveryCardNames.length} card${recoveryCardNames.length === 1 ? "" : "s"}...`
+          : `Automatically recovering printing histories for ${recoveryCardNames.length} card${recoveryCardNames.length === 1 ? "" : "s"}...`);
+
+        let recoveryCatalog = nextCatalog;
+        let failedCardKeys = new Set<string>();
+        let recoveryFailureMessage = "";
+        try {
+          const recovery = await fallbackCatalogWithPrintHistories(
+            items,
+            nextCatalog,
+            recoveryCardNames,
+            (message) => {
+              if (isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) setLoadMessage(message);
+            },
+          );
+          recoveryCatalog = recovery.catalog;
+          failedCardKeys = recovery.failedCardKeys;
+        } catch (recoveryError) {
+          recoveryFailureMessage = recoveryError instanceof Error
+            ? recoveryError.message
+            : "Printing-history recovery failed.";
+          failedCardKeys = new Set(recoveryCardNames.map(pricingNameKey));
+        }
+        if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
+
+        const recoveryCoverage = completedPricingCatalogRecoveryCoverage(
+          primaryCoverage,
+          recoveryCardNames,
+          recoveryCatalog,
+          failedCardKeys,
+          recoveryFailureMessage || "Printing-history recovery failed. Retry pricing data.",
+        );
+        const recoverySummary = summarizePricingCatalogRecoveryBatch(
+          recoveryCardNames,
+          recoveryCatalog,
+          failedCardKeys,
+          recoveryFailureMessage,
+          !force,
+        );
+        reportPricingDataDiagnostic({
+          stage: "recovery",
+          outcome: recoverySummary.outcome,
+          requested: recoverySummary.requested,
+          cataloged: recoverySummary.cataloged,
+          missing: recoverySummary.missing,
+          message: recoverySummary.message,
+        });
+
+        const recoveredCardKeys = new Set(recoveryCardNames.map(pricingNameKey));
+        const recoveredRows = applyPricingCatalogToRows(rows, recoveryCatalog);
+        const foundRowsToHydrate = recoveredRows.filter((row) => (
+          row.found && row.setCode && recoveredCardKeys.has(pricingNameKey(row.canonicalName))
+        ));
+        catalogRef.current = recoveryCatalog;
+        setCatalog(recoveryCatalog);
+        setRows((current) => applyPricingCatalogToRows(current, recoveryCatalog));
+        commitCatalogCoverage(recoveryCoverage);
+        usingLiveFallbackRef.current = force
+          ? recoverySummary.cataloged > 0
+          : usingLiveFallbackRef.current || recoverySummary.cataloged > 0;
+        const recoveryLoadState = pricingCatalogLoadStateForCoverage(recoveryCoverage);
+        setLoadState(recoveryLoadState);
+        setLoadMessage(recoveryLoadState === "error"
+          ? "Pricing data could not be fully loaded."
+          : pricingSource === "tcgplayer-listed-median"
+            ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
+            : "Printing history is ready. MTGJSON prices load automatically when a card is marked Found.");
+        foundRowsToHydrate.forEach((row) => void hydrateLivePrice(row));
+        return;
+      }
+
+      commitCatalogCoverage(primaryCoverage);
+      if (force) usingLiveFallbackRef.current = false;
+      const primaryLoadState = pricingCatalogLoadStateForCoverage(primaryCoverage);
+      setLoadState(primaryLoadState);
+      setLoadMessage(primaryLoadState === "error"
+        ? "Pricing data could not be fully loaded."
+        : pricingSource === "tcgplayer-listed-median"
+          ? "Using TCGplayer Listed Median for nonfoil and Near Mint comparison pricing for foil; yellow warnings mark foil and fallback prices."
+          : "Using the selected MTGJSON price listing.");
     } catch (error) {
       if (!isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) return;
       loadFailureMessage = error instanceof Error ? error.message : loadFailureMessage;
@@ -644,13 +784,15 @@ export default function PricingPanel({
       // Keep manually resolved cards already merged into the local catalog too.
       let fallbackCatalog: PricingCatalog;
       try {
-        fallbackCatalog = await fallbackCatalogWithPrintHistories(
+        const fallbackRecovery = await fallbackCatalogWithPrintHistories(
           items,
           { ...reusableFallbackCatalog, ...catalogRef.current },
+          requestedCardNames,
           (message) => {
             if (isCurrentPricingLoad(loadGeneration, loadGenerationRef.current)) setLoadMessage(message);
           },
         );
+        fallbackCatalog = fallbackRecovery.catalog;
       } catch (fallbackError) {
         const message = fallbackError instanceof Error ? fallbackError.message : "Printing-history recovery failed.";
         reportPricingDataDiagnostic({
@@ -789,8 +931,7 @@ export default function PricingPanel({
 
   useEffect(() => {
     if (pricingSource !== "tcgplayer-listed-median") return;
-    const productIds = Array.from(new Set(rows
-      .filter((row) => row.found && row.quantity > 0)
+    const productIds = Array.from(new Set(foundPricingRowsForListedMedian(rows)
       .map((row) => tcgplayerProductIdForSelection(
         cardFromCatalog(catalog, row.canonicalName),
         row.setCode,
