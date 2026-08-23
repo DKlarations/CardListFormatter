@@ -122,6 +122,66 @@ test("load, Recent, and search requests retain their API behavior while recordin
   assert.ok(events.every((event) => event.endpoint === "/api/pull-list-jobs"));
 });
 
+test("DELETE records safe success and failure diagnostics including Vercel request IDs", async () => {
+  const successEvents = [];
+  const requested = [];
+  await withFetch(
+    async (url, init) => {
+      requested.push({ url: String(url), method: init.method, body: init.body });
+      return new Response(JSON.stringify({ deleted: true, id: "pl_delete1234abcd" }), {
+        status: 200,
+        headers: { "content-type": "application/json", "x-vercel-id": "cle1::delete-ok" },
+      });
+    },
+    () => client.deletePullListJob("pl_delete1234abcd", { onDiagnostic: (event) => successEvents.push(event) }),
+  );
+  assert.deepEqual(requested, [{
+    url: "/api/pull-list-jobs?id=pl_delete1234abcd",
+    method: "DELETE",
+    body: undefined,
+  }]);
+  assert.deepEqual(successEvents.map((event) => ({
+    operation: event.operation,
+    method: event.method,
+    endpoint: event.endpoint,
+    outcome: event.outcome,
+    status: event.status,
+    jobId: event.jobId,
+    requestId: event.requestId,
+  })), [{
+    operation: "delete",
+    method: "DELETE",
+    endpoint: "/api/pull-list-jobs",
+    outcome: "success",
+    status: 200,
+    jobId: "pl_delete1234abcd",
+    requestId: "cle1::delete-ok",
+  }]);
+  const report = diagnostics.formatSavedPullListDiagnosticReport(successEvents);
+  assert.match(report, /DELETE\nDELETE \/api\/pull-list-jobs\nHTTP 200\nSUCCESS/);
+  assert.match(report, /Job: #1234abcd/);
+
+  const failureEvents = [];
+  await withFetch(
+    async () => new Response(JSON.stringify({ error: "Deletion service unavailable." }), {
+      status: 500,
+      headers: { "content-type": "application/json", "x-vercel-id": "cle1::delete-failed" },
+    }),
+    () => assert.rejects(
+      client.deletePullListJob("pl_delete1234abcd", { onDiagnostic: (event) => failureEvents.push(event) }),
+      (error) => {
+        assert.equal(error.method, "DELETE");
+        assert.equal(error.message, "Deletion service unavailable.");
+        return true;
+      },
+    ),
+  );
+  assert.equal(failureEvents[0].operation, "delete");
+  assert.equal(failureEvents[0].outcome, "failed");
+  assert.equal(failureEvents[0].status, 500);
+  assert.equal(failureEvents[0].requestId, "cle1::delete-failed");
+});
+
 test("diagnostics keep only the five newest allowlisted events and never serialize request payload data", () => {
   const events = Array.from({ length: 6 }, (_, index) => diagnostics.createSavedPullListDiagnostic({
     timestamp: `2026-08-23T12:00:0${index}.000Z`,

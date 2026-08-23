@@ -36,3 +36,45 @@ test("quick pricing without a processed job is not autosave eligible", () => {
   assert.equal(session.canAutosaveCurrentJob({ currentJobId: "", processedAt: null, output: "" }), false);
   assert.equal(session.canAutosaveCurrentJob({ currentJobId: "pl_1", processedAt: "2026-08-23", output: "formatted" }), true);
 });
+
+test("deleting the current job detaches identity while preserving the complete local workspace", () => {
+  const workspace = {
+    currentJobId: "pl_current",
+    saveState: "dirty",
+    customer: { name: "Jake Stimac", phone: "309-555-1234", email: "jake@example.com" },
+    input: "1 Lightning Bolt",
+    output: "formatted output",
+    formatterItems: [{ name: "Lightning Bolt" }],
+    pricingRows: [{ id: "row-1", price: "1.25" }],
+  };
+  const detached = session.savedSessionAfterJobDeletion(workspace, "pl_current");
+  assert.deepEqual(detached, {
+    ...workspace,
+    currentJobId: "",
+    saveState: "idle",
+  });
+  assert.equal(session.saveStateLabel(detached.saveState), "Not saved");
+  assert.equal(session.savedSessionAfterJobDeletion(workspace, "pl_other"), workspace);
+});
+
+test("a current job being deleted blocks stale autosave work but allows future new-job creation", () => {
+  assert.equal(session.canPersistSavedJobRequest({
+    requestJobId: "pl_current",
+    currentJobId: "pl_current",
+    blockedJobId: "pl_current",
+  }), false);
+  assert.equal(session.canPersistSavedJobRequest({
+    requestJobId: "",
+    currentJobId: "pl_current",
+    blockedJobId: "pl_current",
+  }), false);
+  assert.equal(session.canPersistSavedJobRequest({
+    requestJobId: "",
+    currentJobId: "",
+    blockedJobId: "pl_deleted",
+  }), true);
+
+  const scheduledRevision = session.nextAutosaveRevision(3);
+  const invalidatedRevision = session.nextAutosaveRevision(scheduledRevision);
+  assert.equal(session.isLatestAutosaveRevision(scheduledRevision, invalidatedRevision), false);
+});

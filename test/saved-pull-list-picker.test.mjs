@@ -56,3 +56,37 @@ test("picker queries work without a staff session", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("deletion confirmation identifies named and unnamed lists and Cancel performs no delete", () => {
+  const named = {
+    id: "pl_named",
+    customer: { name: "Jake Stimac", phone: "", email: "" },
+    createdAt: "2026-08-23T21:10:00.000Z",
+    updatedAt: "2026-08-23T21:10:00.000Z",
+    processedAt: "2026-08-23T21:10:00.000Z",
+    cardCount: 12,
+    foundCount: 1,
+    source: "manual",
+  };
+  const when = picker.formatSavedPullListDate(named.updatedAt);
+  assert.equal(
+    picker.savedPullListDeleteConfirmation(named),
+    `Delete the Saved Pull List for Jake Stimac from ${when}?\n\nThis cannot be undone.`,
+  );
+  assert.equal(
+    picker.savedPullListDeleteConfirmation({ ...named, customer: { name: "", phone: "", email: "" } }),
+    `Delete this Saved Pull List from ${when}?\n\nThis cannot be undone.`,
+  );
+
+  let deleteRequests = 0;
+  const confirmed = picker.confirmSavedPullListDeletion(named, () => false);
+  if (confirmed) deleteRequests += 1;
+  assert.equal(confirmed, false);
+  assert.equal(deleteRequests, 0);
+});
+
+test("successful picker deletion removes only the deleted result and exposes the empty state input", () => {
+  const jobs = [{ id: "pl_delete" }, { id: "pl_keep" }];
+  assert.deepEqual(picker.removeDeletedSavedPullList(jobs, "pl_delete"), [{ id: "pl_keep" }]);
+  assert.deepEqual(picker.removeDeletedSavedPullList([{ id: "pl_delete" }], "pl_delete"), []);
+});

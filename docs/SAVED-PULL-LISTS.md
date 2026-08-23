@@ -10,6 +10,8 @@ Each pull-list job has an independent random ID, created/updated/processed/expir
 
 Jobs and their active secondary indexes expire 30 days after the latest meaningful successful save. Updating a job refreshes its job, current fingerprint, recent, and applicable exact customer-index TTLs. Queries prune expired or missing index members.
 
+Each Saved Pull List can also be permanently deleted one at a time from the Recent/Search picker. Manual deletion requires explicit confirmation and removes the job object, its owned duplicate-fingerprint mapping, Recent membership, exact customer-name membership, every customer-name prefix membership, and exact phone/email memberships. This is additive to the existing 30-day expiration policy; it does not change retention timing.
+
 **New List** clears the local workspace, current job identity, customer, formatter state, and every pricing row. It never deletes the persisted job. Saved work clears immediately; dirty, stale, saving, or failed work asks for confirmation.
 
 ## Exact duplicate protection
@@ -24,7 +26,9 @@ The small arrow immediately beside **Customer** opens an anchored Saved Pull Lis
 
 Each result remains a separate pull-list job even when several belong to the same customer. **Open** uses the same protected loader as direct `?job=` URLs and duplicate-warning actions. Dirty, stale, saving, or failed local work requires confirmation before replacement. A successful load restores customer fields, formatter state, all persisted Pricing Assistant work, and current job identity so autosave continues. Escape, outside click, or a successful Open closes the picker.
 
-`/api/pull-list-jobs` currently has no application-level authentication requirement for exact job loading, create/update, recent summaries, normalized name-prefix lookup, or exact normalized phone/email lookup. It is a compact job browser, not a customer CRM. Production authentication is expected to be added later at this API boundary, likely with Microsoft Entra ID.
+The compact red trash action beside **Open** asks staff to confirm the specific list and warns that deletion cannot be undone. Deleting an ordinary, noncurrent result removes that row after the server confirms deletion and leaves the current workspace untouched. Deleting the currently open job also preserves the complete visible local workspace, but detaches it from the deleted server record: the current job ID and `?job=` URL parameter are removed and the save state becomes **Not saved**. Current-job deletion is blocked while a save request is active, and queued/debounced persistence is invalidated so a stale save cannot recreate the deleted record. Later processing follows the normal new-job creation path with a new ID.
+
+`/api/pull-list-jobs` currently has no application-level authentication requirement for exact job loading, create/update/delete, recent summaries, normalized name-prefix lookup, or exact normalized phone/email lookup. It is a compact job browser, not a customer CRM. Production authentication is expected to be added later at this API boundary, likely with Microsoft Entra ID.
 
 When Diagnostics is enabled, Pullsmith also shows a session-only Saved Pull List request report for persistence troubleshooting. It retains the five newest API outcomes without storing customer data, request payloads, or credentials.
 

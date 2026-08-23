@@ -44,6 +44,7 @@ import {
   type Customer,
 } from "./customer";
 import {
+  deletePullListJob,
   formatterShareUrlWithoutJob,
   loadPullListJob,
   persistPullListJob,
@@ -77,11 +78,13 @@ import {
 } from "./pull-list-job";
 import {
   canAutosaveCurrentJob,
+  canPersistSavedJobRequest,
   isLatestAutosaveRevision,
   newListDisposition,
   nextAutosaveRevision,
   nextSavedJobSaveState,
   saveStateLabel,
+  savedSessionAfterJobDeletion,
   SAVED_JOB_AUTOSAVE_DEBOUNCE_MS,
   type SavedJobSaveState,
 } from "./saved-session-state";
@@ -313,7 +316,7 @@ function SavedPullListReport({ events }: { events: SavedPullListDiagnostic[] }) 
                 <strong>{savedPullListDiagnosticOperationLabel(event.operation)}</strong>
                 <span>{event.method}</span>
                 {event.status && <span>HTTP {event.status}</span>}
-                <b>{savedPullListDiagnosticOutcomeLabel(event.outcome)}</b>
+                <b>{savedPullListDiagnosticOutcomeLabel(event.outcome, event.operation)}</b>
               </div>
               <p>{event.endpoint}</p>
               <p>{event.message}</p>
@@ -456,7 +459,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.5.1</span>
+              <span>v0.5.2</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -546,6 +549,7 @@ function App() {
   const [pricingDataDiagnostics, setPricingDataDiagnostics] = useState<PricingDataDiagnostic[]>([]);
   const [duplicateJob, setDuplicateJob] = useState<SavedJobSummary | null>(null);
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
+  const [autosaveRestartRevision, setAutosaveRestartRevision] = useState(0);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
   const [initialPricingState, setInitialPricingState] = useState<SavedPricingState | null>(() => (
     pricingStateForWorkspaceLoad("copy-link", null)
@@ -565,6 +569,7 @@ function App() {
   const autosaveRevisionRef = useRef(0);
   const workspaceGenerationRef = useRef(0);
   const saveRequestInFlightRef = useRef(false);
+  const persistenceBlockedJobIdRef = useRef("");
   const queuedPersistenceRef = useRef<{ id: string; draft: PullListJobDraft } | null>(null);
   const persistJobDraftRef = useRef<(draft: PullListJobDraft, id?: string) => Promise<unknown>>(async () => null);
 
@@ -618,6 +623,13 @@ function App() {
 
   const persistJobDraft = useCallback(async (draft: PullListJobDraft, id = "") => {
     if (isGeneratedSamplePullListJobDraft(draft)) {
+      return null;
+    }
+    if (!canPersistSavedJobRequest({
+      requestJobId: id,
+      currentJobId: currentJobIdRef.current,
+      blockedJobId: persistenceBlockedJobIdRef.current,
+    })) {
       return null;
     }
     if (saveRequestInFlightRef.current) {
@@ -767,7 +779,7 @@ function App() {
     return () => {
       if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     };
-  }, [currentJobId, processedAt, output, jobDraftSignature, jobDraft, persistJobDraft]);
+  }, [currentJobId, processedAt, output, jobDraftSignature, jobDraft, persistJobDraft, autosaveRestartRevision]);
 
   useEffect(() => {
     if (!sharedListId || requestedSavedJobId || sharedFormatterState.output) return;
@@ -1150,6 +1162,60 @@ function App() {
     if (!currentJobId) setSaveState((current) => nextSavedJobSaveState(current, "change"));
   }
 
+  const deleteSavedPullListFromWorkspace = useCallback(async (jobId: string) => {
+    const deletingCurrentJob = currentJobIdRef.current === jobId;
+    if (deletingCurrentJob) {
+      if (saveRequestInFlightRef.current) {
+        throw new Error("Wait for the current save to finish before deleting this list.");
+      }
+      persistenceBlockedJobIdRef.current = jobId;
+      persistenceGenerationRef.current += 1;
+      autosaveRevisionRef.current += 1;
+      queuedPersistenceRef.current = null;
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+    }
+
+    try {
+      await deletePullListJob(jobId, { onDiagnostic: recordSavedPullListDiagnostic });
+      const nextSession = savedSessionAfterJobDeletion({
+        currentJobId: currentJobIdRef.current,
+        saveState: saveStateRef.current,
+      }, jobId);
+      if (nextSession.currentJobId === currentJobIdRef.current) return;
+
+      persistenceGenerationRef.current += 1;
+      autosaveRevisionRef.current += 1;
+      queuedPersistenceRef.current = null;
+      if (autosaveTimerRef.current) {
+        clearTimeout(autosaveTimerRef.current);
+        autosaveTimerRef.current = null;
+      }
+      currentJobIdRef.current = nextSession.currentJobId;
+      saveStateRef.current = nextSession.saveState;
+      acceptNextJobDraftAsSavedRef.current = false;
+      lastSavedSignatureRef.current = "";
+      setCurrentJobId(nextSession.currentJobId);
+      setSaveState(nextSession.saveState);
+      setDuplicateJob((current) => current?.id === jobId ? null : current);
+      setMessage("Saved Pull List deleted. Your local workspace is intact and is now not saved.");
+      const url = new URL(window.location.href);
+      url.searchParams.delete("job");
+      window.history.replaceState(null, "", url);
+    } catch (error) {
+      if (deletingCurrentJob && currentJobIdRef.current === jobId) {
+        setAutosaveRestartRevision((current) => current + 1);
+      }
+      throw error;
+    } finally {
+      if (persistenceBlockedJobIdRef.current === jobId) {
+        persistenceBlockedJobIdRef.current = "";
+      }
+    }
+  }, [recordSavedPullListDiagnostic]);
+
   function startNewList() {
     if (newListDisposition(saveState).requiresConfirmation) {
       const confirmed = window.confirm("This workspace has work that may not be saved. Start a new list anyway?");
@@ -1215,7 +1281,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>MIKE PULLSMITH</h1>
-              <span>v0.5.1</span>
+              <span>v0.5.2</span>
             </div>
           </div>
           <div className="logo-slot logo-slot-right">
@@ -1231,7 +1297,10 @@ function App() {
                   isOpen={savedPickerOpen}
                   onOpenChange={setSavedPickerOpen}
                   onOpenJob={openSavedPullListFromWorkspace}
+                  onDeleteJob={deleteSavedPullListFromWorkspace}
                   onDiagnostic={recordSavedPullListDiagnostic}
+                  currentJobId={currentJobId}
+                  currentJobSaveInFlight={saveRequestInFlightRef.current}
                 />
                 <input
                   value={customer.name}
@@ -1265,8 +1334,8 @@ function App() {
                   aria-live="polite"
                   title={currentJobId ? `Saved Pull List ${currentJobId}` : "No Saved Pull List has been created yet"}
                 >
-                  {saveStateLabel(saveState)}
-                  {currentJobId && <small>#{currentJobId.slice(-8)}</small>}
+                  <span>{saveStateLabel(saveState)}</span>
+                  {currentJobId && <small aria-hidden="true">#{currentJobId.slice(-8)}</small>}
                 </span>
                 <button className="icon-button session-new-list" type="button" onClick={startNewList} title="Start a clean pull-list workspace">
                   <ListPlus size={16} /><span>New List</span>

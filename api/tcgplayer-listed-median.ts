@@ -35,7 +35,7 @@ export async function GET(request: Request) {
       try {
         const headers = {
           Accept: "application/json",
-          "User-Agent": "Mozilla/5.0 (compatible; rrg-pull-list-formatter/0.5.1)",
+          "User-Agent": "Mozilla/5.0 (compatible; rrg-pull-list-formatter/0.5.2)",
         };
         const [detailsResponse, pricePointsResponse] = await Promise.all([
           fetch(`https://mp-search-api.tcgplayer.com/v1/product/${productId}/details`, {

@@ -55,3 +55,27 @@ export function canAutosaveCurrentJob({
 }) {
   return Boolean(currentJobId && processedAt && output);
 }
+
+export function canPersistSavedJobRequest({
+  requestJobId,
+  currentJobId,
+  blockedJobId,
+}: {
+  requestJobId?: string | null;
+  currentJobId?: string | null;
+  blockedJobId?: string | null;
+}) {
+  const targetJobId = requestJobId || currentJobId || "";
+  return !targetJobId || targetJobId !== blockedJobId;
+}
+
+export function savedSessionAfterJobDeletion<
+  Session extends { currentJobId: string; saveState: SavedJobSaveState },
+>(session: Session, deletedJobId: string): Session {
+  if (!deletedJobId || session.currentJobId !== deletedJobId) return session;
+  return {
+    ...session,
+    currentJobId: "",
+    saveState: "idle",
+  };
+}

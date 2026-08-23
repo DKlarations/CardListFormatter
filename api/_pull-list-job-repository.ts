@@ -40,6 +40,10 @@ export type PullListJobSaveResult =
   | { status: "duplicate"; existingJob: SavedJobSummary }
   | { status: "not-found" };
 
+export type PullListJobDeleteResult =
+  | { status: "deleted"; id: string }
+  | { status: "not-found" };
+
 export type PullListJobSearchQuery = {
   name?: string;
   namePrefix?: string;
@@ -254,6 +258,22 @@ export async function updatePullListJob(
     .map((key) => store.zrem(key, id)));
 
   return { status: "updated", job };
+}
+
+export async function deletePullListJob(
+  store: PullListJobStore,
+  id: string,
+  nowMs = Date.now(),
+): Promise<PullListJobDeleteResult> {
+  const job = await getPullListJob(store, id, nowMs);
+  if (!job) return { status: "not-found" };
+
+  await Promise.all([
+    store.del(jobKey(id)),
+    removeFingerprintIfOwned(store, job.fingerprint, id),
+    removeSearchIndexes(store, job),
+  ]);
+  return { status: "deleted", id };
 }
 
 function normalizedQuery(query: PullListJobSearchQuery) {

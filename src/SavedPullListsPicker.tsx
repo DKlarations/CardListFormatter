@@ -1,10 +1,13 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, Loader2, RefreshCw, Search } from "lucide-react";
+import { ChevronDown, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
 import { listPullListJobs } from "./pull-list-job-client";
 import type { SavedJobSummary } from "./pull-list-job";
 import type { SavedPullListDiagnosticReporter } from "./saved-pull-list-diagnostics";
 import {
+  confirmSavedPullListDeletion,
+  formatSavedPullListDate,
   nextSavedPullListsPickerOpen,
+  removeDeletedSavedPullList,
   savedPullListSearchRequest,
   SAVED_PULL_LIST_SEARCH_DEBOUNCE_MS,
   type SavedPullListOpenResult,
@@ -14,24 +17,15 @@ type SavedPullListsPickerProps = {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
   onOpenJob: (jobId: string) => Promise<SavedPullListOpenResult>;
+  onDeleteJob: (jobId: string) => Promise<void>;
   onDiagnostic: SavedPullListDiagnosticReporter;
+  currentJobId: string;
+  currentJobSaveInFlight: boolean;
 };
-
-function formatSavedListDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) return "Recently updated";
-  return new Intl.DateTimeFormat(undefined, {
-    timeZone: "America/Chicago",
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
-}
 
 function resultDetails(job: SavedJobSummary) {
   return [
-    formatSavedListDate(job.updatedAt),
+    formatSavedPullListDate(job.updatedAt),
     `${job.cardCount} card${job.cardCount === 1 ? "" : "s"}`,
     `${job.foundCount} found`,
   ].join(" · ");
@@ -41,18 +35,23 @@ export default function SavedPullListsPicker({
   isOpen,
   onOpenChange,
   onOpenJob,
+  onDeleteJob,
   onDiagnostic,
+  currentJobId,
+  currentJobSaveInFlight,
 }: SavedPullListsPickerProps) {
   const panelId = useId();
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
   const requestGenerationRef = useRef(0);
+  const deletedJobIdsRef = useRef(new Set<string>());
   const [query, setQuery] = useState("");
   const [jobs, setJobs] = useState<SavedJobSummary[]>([]);
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
   const [errorMessage, setErrorMessage] = useState("");
   const [retryRevision, setRetryRevision] = useState(0);
   const [openingJobId, setOpeningJobId] = useState("");
+  const [deletingJobId, setDeletingJobId] = useState("");
   const searchRequest = savedPullListSearchRequest(query);
 
   useEffect(() => {
@@ -87,7 +86,7 @@ export default function SavedPullListsPicker({
       try {
         const results = await listPullListJobs(searchRequest, { onDiagnostic });
         if (generation !== requestGenerationRef.current) return;
-        setJobs(results);
+        setJobs(results.filter((job) => !deletedJobIdsRef.current.has(job.id)));
         setLoadState("ready");
       } catch (error) {
         if (generation !== requestGenerationRef.current) return;
@@ -104,7 +103,7 @@ export default function SavedPullListsPicker({
   }, [isOpen, onDiagnostic, onOpenChange, query, retryRevision]);
 
   async function handleOpenJob(jobId: string) {
-    if (openingJobId) return;
+    if (openingJobId || deletingJobId) return;
     setOpeningJobId(jobId);
     setErrorMessage("");
     const result = await onOpenJob(jobId);
@@ -115,6 +114,27 @@ export default function SavedPullListsPicker({
       setLoadState("error");
     }
     setOpeningJobId("");
+  }
+
+  async function handleDeleteJob(job: SavedJobSummary) {
+    if (openingJobId || deletingJobId) return;
+    if (job.id === currentJobId && currentJobSaveInFlight) {
+      setErrorMessage("Wait for the current save to finish before deleting this list.");
+      return;
+    }
+    if (!confirmSavedPullListDeletion(job, (message) => window.confirm(message))) return;
+
+    setDeletingJobId(job.id);
+    setErrorMessage("");
+    try {
+      await onDeleteJob(job.id);
+      deletedJobIdsRef.current.add(job.id);
+      setJobs((current) => removeDeletedSavedPullList(current, job.id));
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : "Saved Pull List could not be deleted.");
+    } finally {
+      setDeletingJobId("");
+    }
   }
 
   function togglePicker() {
@@ -177,6 +197,9 @@ export default function SavedPullListsPicker({
                 </button>
               </div>
             )}
+            {loadState !== "error" && errorMessage && (
+              <p className="saved-pull-lists-action-error" role="alert">{errorMessage}</p>
+            )}
             {loadState === "ready" && jobs.length === 0 && (
               <p className="saved-pull-lists-message">No saved pull lists found.</p>
             )}
@@ -185,23 +208,42 @@ export default function SavedPullListsPicker({
                 {jobs.map((job) => {
                   const contacts = [job.customer.phone, job.customer.email].filter(Boolean).join(" · ");
                   const isOpening = openingJobId === job.id;
+                  const isDeleting = deletingJobId === job.id;
+                  const waitForCurrentSave = job.id === currentJobId && currentJobSaveInFlight;
+                  const actionsDisabled = Boolean(openingJobId || deletingJobId);
                   return (
                     <article className="saved-pull-list-result" role="listitem" key={job.id}>
-                      <div>
+                      <div className="saved-pull-list-result-details">
                         <strong>{job.customer.name || "Unnamed customer"}</strong>
                         {contacts && <span>{contacts}</span>}
                         <small>{resultDetails(job)}</small>
                       </div>
-                      <button
-                        className="icon-button saved-pull-list-open"
-                        type="button"
-                        onClick={() => void handleOpenJob(job.id)}
-                        disabled={Boolean(openingJobId)}
-                        aria-label={`Open ${job.customer.name || "unnamed customer"} Saved Pull List from ${formatSavedListDate(job.updatedAt)}`}
-                      >
-                        {isOpening && <Loader2 size={14} className="spin" aria-hidden="true" />}
-                        <span>{isOpening ? "Opening…" : "Open"}</span>
-                      </button>
+                      <div className="saved-pull-list-result-actions">
+                        <button
+                          className="icon-button saved-pull-list-open"
+                          type="button"
+                          onClick={() => void handleOpenJob(job.id)}
+                          disabled={actionsDisabled}
+                          aria-label={`Open ${job.customer.name || "unnamed customer"} Saved Pull List from ${formatSavedPullListDate(job.updatedAt)}`}
+                        >
+                          {isOpening && <Loader2 size={14} className="spin" aria-hidden="true" />}
+                          <span>{isOpening ? "Opening…" : "Open"}</span>
+                        </button>
+                        <button
+                          className="icon-button danger saved-pull-list-delete"
+                          type="button"
+                          onClick={() => void handleDeleteJob(job)}
+                          disabled={actionsDisabled || waitForCurrentSave}
+                          title={waitForCurrentSave
+                            ? "Wait for the current save to finish before deleting this list."
+                            : "Delete Saved Pull List"}
+                          aria-label={`${isDeleting ? "Deleting" : "Delete"} ${job.customer.name || "unnamed customer"} Saved Pull List from ${formatSavedPullListDate(job.updatedAt)}`}
+                        >
+                          {isDeleting
+                            ? <Loader2 size={14} className="spin" aria-hidden="true" />
+                            : <Trash2 size={14} aria-hidden="true" />}
+                        </button>
+                      </div>
                     </article>
                   );
                 })}

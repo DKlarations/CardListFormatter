@@ -213,6 +213,38 @@ export async function loadPullListJob(id: string, { onDiagnostic }: SavedPullLis
   return job;
 }
 
+export async function deletePullListJob(id: string, { onDiagnostic }: SavedPullListRequestOptions = {}) {
+  const requestUrl = `${jobApiUrl()}?id=${encodeURIComponent(id)}`;
+  const { response, body, endpoint, requestId: responseRequestId } = await savedPullListRequest("delete", "DELETE", requestUrl, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { Accept: "application/json" },
+  }, onDiagnostic);
+  if (!response.ok || body.deleted !== true) {
+    throw failedRequest(
+      "delete",
+      "DELETE",
+      endpoint,
+      response,
+      body,
+      responseRequestId,
+      `Saved Pull List deletion failed (${response.status}).`,
+      onDiagnostic,
+    );
+  }
+  report(onDiagnostic, {
+    operation: "delete",
+    method: "DELETE",
+    endpoint,
+    outcome: "success",
+    status: response.status,
+    message: "Saved Pull List deleted.",
+    jobId: id,
+    requestId: responseRequestId,
+  });
+  return { deleted: true as const, id };
+}
+
 export async function listPullListJobs(query: SavedPullListSummaryQuery = {}, { onDiagnostic }: SavedPullListRequestOptions = {}) {
   const search = new URLSearchParams();
   if (query.namePrefix) search.set("namePrefix", query.namePrefix);

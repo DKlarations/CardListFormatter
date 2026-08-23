@@ -1,6 +1,7 @@
 import { getRedis } from "./_redis.js";
 import {
   createPullListJob,
+  deletePullListJob,
   getPullListJob,
   searchPullListJobs,
   updatePullListJob,
@@ -92,9 +93,24 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
         return jsonResponse({ error: error instanceof Error ? error.message : "Saved Pull List update failed." }, 500);
       }
     },
+
+    async DELETE(request: Request) {
+      const url = new URL(request.url);
+      const id = (url.searchParams.get("id") || "").trim();
+      if (!id) return jsonResponse({ error: "Saved Pull List ID is required." }, 400);
+      try {
+        const result = await deletePullListJob(getStore(), id);
+        if (result.status === "not-found") {
+          return jsonResponse({ error: "Saved Pull List not found." }, 404);
+        }
+        return jsonResponse({ deleted: true, id: result.id });
+      } catch (error) {
+        return jsonResponse({ error: error instanceof Error ? error.message : "Saved Pull List deletion failed." }, 500);
+      }
+    },
   };
 }
 
 const handlers = createPullListJobHandlers();
 
-export const { GET, POST, PUT } = handlers;
+export const { GET, POST, PUT, DELETE } = handlers;

@@ -201,6 +201,63 @@ test("Recent results and exact normalized phone/email results are newest first",
   assert.equal(byEmail[0].id, newer.job.id);
 });
 
+test("deleting a job removes every owned reference, preserves same-customer jobs, and releases duplicate detection", async () => {
+  const store = new FakeRedis();
+  const target = await repository.createPullListJob(
+    store,
+    draft({ quantity: 1, customerName: "Jake Stimac" }),
+    Date.parse("2026-08-23T12:00:00Z"),
+  );
+  const other = await repository.createPullListJob(
+    store,
+    draft({ quantity: 2, customerName: "Jake Stimac" }),
+    Date.parse("2026-08-23T13:00:00Z"),
+  );
+
+  const deleted = await repository.deletePullListJob(store, target.job.id, Date.parse("2026-08-23T14:00:00Z"));
+  assert.deepEqual(deleted, { status: "deleted", id: target.job.id });
+  assert.equal(await repository.getPullListJob(store, target.job.id), null);
+  assert.equal(
+    await store.get(`${repository.PULL_LIST_FINGERPRINT_KEY_PREFIX}${target.job.fingerprint}`),
+    null,
+  );
+
+  const recent = await repository.searchPullListJobs(store, {}, Date.parse("2026-08-23T14:00:00Z"));
+  const exactName = await repository.searchPullListJobs(store, { name: "jake stimac" }, Date.parse("2026-08-23T14:00:00Z"));
+  const byPhone = await repository.searchPullListJobs(store, { phone: "3095551234" }, Date.parse("2026-08-23T14:00:00Z"));
+  const byEmail = await repository.searchPullListJobs(store, { email: "jane@example.com" }, Date.parse("2026-08-23T14:00:00Z"));
+  for (const results of [recent, exactName, byPhone, byEmail]) {
+    assert.deepEqual(results.map((job) => job.id), [other.job.id]);
+  }
+  for (const prefix of repository.normalizedCustomerNamePrefixes("Jake Stimac")) {
+    const matches = await repository.searchPullListJobs(
+      store,
+      { namePrefix: prefix },
+      Date.parse("2026-08-23T14:00:00Z"),
+    );
+    assert.deepEqual(matches.map((job) => job.id), [other.job.id], `prefix ${prefix}`);
+  }
+
+  const recreated = await repository.createPullListJob(
+    store,
+    draft({ quantity: 1, customerName: "Replacement Customer" }),
+    Date.parse("2026-08-23T15:00:00Z"),
+  );
+  assert.equal(recreated.status, "created");
+  assert.notEqual(recreated.job.id, target.job.id);
+  assert.ok(await repository.getPullListJob(store, other.job.id));
+});
+
+test("deleting a job does not remove a fingerprint mapping now owned by another job", async () => {
+  const store = new FakeRedis();
+  const target = await repository.createPullListJob(store, draft(), Date.parse("2026-08-23T12:00:00Z"));
+  const fingerprintKey = `${repository.PULL_LIST_FINGERPRINT_KEY_PREFIX}${target.job.fingerprint}`;
+  await store.set(fingerprintKey, "pl_new_owner");
+
+  await repository.deletePullListJob(store, target.job.id, Date.parse("2026-08-23T13:00:00Z"));
+  assert.equal(await store.get(fingerprintKey), "pl_new_owner");
+});
+
 test("job and fingerprint TTLs use 30 days from the latest meaningful update", async () => {
   const store = new FakeRedis();
   const first = await repository.createPullListJob(store, draft(), Date.parse("2026-08-23T12:00:00Z"));
@@ -215,7 +272,7 @@ test("job and fingerprint TTLs use 30 days from the latest meaningful update", a
   assert.equal(store.ttls.get(jobKey), jobs.SAVED_PULL_LIST_TTL_SECONDS);
 });
 
-test("Saved Pull List API creates, updates, loads, lists, and searches without a staff session", async () => {
+test("Saved Pull List API creates, updates, loads, lists, searches, and deletes without a staff session", async () => {
   const store = new FakeRedis();
   const api = jobApi.createPullListJobHandlers(() => store);
   const createdResponse = await api.POST(new Request("https://pullsmith.example/api/pull-list-jobs", {
@@ -254,6 +311,18 @@ test("Saved Pull List API creates, updates, loads, lists, and searches without a
   const emailResponse = await api.GET(new Request("https://pullsmith.example/api/pull-list-jobs?email=jane%40example.com"));
   assert.equal(emailResponse.status, 200);
   assert.equal((await emailResponse.json()).jobs[0].id, created.job.id);
+
+  const deletedResponse = await api.DELETE(new Request(`https://pullsmith.example/api/pull-list-jobs?id=${created.job.id}`, {
+    method: "DELETE",
+  }));
+  assert.equal(deletedResponse.status, 200);
+  assert.deepEqual(await deletedResponse.json(), { deleted: true, id: created.job.id });
+
+  const missingResponse = await api.DELETE(new Request(`https://pullsmith.example/api/pull-list-jobs?id=${created.job.id}`, {
+    method: "DELETE",
+  }));
+  assert.equal(missingResponse.status, 404);
+  assert.deepEqual(await missingResponse.json(), { error: "Saved Pull List not found." });
 });
 
 test("Copy Link URL construction strips private job identity", () => {

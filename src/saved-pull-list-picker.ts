@@ -3,6 +3,7 @@ import {
   normalizeEmailForSearch,
   normalizePhoneForSearch,
 } from "./customer";
+import type { SavedJobSummary } from "./pull-list-job";
 import { shouldConfirmNewList, type SavedJobSaveState } from "./saved-session-state";
 
 export const SAVED_PULL_LIST_RECENT_LIMIT = 15;
@@ -69,4 +70,38 @@ export function savedJobOpenDisposition(saveState: SavedJobSaveState) {
   return {
     requiresConfirmation: shouldConfirmNewList(saveState),
   };
+}
+
+export function formatSavedPullListDate(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Recently updated";
+  return new Intl.DateTimeFormat(undefined, {
+    timeZone: "America/Chicago",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+export function savedPullListDeleteConfirmation(job: SavedJobSummary) {
+  const customerName = job.customer.name.trim();
+  const when = formatSavedPullListDate(job.updatedAt);
+  return customerName
+    ? `Delete the Saved Pull List for ${customerName} from ${when}?\n\nThis cannot be undone.`
+    : `Delete this Saved Pull List from ${when}?\n\nThis cannot be undone.`;
+}
+
+export function confirmSavedPullListDeletion(
+  job: SavedJobSummary,
+  confirm: (message: string) => boolean,
+) {
+  return confirm(savedPullListDeleteConfirmation(job));
+}
+
+export function removeDeletedSavedPullList(
+  jobs: SavedJobSummary[],
+  deletedJobId: string,
+) {
+  return jobs.filter((job) => job.id !== deletedJobId);
 }

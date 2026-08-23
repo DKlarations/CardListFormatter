@@ -231,11 +231,15 @@ h1 {
 
 .save-state {
   display: inline-flex;
-  align-items: baseline;
-  gap: 5px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
   color: #8fa3b7;
   font-size: 0.7rem;
   font-weight: 750;
+  line-height: 1.05;
+  text-align: center;
   white-space: nowrap;
 }
 
@@ -372,7 +376,7 @@ h1 {
   border-top: 0;
 }
 
-.saved-pull-list-result > div {
+.saved-pull-list-result-details {
   display: grid;
   min-width: 0;
   gap: 2px;
@@ -403,6 +407,33 @@ h1 {
   height: 30px;
   min-width: 56px;
   padding: 0 8px;
+}
+
+.saved-pull-list-result-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.saved-pull-list-delete {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  padding: 0;
+}
+
+.saved-pull-list-delete:hover,
+.saved-pull-list-delete:focus-visible {
+  border-color: #c95367;
+  color: #ffffff;
+  background: #652332;
+}
+
+.saved-pull-lists-action-error {
+  margin: 0 3px 7px;
+  color: #f0a2a8;
+  font-size: 0.7rem;
+  line-height: 1.35;
 }
 
 .saved-pull-lists-message {

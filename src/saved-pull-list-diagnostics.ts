@@ -1,7 +1,7 @@
 export const SAVED_PULL_LIST_DIAGNOSTIC_LIMIT = 5;
 
-export type SavedPullListDiagnosticOperation = "create" | "autosave" | "load" | "search" | "recent";
-export type SavedPullListDiagnosticMethod = "GET" | "POST" | "PUT";
+export type SavedPullListDiagnosticOperation = "create" | "autosave" | "load" | "search" | "recent" | "delete";
+export type SavedPullListDiagnosticMethod = "GET" | "POST" | "PUT" | "DELETE";
 export type SavedPullListDiagnosticOutcome = "success" | "failed" | "duplicate";
 
 /** Session-only, intentionally payload-free Saved Pull List API diagnostic. */
@@ -59,14 +59,17 @@ export function savedPullListDiagnosticOperationLabel(operation: SavedPullListDi
   return operation.toUpperCase();
 }
 
-export function savedPullListDiagnosticOutcomeLabel(outcome: SavedPullListDiagnosticOutcome) {
-  if (outcome === "success") return "SAVED";
+export function savedPullListDiagnosticOutcomeLabel(
+  outcome: SavedPullListDiagnosticOutcome,
+  operation?: SavedPullListDiagnosticOperation,
+) {
+  if (outcome === "success") return operation === "delete" ? "SUCCESS" : "SAVED";
   return outcome.toUpperCase();
 }
 
 export function shortenedSavedPullListJobId(value?: string) {
   const id = text(value, 120);
-  return id ? `...${id.slice(-8)}` : "";
+  return id ? `#${id.slice(-8)}` : "";
 }
 
 /** Plain-text report deliberately serializes only the allowlisted diagnostic fields. */
@@ -78,7 +81,7 @@ export function formatSavedPullListDiagnosticReport(events: SavedPullListDiagnos
       savedPullListDiagnosticOperationLabel(event.operation),
       `${event.method} ${event.endpoint}`,
       event.status ? `HTTP ${event.status}` : "HTTP status unavailable",
-      savedPullListDiagnosticOutcomeLabel(event.outcome),
+      savedPullListDiagnosticOutcomeLabel(event.outcome, event.operation),
       "",
       event.message,
       ...(event.jobId ? ["", `Job: ${shortenedSavedPullListJobId(event.jobId)}`] : []),
