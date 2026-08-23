@@ -28,6 +28,12 @@ Each result remains a separate pull-list job even when several belong to the sam
 
 When Diagnostics is enabled, Pullsmith also shows a session-only Saved Pull List request report for persistence troubleshooting. It retains the five newest API outcomes without storing customer data, request payloads, or credentials.
 
+## Redis deployment configuration
+
+Saved Pull Lists and the legacy formatted-list API share one Upstash REST configuration helper. Production prefers the Vercel/Upstash integration variables `PULLSMITH_KV_REST_API_URL` and `PULLSMITH_KV_REST_API_TOKEN`; the write-capable token is required, and the read-only token is not used for persistence. Complete `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` and `lists_REDIS_URL` / `lists_KV_REST_API_TOKEN` pairs remain compatibility fallbacks.
+
+A newly provisioned Redis database begins with no historical Saved Pull Lists. Empty Recent/Search results are expected until new jobs are processed and saved.
+
 ## Saved Pull List versus Copy Link
 
 - Saved Pull List load restores the exact staff Pricing Assistant working state and then rehydrates current external catalogs/prices.
