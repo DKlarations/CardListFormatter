@@ -41,6 +41,7 @@ import {
   EMPTY_CUSTOMER,
   mergeCustomerPreservingExisting,
   normalizeCustomer,
+  updateCustomerField,
   type Customer,
 } from "./customer";
 import {
@@ -1158,8 +1159,15 @@ function App() {
   }
 
   function handleCustomerField(field: "name" | "phone" | "email", value: string) {
-    setCustomer((current) => normalizeCustomer({ ...current, [field]: value }));
+    setCustomer((current) => updateCustomerField(current, field, value));
     if (!currentJobId) setSaveState((current) => nextSavedJobSaveState(current, "change"));
+  }
+
+  function handleCustomerNameBlur() {
+    setCustomer((current) => {
+      const normalizedName = normalizeCustomer({ name: current.name }).name;
+      return current.name === normalizedName ? current : { ...current, name: normalizedName };
+    });
   }
 
   const deleteSavedPullListFromWorkspace = useCallback(async (jobId: string) => {
@@ -1305,6 +1313,7 @@ function App() {
                 <input
                   value={customer.name}
                   onChange={(event) => handleCustomerField("name", event.target.value)}
+                  onBlur={handleCustomerNameBlur}
                   placeholder="Customer"
                   aria-label="Customer"
                   autoComplete="name"

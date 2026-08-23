@@ -1,9 +1,19 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { importBundledModule } from "./test-module-bundle.mjs";
 
 const picker = await importBundledModule("src/saved-pull-list-picker.ts", "saved-pull-list-picker");
 const client = await importBundledModule("src/pull-list-job-client.ts", "saved-pull-list-client");
+const pickerComponentSource = await readFile(new URL("../src/SavedPullListsPicker.tsx", import.meta.url), "utf8");
+const deleteDialogSource = await readFile(new URL("../src/DeleteSavedPullListDialog.tsx", import.meta.url), "utf8");
+
+test("picker opens from the full details control and keeps Delete as the only sibling action", () => {
+  assert.match(pickerComponentSource, /className="saved-pull-list-result-main"/);
+  assert.match(pickerComponentSource, /onClick=\{\(\) => void handleOpenJob\(job\.id\)\}/);
+  assert.doesNotMatch(pickerComponentSource, /saved-pull-list-open/);
+  assert.match(pickerComponentSource, /className="icon-button danger saved-pull-list-delete"/);
+});
 
 test("picker open state closes for Escape, outside clicks, and successful Open", () => {
   assert.equal(picker.nextSavedPullListsPickerOpen(false, "open"), true);
@@ -57,7 +67,7 @@ test("picker queries work without a staff session", async () => {
   }
 });
 
-test("deletion confirmation identifies named and unnamed lists and Cancel performs no delete", () => {
+test("deletion dialog identifies named and unnamed lists without a browser confirmation", () => {
   const named = {
     id: "pl_named",
     customer: { name: "Jake Stimac", phone: "", email: "" },
@@ -69,20 +79,38 @@ test("deletion confirmation identifies named and unnamed lists and Cancel perfor
     source: "manual",
   };
   const when = picker.formatSavedPullListDate(named.updatedAt);
-  assert.equal(
-    picker.savedPullListDeleteConfirmation(named),
-    `Delete the Saved Pull List for Jake Stimac from ${when}?\n\nThis cannot be undone.`,
+  assert.deepEqual(picker.savedPullListDeleteDialogDetails(named), {
+    title: "Delete Saved Pull List?",
+    customerName: "Jake Stimac",
+    updatedAt: when,
+    warning: "This permanently deletes this saved pull list. This cannot be undone.",
+  });
+  assert.deepEqual(
+    picker.savedPullListDeleteDialogDetails({ ...named, customer: { name: "", phone: "", email: "" } }),
+    {
+      title: "Delete Saved Pull List?",
+      customerName: "Unnamed customer",
+      updatedAt: when,
+      warning: "This permanently deletes this saved pull list. This cannot be undone.",
+    },
   );
-  assert.equal(
-    picker.savedPullListDeleteConfirmation({ ...named, customer: { name: "", phone: "", email: "" } }),
-    `Delete this Saved Pull List from ${when}?\n\nThis cannot be undone.`,
-  );
+  assert.doesNotMatch(pickerComponentSource, /window\.confirm/);
+  assert.doesNotMatch(deleteDialogSource, /window\.confirm/);
+});
 
-  let deleteRequests = 0;
-  const confirmed = picker.confirmSavedPullListDeletion(named, () => false);
-  if (confirmed) deleteRequests += 1;
-  assert.equal(confirmed, false);
-  assert.equal(deleteRequests, 0);
+test("trash opens a portal dialog, while deletion remains delegated to the existing handler", () => {
+  assert.match(pickerComponentSource, /setDeleteConfirmationJob\(job\)/);
+  assert.match(pickerComponentSource, /<DeleteSavedPullListDialog/);
+  assert.match(pickerComponentSource, /onConfirm=\{handleConfirmedDeleteJob\}/);
+  assert.match(pickerComponentSource, /await onDeleteJob\(job\.id\)/);
+  assert.match(pickerComponentSource, /deleteRequestInFlightRef\.current/);
+  assert.match(deleteDialogSource, /createPortal\(/);
+  assert.match(deleteDialogSource, /role="dialog"/);
+  assert.match(deleteDialogSource, /aria-modal="true"/);
+  assert.match(deleteDialogSource, /event\.key === "Escape"/);
+  assert.match(deleteDialogSource, /event\.target === event\.currentTarget/);
+  assert.match(deleteDialogSource, /cancelButtonRef\.current\?\.focus\(\)/);
+  assert.match(deleteDialogSource, /event\.key !== "Tab"/);
 });
 
 test("successful picker deletion removes only the deleted result and exposes the empty state input", () => {

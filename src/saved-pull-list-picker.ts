@@ -84,19 +84,14 @@ export function formatSavedPullListDate(value: string) {
   }).format(date);
 }
 
-export function savedPullListDeleteConfirmation(job: SavedJobSummary) {
-  const customerName = job.customer.name.trim();
-  const when = formatSavedPullListDate(job.updatedAt);
-  return customerName
-    ? `Delete the Saved Pull List for ${customerName} from ${when}?\n\nThis cannot be undone.`
-    : `Delete this Saved Pull List from ${when}?\n\nThis cannot be undone.`;
-}
-
-export function confirmSavedPullListDeletion(
-  job: SavedJobSummary,
-  confirm: (message: string) => boolean,
-) {
-  return confirm(savedPullListDeleteConfirmation(job));
+export function savedPullListDeleteDialogDetails(job: SavedJobSummary) {
+  const customerName = job.customer.name.trim() || "Unnamed customer";
+  return {
+    title: "Delete Saved Pull List?",
+    customerName,
+    updatedAt: formatSavedPullListDate(job.updatedAt),
+    warning: "This permanently deletes this saved pull list. This cannot be undone.",
+  };
 }
 
 export function removeDeletedSavedPullList(

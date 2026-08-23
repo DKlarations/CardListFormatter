@@ -88,6 +88,16 @@ export function normalizeCustomer(value: unknown): Customer {
   };
 }
 
+/** Preserve intermediate name-editing whitespace while retaining existing field normalization. */
+export function updateCustomerField(
+  customer: Customer,
+  field: "name" | "phone" | "email",
+  value: string,
+): Customer {
+  if (field === "name") return { ...customer, name: value };
+  return normalizeCustomer({ ...customer, [field]: value });
+}
+
 /** Parsed data fills blanks, while a staff-entered non-empty value remains authoritative. */
 export function mergeCustomerPreservingExisting(existing: unknown, parsed: unknown): Customer {
   const current = normalizeCustomer(existing);

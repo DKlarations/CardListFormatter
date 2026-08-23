@@ -376,10 +376,43 @@ h1 {
   border-top: 0;
 }
 
-.saved-pull-list-result-details {
+.saved-pull-list-result-main {
   display: grid;
+  align-self: stretch;
   min-width: 0;
+  width: 100%;
   gap: 2px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  outline: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  text-align: left;
+}
+
+.saved-pull-list-result-main:hover,
+.saved-pull-list-result-main:focus-visible {
+  border-color: rgba(104, 174, 218, 0.28);
+  background: rgba(34, 95, 133, 0.2);
+}
+
+.saved-pull-list-result-main:focus-visible {
+  box-shadow: 0 0 0 2px rgba(78, 161, 212, 0.3);
+}
+
+.saved-pull-list-result-main:disabled {
+  cursor: not-allowed;
+  opacity: 0.68;
+}
+
+.saved-pull-list-result-main strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
 }
 
 .saved-pull-list-result strong,
@@ -403,12 +436,6 @@ h1 {
   font-variant-numeric: tabular-nums;
 }
 
-.saved-pull-list-open {
-  height: 30px;
-  min-width: 56px;
-  padding: 0 8px;
-}
-
 .saved-pull-list-result-actions {
   display: flex;
   align-items: center;
@@ -427,6 +454,67 @@ h1 {
   border-color: #c95367;
   color: #ffffff;
   background: #652332;
+}
+
+.saved-pull-list-delete-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(5, 12, 20, 0.54);
+}
+
+.saved-pull-list-delete-dialog {
+  width: min(420px, 100%);
+  padding: 20px;
+  border: 1px solid rgba(104, 174, 218, 0.38);
+  border-radius: 9px;
+  color: #edf6fc;
+  background: #101d2c;
+  box-shadow: 0 22px 60px rgba(0, 0, 0, 0.54);
+}
+
+.saved-pull-list-delete-dialog h2 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 1rem;
+  line-height: 1.25;
+}
+
+.saved-pull-list-delete-identity {
+  display: grid;
+  gap: 2px;
+  margin-top: 17px;
+}
+
+.saved-pull-list-delete-identity strong {
+  font-size: 0.86rem;
+}
+
+.saved-pull-list-delete-identity span {
+  color: #8fa3b7;
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.saved-pull-list-delete-dialog p {
+  margin: 17px 0 0;
+  color: #a8bbcc;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.saved-pull-list-delete-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.saved-pull-list-delete-actions button {
+  min-width: 78px;
 }
 
 .saved-pull-lists-action-error {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { importBundledModule } from "./test-module-bundle.mjs";
 
@@ -8,7 +9,9 @@ const {
   customerSearchFields,
   mergeCustomerPreservingExisting,
   normalizeCustomer,
+  updateCustomerField,
 } = await importBundledModule("src/customer.ts", "customer");
+const mainSource = await readFile(new URL("../src/main.tsx", import.meta.url), "utf8");
 
 test("normalizes structured customer fields and search forms", () => {
   const customer = normalizeCustomer({
@@ -59,4 +62,15 @@ test("parsed customer data fills blanks without erasing staff corrections", () =
     ),
     { name: "Manual Name", phone: "309-555-0000", email: "manual@example.com" },
   );
+});
+
+test("manual name editing preserves intermediate spaces and normalizes at the boundary", () => {
+  let customer = normalizeCustomer({});
+  for (const value of ["Jake", "Jake ", "Jake S", "Jake Smith"]) {
+    customer = updateCustomerField(customer, "name", value);
+    assert.equal(customer.name, value);
+  }
+  assert.equal(normalizeCustomer({ name: "  Jake   Smith  " }).name, "Jake Smith");
+  assert.match(mainSource, /updateCustomerField\(current, field, value\)/);
+  assert.match(mainSource, /onBlur=\{handleCustomerNameBlur\}/);
 });

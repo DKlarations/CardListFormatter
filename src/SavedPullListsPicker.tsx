@@ -1,10 +1,10 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
+import DeleteSavedPullListDialog from "./DeleteSavedPullListDialog";
 import { listPullListJobs } from "./pull-list-job-client";
 import type { SavedJobSummary } from "./pull-list-job";
 import type { SavedPullListDiagnosticReporter } from "./saved-pull-list-diagnostics";
 import {
-  confirmSavedPullListDeletion,
   formatSavedPullListDate,
   nextSavedPullListsPickerOpen,
   removeDeletedSavedPullList,
@@ -43,6 +43,9 @@ export default function SavedPullListsPicker({
   const panelId = useId();
   const pickerRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
+  const hasFocusedPickerSearchRef = useRef(false);
+  const deleteConfirmationTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteRequestInFlightRef = useRef(false);
   const requestGenerationRef = useRef(0);
   const deletedJobIdsRef = useRef(new Set<string>());
   const [query, setQuery] = useState("");
@@ -52,18 +55,18 @@ export default function SavedPullListsPicker({
   const [retryRevision, setRetryRevision] = useState(0);
   const [openingJobId, setOpeningJobId] = useState("");
   const [deletingJobId, setDeletingJobId] = useState("");
+  const [deleteConfirmationJob, setDeleteConfirmationJob] = useState<SavedJobSummary | null>(null);
   const searchRequest = savedPullListSearchRequest(query);
 
   useEffect(() => {
     if (!isOpen) return undefined;
-    const focusTimer = window.setTimeout(() => searchRef.current?.focus(), 0);
     const handlePointerDown = (event: PointerEvent) => {
-      if (!pickerRef.current?.contains(event.target as Node)) {
+      if (!deleteConfirmationJob && !pickerRef.current?.contains(event.target as Node)) {
         onOpenChange(nextSavedPullListsPickerOpen(true, "outside"));
       }
     };
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !deleteConfirmationJob) {
         event.preventDefault();
         onOpenChange(nextSavedPullListsPickerOpen(true, "escape"));
       }
@@ -71,11 +74,23 @@ export default function SavedPullListsPicker({
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
     return () => {
-      window.clearTimeout(focusTimer);
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [isOpen, onOpenChange]);
+  }, [deleteConfirmationJob, isOpen, onOpenChange]);
+
+  useEffect(() => {
+    if (!isOpen) {
+      hasFocusedPickerSearchRef.current = false;
+      return undefined;
+    }
+    if (hasFocusedPickerSearchRef.current) return undefined;
+    const focusTimer = window.setTimeout(() => {
+      searchRef.current?.focus();
+      hasFocusedPickerSearchRef.current = true;
+    }, 0);
+    return () => window.clearTimeout(focusTimer);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!isOpen) return undefined;
@@ -116,14 +131,36 @@ export default function SavedPullListsPicker({
     setOpeningJobId("");
   }
 
-  async function handleDeleteJob(job: SavedJobSummary) {
+  function returnFocusToDeleteButton() {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        const trigger = deleteConfirmationTriggerRef.current;
+        if (trigger?.isConnected) trigger.focus();
+      }, 0);
+    });
+  }
+
+  function closeDeleteConfirmation() {
+    if (!deleteConfirmationJob) return;
+    setDeleteConfirmationJob(null);
+    returnFocusToDeleteButton();
+  }
+
+  function requestDeleteConfirmation(job: SavedJobSummary, trigger: HTMLButtonElement) {
     if (openingJobId || deletingJobId) return;
     if (job.id === currentJobId && currentJobSaveInFlight) {
       setErrorMessage("Wait for the current save to finish before deleting this list.");
       return;
     }
-    if (!confirmSavedPullListDeletion(job, (message) => window.confirm(message))) return;
+    deleteConfirmationTriggerRef.current = trigger;
+    setDeleteConfirmationJob(job);
+  }
 
+  async function handleConfirmedDeleteJob() {
+    const job = deleteConfirmationJob;
+    if (!job || openingJobId || deletingJobId || deleteRequestInFlightRef.current) return;
+
+    deleteRequestInFlightRef.current = true;
     setDeletingJobId(job.id);
     setErrorMessage("");
     try {
@@ -133,7 +170,10 @@ export default function SavedPullListsPicker({
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "Saved Pull List could not be deleted.");
     } finally {
+      deleteRequestInFlightRef.current = false;
       setDeletingJobId("");
+      setDeleteConfirmationJob(null);
+      returnFocusToDeleteButton();
     }
   }
 
@@ -210,29 +250,29 @@ export default function SavedPullListsPicker({
                   const isOpening = openingJobId === job.id;
                   const isDeleting = deletingJobId === job.id;
                   const waitForCurrentSave = job.id === currentJobId && currentJobSaveInFlight;
-                  const actionsDisabled = Boolean(openingJobId || deletingJobId);
+                  const actionsDisabled = Boolean(openingJobId || deletingJobId || deleteConfirmationJob);
                   return (
                     <article className="saved-pull-list-result" role="listitem" key={job.id}>
-                      <div className="saved-pull-list-result-details">
-                        <strong>{job.customer.name || "Unnamed customer"}</strong>
+                      <button
+                        className="saved-pull-list-result-main"
+                        type="button"
+                        onClick={() => void handleOpenJob(job.id)}
+                        disabled={actionsDisabled}
+                        aria-busy={isOpening}
+                        aria-label={`Open ${job.customer.name || "unnamed customer"} Saved Pull List from ${formatSavedPullListDate(job.updatedAt)}`}
+                      >
+                        <strong>
+                          {isOpening && <Loader2 size={13} className="spin" aria-hidden="true" />}
+                          {job.customer.name || "Unnamed customer"}
+                        </strong>
                         {contacts && <span>{contacts}</span>}
                         <small>{resultDetails(job)}</small>
-                      </div>
+                      </button>
                       <div className="saved-pull-list-result-actions">
-                        <button
-                          className="icon-button saved-pull-list-open"
-                          type="button"
-                          onClick={() => void handleOpenJob(job.id)}
-                          disabled={actionsDisabled}
-                          aria-label={`Open ${job.customer.name || "unnamed customer"} Saved Pull List from ${formatSavedPullListDate(job.updatedAt)}`}
-                        >
-                          {isOpening && <Loader2 size={14} className="spin" aria-hidden="true" />}
-                          <span>{isOpening ? "Opening…" : "Open"}</span>
-                        </button>
                         <button
                           className="icon-button danger saved-pull-list-delete"
                           type="button"
-                          onClick={() => void handleDeleteJob(job)}
+                          onClick={(event) => requestDeleteConfirmation(job, event.currentTarget)}
                           disabled={actionsDisabled || waitForCurrentSave}
                           title={waitForCurrentSave
                             ? "Wait for the current save to finish before deleting this list."
@@ -251,6 +291,14 @@ export default function SavedPullListsPicker({
             )}
           </div>
         </div>
+      )}
+      {deleteConfirmationJob && (
+        <DeleteSavedPullListDialog
+          job={deleteConfirmationJob}
+          isDeleting={deletingJobId === deleteConfirmationJob.id}
+          onCancel={closeDeleteConfirmation}
+          onConfirm={handleConfirmedDeleteJob}
+        />
       )}
     </div>
   );
