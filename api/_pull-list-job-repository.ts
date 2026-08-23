@@ -4,8 +4,8 @@ import {
   normalizeCustomerNameForSearch,
   normalizeEmailForSearch,
   normalizePhoneForSearch,
-} from "../src/customer";
-import { pullListFingerprint } from "../src/pull-list-fingerprint";
+} from "../src/customer.js";
+import { pullListFingerprint } from "../src/pull-list-fingerprint.js";
 import {
   expiresAtFromUpdate,
   isPersistablePullListJobDraft,
@@ -17,7 +17,7 @@ import {
   type PullListJob,
   type PullListJobDraft,
   type SavedJobSummary,
-} from "../src/pull-list-job";
+} from "../src/pull-list-job.js";
 
 export const PULL_LIST_JOB_KEY_PREFIX = "pull-list-job:";
 export const PULL_LIST_FINGERPRINT_KEY_PREFIX = "pull-list-fingerprint:";

@@ -1,4 +1,4 @@
-import type { PricingAssistantRowState } from "./pricing";
+import type { PricingAssistantRowState } from "./pricing.js";
 
 /** Normalizes serializable Pricing Assistant work without loading market catalogs. */
 export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowState>): PricingAssistantRowState {

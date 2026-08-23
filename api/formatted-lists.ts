@@ -1,5 +1,5 @@
-import { normalizeCustomer } from "../src/customer";
-import { getRedis, SAVED_PULL_LIST_TTL_SECONDS } from "./_redis";
+import { normalizeCustomer } from "../src/customer.js";
+import { getRedis, SAVED_PULL_LIST_TTL_SECONDS } from "./_redis.js";
 
 const LIST_TTL_SECONDS = SAVED_PULL_LIST_TTL_SECONDS;
 const KEY_PREFIX = "formatted-list:";

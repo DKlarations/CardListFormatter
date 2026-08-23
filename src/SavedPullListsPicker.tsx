@@ -1,9 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Loader2, RefreshCw, Search } from "lucide-react";
-import {
-  listPullListJobs,
-  StaffAuthorizationRequiredError,
-} from "./pull-list-job-client";
+import { listPullListJobs } from "./pull-list-job-client";
 import type { SavedJobSummary } from "./pull-list-job";
 import {
   nextSavedPullListsPickerOpen,
@@ -15,7 +12,6 @@ import {
 type SavedPullListsPickerProps = {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
-  onAuthorizationRequired: () => void;
   onOpenJob: (jobId: string) => Promise<SavedPullListOpenResult>;
 };
 
@@ -42,7 +38,6 @@ function resultDetails(job: SavedJobSummary) {
 export default function SavedPullListsPicker({
   isOpen,
   onOpenChange,
-  onAuthorizationRequired,
   onOpenJob,
 }: SavedPullListsPickerProps) {
   const panelId = useId();
@@ -93,12 +88,6 @@ export default function SavedPullListsPicker({
         setLoadState("ready");
       } catch (error) {
         if (generation !== requestGenerationRef.current) return;
-        if (error instanceof StaffAuthorizationRequiredError) {
-          setJobs([]);
-          onOpenChange(nextSavedPullListsPickerOpen(true, "authorization-required"));
-          onAuthorizationRequired();
-          return;
-        }
         setJobs([]);
         setErrorMessage(error instanceof Error ? error.message : "Saved Pull Lists could not be loaded.");
         setLoadState("error");
@@ -109,7 +98,7 @@ export default function SavedPullListsPicker({
       window.clearTimeout(timer);
       if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
     };
-  }, [isOpen, onAuthorizationRequired, onOpenChange, query, retryRevision]);
+  }, [isOpen, onOpenChange, query, retryRevision]);
 
   async function handleOpenJob(jobId: string) {
     if (openingJobId) return;

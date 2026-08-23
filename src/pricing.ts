@@ -1,5 +1,5 @@
-import { normalizePricingAssistantRow } from "./pricing-session";
-export { normalizePricingAssistantRow } from "./pricing-session";
+import { normalizePricingAssistantRow } from "./pricing-session.js";
+export { normalizePricingAssistantRow } from "./pricing-session.js";
 
 export type PricingFinish = "normal" | "foil" | "etched";
 export type FoilTreatment = "standard" | "surge";

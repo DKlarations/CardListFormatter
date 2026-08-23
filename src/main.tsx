@@ -10,7 +10,6 @@ import {
   Download,
   Link2,
   ListPlus,
-  LockKeyhole,
   Loader2,
   Printer,
   RefreshCw,
@@ -49,8 +48,6 @@ import {
   loadPullListJob,
   persistPullListJob,
   pullListJobUrl,
-  StaffAuthorizationRequiredError,
-  unlockStaffSaving,
 } from "./pull-list-job-client";
 import {
   emptySavedPricingState,
@@ -420,10 +417,6 @@ function App() {
   const [currentJobId, setCurrentJobId] = useState("");
   const [saveState, setSaveState] = useState<SavedJobSaveState>("idle");
   const [duplicateJob, setDuplicateJob] = useState<SavedJobSummary | null>(null);
-  const [staffUnlockVisible, setStaffUnlockVisible] = useState(false);
-  const [staffPasscode, setStaffPasscode] = useState("");
-  const [staffUnlockError, setStaffUnlockError] = useState("");
-  const [staffUnlocking, setStaffUnlocking] = useState(false);
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
   const [initialPricingState, setInitialPricingState] = useState<SavedPricingState | null>(() => (
@@ -437,8 +430,6 @@ function App() {
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedSignatureRef = useRef("");
   const persistenceGenerationRef = useRef(0);
-  const pendingPersistenceRef = useRef<{ id: string; draft: PullListJobDraft } | null>(null);
-  const pendingLoadIdRef = useRef(requestedSavedJobId);
   const pricingStateRef = useRef(pricingState);
   const currentJobIdRef = useRef(currentJobId);
   const saveStateRef = useRef(saveState);
@@ -447,7 +438,6 @@ function App() {
   const workspaceGenerationRef = useRef(0);
   const saveRequestInFlightRef = useRef(false);
   const queuedPersistenceRef = useRef<{ id: string; draft: PullListJobDraft } | null>(null);
-  const pendingPickerOpenRef = useRef(false);
   const persistJobDraftRef = useRef<(draft: PullListJobDraft, id?: string) => Promise<unknown>>(async () => null);
 
   const parsed = useMemo(() => parsePullList(input), [input]);
@@ -502,9 +492,6 @@ function App() {
     try {
       const result = await persistPullListJob(draft, id);
       if (generation !== persistenceGenerationRef.current) return result;
-      pendingPersistenceRef.current = null;
-      setStaffUnlockVisible(false);
-      setStaffUnlockError("");
       if (result.status === "duplicate") {
         setDuplicateJob(result.existingJob);
         setSaveState(id ? "failed" : "dirty");
@@ -520,14 +507,8 @@ function App() {
       return result;
     } catch (error) {
       if (generation !== persistenceGenerationRef.current) return null;
-      pendingPersistenceRef.current = { id, draft };
       setSaveState((current) => nextSavedJobSaveState(current, "save-failure"));
-      if (error instanceof StaffAuthorizationRequiredError) {
-        setStaffUnlockVisible(true);
-        setStaffUnlockError("");
-      } else {
-        setMessage("Saved Pull List save failed. Your local work is still here.");
-      }
+      setMessage("Saved Pull List save failed. Your local work is still here.");
       return null;
     } finally {
       saveRequestInFlightRef.current = false;
@@ -550,7 +531,6 @@ function App() {
     persistenceGenerationRef.current += 1;
     autosaveRevisionRef.current += 1;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
-    pendingPersistenceRef.current = null;
     queuedPersistenceRef.current = null;
     const restoredPricing = pricingStateForWorkspaceLoad("saved-job", job.pricingState) || emptySavedPricingState();
     currentJobIdRef.current = job.id;
@@ -572,7 +552,6 @@ function App() {
     setSaveState("saved");
     setMessage("Saved Pull List loaded.");
     acceptNextJobDraftAsSavedRef.current = true;
-    pendingLoadIdRef.current = "";
     window.history.replaceState(null, "", pullListJobUrl(job.id));
   }, []);
 
@@ -588,21 +567,11 @@ function App() {
     try {
       const job = await loadPullListJob(id);
       restoreSavedJob(job);
-      setStaffUnlockVisible(false);
-      setStaffUnlockError("");
       return { status: "opened" };
     } catch (error) {
-      if (error instanceof StaffAuthorizationRequiredError) {
-        pendingLoadIdRef.current = id;
-        setSavedPickerOpen(false);
-        setStaffUnlockVisible(true);
-        setMessage("Unlock staff saving to resume this Saved Pull List.");
-        return { status: "authorization-required" };
-      } else {
-        const errorMessage = error instanceof Error ? error.message : "Saved Pull List could not be loaded.";
-        setMessage(errorMessage);
-        return { status: "error", message: errorMessage };
-      }
+      const errorMessage = error instanceof Error ? error.message : "Saved Pull List could not be loaded.";
+      setMessage(errorMessage);
+      return { status: "error", message: errorMessage };
     }
   }, [restoreSavedJob]);
 
@@ -610,14 +579,6 @@ function App() {
     (id: string) => openSavedPullList(id, { protectCurrentWorkspace: true }),
     [openSavedPullList],
   );
-
-  const handleSavedPickerAuthorizationRequired = useCallback(() => {
-    pendingPickerOpenRef.current = true;
-    setSavedPickerOpen(false);
-    setStaffUnlockVisible(true);
-    setStaffUnlockError("");
-    setMessage("Unlock staff access to view Saved Pull Lists.");
-  }, []);
 
   useEffect(() => {
     document.title = documentTitle(customer.name);
@@ -1044,36 +1005,6 @@ function App() {
     if (!currentJobId) setSaveState((current) => nextSavedJobSaveState(current, "change"));
   }
 
-  async function submitStaffUnlock(event) {
-    event.preventDefault();
-    if (!staffPasscode || staffUnlocking) return;
-    setStaffUnlocking(true);
-    setStaffUnlockError("");
-    try {
-      await unlockStaffSaving(staffPasscode);
-      setStaffPasscode("");
-      setStaffUnlockVisible(false);
-      if (pendingLoadIdRef.current) {
-        const pendingId = pendingLoadIdRef.current;
-        pendingLoadIdRef.current = "";
-        await openSavedPullList(pendingId, { protectCurrentWorkspace: false });
-      } else {
-        if (pendingPickerOpenRef.current) {
-          pendingPickerOpenRef.current = false;
-          setSavedPickerOpen(true);
-        }
-        if (pendingPersistenceRef.current) {
-        const pending = pendingPersistenceRef.current;
-        await persistJobDraft(pending.draft, pending.id);
-        }
-      }
-    } catch (error) {
-      setStaffUnlockError(error instanceof Error ? error.message : "Staff unlock failed.");
-    } finally {
-      setStaffUnlocking(false);
-    }
-  }
-
   function startNewList() {
     if (newListDisposition(saveState).requiresConfirmation) {
       const confirmed = window.confirm("This workspace has work that may not be saved. Start a new list anyway?");
@@ -1083,10 +1014,7 @@ function App() {
     workspaceGenerationRef.current += 1;
     persistenceGenerationRef.current += 1;
     autosaveRevisionRef.current += 1;
-    pendingPersistenceRef.current = null;
     queuedPersistenceRef.current = null;
-    pendingLoadIdRef.current = "";
-    pendingPickerOpenRef.current = false;
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     currentJobIdRef.current = "";
     setCurrentJobId("");
@@ -1103,8 +1031,6 @@ function App() {
     setInitialPricingState(null);
     setPricingSessionKey((current) => `fresh:${current}:${Date.now()}`);
     setSaveState("idle");
-    setStaffUnlockVisible(false);
-    setStaffUnlockError("");
     setSavedPickerOpen(false);
     setMessage("New list ready.");
     if (copyLinkResetRef.current) clearTimeout(copyLinkResetRef.current);
@@ -1159,7 +1085,6 @@ function App() {
                 <SavedPullListsPicker
                   isOpen={savedPickerOpen}
                   onOpenChange={setSavedPickerOpen}
-                  onAuthorizationRequired={handleSavedPickerAuthorizationRequired}
                   onOpenJob={openSavedPullListFromWorkspace}
                 />
                 <input
@@ -1203,26 +1128,6 @@ function App() {
               </div>
             </div>
           </div>
-          {staffUnlockVisible && (
-            <form className="staff-unlock" onSubmit={submitStaffUnlock}>
-              <LockKeyhole size={15} aria-hidden="true" />
-              <label>
-                <span className="sr-only">Staff passcode</span>
-                <input
-                  type="password"
-                  value={staffPasscode}
-                  onChange={(event) => setStaffPasscode(event.target.value)}
-                  placeholder="Staff passcode"
-                  autoComplete="current-password"
-                  aria-label="Staff passcode"
-                />
-              </label>
-              <button className="icon-button" type="submit" disabled={!staffPasscode || staffUnlocking}>
-                {staffUnlocking ? <Loader2 size={15} className="spin" /> : <span>Unlock staff access</span>}
-              </button>
-              {staffUnlockError && <span className="staff-unlock-error" role="alert">{staffUnlockError}</span>}
-            </form>
-          )}
         </section>
 
         {duplicateJob && (

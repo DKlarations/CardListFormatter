@@ -14,8 +14,7 @@ export type SavedPullListPickerEvent =
   | "toggle"
   | "escape"
   | "outside"
-  | "job-opened"
-  | "authorization-required";
+  | "job-opened";
 
 export type SavedPullListSearchRequest = {
   mode: "recent" | "name" | "phone" | "email";
@@ -27,7 +26,7 @@ export type SavedPullListSearchRequest = {
 
 export type SavedPullListOpenResult =
   | { status: "opened" }
-  | { status: "canceled" | "authorization-required" }
+  | { status: "canceled" }
   | { status: "error"; message: string };
 
 export function nextSavedPullListsPickerOpen(

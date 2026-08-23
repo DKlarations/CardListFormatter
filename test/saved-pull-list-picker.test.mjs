@@ -5,11 +5,11 @@ import { importBundledModule } from "./test-module-bundle.mjs";
 const picker = await importBundledModule("src/saved-pull-list-picker.ts", "saved-pull-list-picker");
 const client = await importBundledModule("src/pull-list-job-client.ts", "saved-pull-list-client");
 
-test("picker open state closes for Escape, outside clicks, auth, and successful Open", () => {
+test("picker open state closes for Escape, outside clicks, and successful Open", () => {
   assert.equal(picker.nextSavedPullListsPickerOpen(false, "open"), true);
   assert.equal(picker.nextSavedPullListsPickerOpen(false, "toggle"), true);
   assert.equal(picker.nextSavedPullListsPickerOpen(true, "toggle"), false);
-  for (const event of ["close", "escape", "outside", "job-opened", "authorization-required"]) {
+  for (const event of ["close", "escape", "outside", "job-opened"]) {
     assert.equal(picker.nextSavedPullListsPickerOpen(true, event), false);
   }
 });
@@ -44,20 +44,14 @@ test("opening another job uses New List's unsaved-work protection philosophy", (
   assert.equal(picker.savedJobOpenDisposition("stale").requiresConfirmation, true);
 });
 
-test("private picker queries surface the existing staff-authorization boundary", async () => {
+test("picker queries work without a staff session", async () => {
   const originalFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response(JSON.stringify({
-    error: "Staff authorization is required.",
-    authRequired: true,
-  }), {
-    status: 401,
+  globalThis.fetch = async () => new Response(JSON.stringify({ jobs: [] }), {
+    status: 200,
     headers: { "content-type": "application/json" },
   });
   try {
-    await assert.rejects(
-      () => client.listPullListJobs({ limit: 15 }),
-      (error) => error instanceof client.StaffAuthorizationRequiredError,
-    );
+    assert.deepEqual(await client.listPullListJobs({ limit: 15 }), []);
   } finally {
     globalThis.fetch = originalFetch;
   }

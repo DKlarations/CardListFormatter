@@ -1,6 +1,6 @@
 # Saved Pull List foundation
 
-A Saved Pull List is a private, resumable staff working session. It is distinct from both a customer and a Copy Link.
+A Saved Pull List is a resumable working session. It is distinct from both a customer and a Copy Link.
 
 ## Data and lifecycle
 
@@ -18,15 +18,13 @@ The server computes a deterministic SHA-256 fingerprint from sorted, grouped pro
 
 Redis maps the fingerprint directly to one unexpired job ID. A match to another active job returns a compact summary and prevents a second record; a match to the current job updates normally. Changed jobs release their prior mapping when it is still owned by that job. Stale mappings are removed when the referenced job is missing, expired, or has a different fingerprint.
 
-## Private API and Saved Pull Lists picker
+## Saved Pull Lists picker and API
 
-The small arrow immediately beside **Customer** opens an anchored Saved Pull Lists picker. With an active temporary staff session it shows the 15 most recently updated unexpired jobs, newest first. One field searches a normalized customer-name prefix or an exact normalized phone/email value after a 300 ms debounce. Prefix matching starts at the beginning of the normalized full name, so `john` matches both John Smith and Johnny Appleseed without fuzzy typo matching. Name prefix indexes and exact phone/email indexes use hashed Redis lookup tokens; the browser receives compact job summaries rather than complete private pricing payloads.
+The small arrow immediately beside **Customer** opens an anchored Saved Pull Lists picker. It shows the 15 most recently updated unexpired jobs, newest first. One field searches a normalized customer-name prefix or an exact normalized phone/email value after a 300 ms debounce. Prefix matching starts at the beginning of the normalized full name, so `john` matches both John Smith and Johnny Appleseed without fuzzy typo matching. Name prefix indexes and exact phone/email indexes use hashed Redis lookup tokens; the browser receives compact job summaries rather than complete private pricing payloads.
 
 Each result remains a separate pull-list job even when several belong to the same customer. **Open** uses the same protected loader as direct `?job=` URLs and duplicate-warning actions. Dirty, stale, saving, or failed local work requires confirmation before replacement. A successful load restores customer fields, formatter state, all persisted Pricing Assistant work, and current job identity so autosave continues. Escape, outside click, or a successful Open closes the picker.
 
-`/api/pull-list-jobs` requires the temporary staff session for exact job loading, create/update, recent summaries, normalized name-prefix lookup, and exact normalized phone/email lookup. It is a compact job browser, not a customer CRM.
-
-`/api/staff-session` accepts the server-configured shared passcode once and issues a short-lived, signed, HttpOnly, SameSite cookie. The passcode is never hardcoded or sent with routine saves. Authorization is isolated from the Redis repository so production identity can move to Microsoft Entra ID.
+`/api/pull-list-jobs` currently has no application-level authentication requirement for exact job loading, create/update, recent summaries, normalized name-prefix lookup, or exact normalized phone/email lookup. It is a compact job browser, not a customer CRM. Production authentication is expected to be added later at this API boundary, likely with Microsoft Entra ID.
 
 ## Saved Pull List versus Copy Link
 

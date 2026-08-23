@@ -2,11 +2,11 @@ import {
   customerSearchFields,
   normalizeCustomer,
   type Customer,
-} from "./customer";
+} from "./customer.js";
 import {
   type PricingAssistantRowState,
-} from "./pricing";
-import { normalizePricingAssistantRow } from "./pricing-session";
+} from "./pricing.js";
+import { normalizePricingAssistantRow } from "./pricing-session.js";
 
 export const SAVED_PULL_LIST_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const SAVED_PULL_LIST_SCHEMA_VERSION = 1;

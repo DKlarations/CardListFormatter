@@ -13,13 +13,6 @@ export type SavedPullListSummaryQuery = {
   limit?: number;
 };
 
-export class StaffAuthorizationRequiredError extends Error {
-  constructor() {
-    super("Staff authorization is required.");
-    this.name = "StaffAuthorizationRequiredError";
-  }
-}
-
 export type ClientSaveJobResult =
   | { status: "saved"; job: PullListJob }
   | { status: "duplicate"; existingJob: SavedJobSummary };
@@ -43,7 +36,6 @@ export async function persistPullListJob(
     body: JSON.stringify(currentJobId ? { id: currentJobId, job: draft } : { job: draft }),
   });
   const body = await responseBody(response);
-  if (response.status === 401) throw new StaffAuthorizationRequiredError();
   if (response.status === 409 && body.duplicate && body.existingJob) {
     return { status: "duplicate", existingJob: body.existingJob };
   }
@@ -59,7 +51,6 @@ export async function loadPullListJob(id: string) {
     headers: { Accept: "application/json" },
   });
   const body = await responseBody(response);
-  if (response.status === 401) throw new StaffAuthorizationRequiredError();
   if (!response.ok || !body.job) {
     throw new Error(body.error || `Saved Pull List load failed (${response.status}).`);
   }
@@ -77,24 +68,10 @@ export async function listPullListJobs(query: SavedPullListSummaryQuery = {}) {
     headers: { Accept: "application/json" },
   });
   const body = await responseBody(response);
-  if (response.status === 401) throw new StaffAuthorizationRequiredError();
   if (!response.ok || !Array.isArray(body.jobs)) {
     throw new Error(body.error || `Saved Pull List search failed (${response.status}).`);
   }
   return body.jobs.map(normalizeSavedJobSummary).filter((job: SavedJobSummary) => Boolean(job.id));
-}
-
-export async function unlockStaffSaving(passcode: string) {
-  const response = await fetch("/api/staff-session", {
-    method: "POST",
-    credentials: "same-origin",
-    headers: { "content-type": "application/json", Accept: "application/json" },
-    body: JSON.stringify({ passcode }),
-  });
-  const body = await responseBody(response);
-  if (!response.ok || !body.authenticated) {
-    throw new Error(body.error || "Staff unlock failed.");
-  }
 }
 
 export function pullListJobUrl(id: string, locationValue: Pick<Location, "href"> = window.location) {

@@ -4,7 +4,6 @@ import { importBundledModule } from "./test-module-bundle.mjs";
 
 const jobs = await importBundledModule("src/pull-list-job.ts", "pull-list-job");
 const repository = await importBundledModule("api/_pull-list-job-repository.ts", "pull-list-job-repository");
-const auth = await importBundledModule("api/_staff-auth.ts", "staff-auth");
 const jobApi = await importBundledModule("api/pull-list-jobs.ts", "pull-list-jobs-api");
 const jobClient = await importBundledModule("src/pull-list-job-client.ts", "pull-list-job-client");
 
@@ -216,23 +215,45 @@ test("job and fingerprint TTLs use 30 days from the latest meaningful update", a
   assert.equal(store.ttls.get(jobKey), jobs.SAVED_PULL_LIST_TTL_SECONDS);
 });
 
-test("temporary staff tokens are signed, scoped, expiring, and do not contain the passcode", () => {
-  const now = Date.parse("2026-08-23T12:00:00Z");
-  const token = auth.createStaffSessionToken(now, "session-secret");
-  assert.equal(token.includes("staff-passcode"), false);
-  assert.equal(auth.verifyStaffSessionToken(token, now, "session-secret"), true);
-  assert.equal(auth.verifyStaffSessionToken(token, now, "wrong-secret"), false);
-  assert.equal(auth.verifyStaffSessionToken(token, now + (auth.STAFF_SESSION_DURATION_SECONDS + 1) * 1000, "session-secret"), false);
-  assert.equal(auth.verifyStaffPasscode("staff-passcode", "staff-passcode"), true);
-});
+test("Saved Pull List API creates, updates, loads, lists, and searches without a staff session", async () => {
+  const store = new FakeRedis();
+  const api = jobApi.createPullListJobHandlers(() => store);
+  const createdResponse = await api.POST(new Request("https://pullsmith.example/api/pull-list-jobs", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ job: draft() }),
+  }));
+  assert.equal(createdResponse.status, 201);
+  const created = await createdResponse.json();
+  assert.ok(created.job.id);
 
-test("private job API rejects unauthenticated reads before touching Redis", async () => {
-  const response = await jobApi.GET(new Request("https://pullsmith.example/api/pull-list-jobs?name=jane"));
-  assert.equal(response.status, 401);
-  assert.deepEqual(await response.json(), {
-    error: "Staff authorization is required.",
-    authRequired: true,
-  });
+  const updatedDraft = draft({ price: "2.50" });
+  const updatedResponse = await api.PUT(new Request("https://pullsmith.example/api/pull-list-jobs", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: created.job.id, job: updatedDraft }),
+  }));
+  assert.equal(updatedResponse.status, 200);
+
+  const loadedResponse = await api.GET(new Request(`https://pullsmith.example/api/pull-list-jobs?id=${created.job.id}`));
+  assert.equal(loadedResponse.status, 200);
+  assert.equal((await loadedResponse.json()).job.pricingState.rows[0].priceOverride, "2.50");
+
+  const recentResponse = await api.GET(new Request("https://pullsmith.example/api/pull-list-jobs?limit=15"));
+  assert.equal(recentResponse.status, 200);
+  assert.equal((await recentResponse.json()).jobs.length, 1);
+
+  const searchedResponse = await api.GET(new Request("https://pullsmith.example/api/pull-list-jobs?namePrefix=jane"));
+  assert.equal(searchedResponse.status, 200);
+  assert.equal((await searchedResponse.json()).jobs[0].id, created.job.id);
+
+  const phoneResponse = await api.GET(new Request("https://pullsmith.example/api/pull-list-jobs?phone=3095551234"));
+  assert.equal(phoneResponse.status, 200);
+  assert.equal((await phoneResponse.json()).jobs[0].id, created.job.id);
+
+  const emailResponse = await api.GET(new Request("https://pullsmith.example/api/pull-list-jobs?email=jane%40example.com"));
+  assert.equal(emailResponse.status, 200);
+  assert.equal((await emailResponse.json()).jobs[0].id, created.job.id);
 });
 
 test("Copy Link URL construction strips private job identity", () => {

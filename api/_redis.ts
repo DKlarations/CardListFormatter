@@ -1,5 +1,5 @@
 import { Redis } from "@upstash/redis";
-import { SAVED_PULL_LIST_TTL_SECONDS } from "../src/pull-list-job";
+import { SAVED_PULL_LIST_TTL_SECONDS } from "../src/pull-list-job.js";
 
 export { SAVED_PULL_LIST_TTL_SECONDS };
 
