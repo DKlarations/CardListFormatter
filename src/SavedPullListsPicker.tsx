@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, Loader2, RefreshCw, Search } from "lucide-react";
 import { listPullListJobs } from "./pull-list-job-client";
 import type { SavedJobSummary } from "./pull-list-job";
+import type { SavedPullListDiagnosticReporter } from "./saved-pull-list-diagnostics";
 import {
   nextSavedPullListsPickerOpen,
   savedPullListSearchRequest,
@@ -13,6 +14,7 @@ type SavedPullListsPickerProps = {
   isOpen: boolean;
   onOpenChange: (isOpen: boolean) => void;
   onOpenJob: (jobId: string) => Promise<SavedPullListOpenResult>;
+  onDiagnostic: SavedPullListDiagnosticReporter;
 };
 
 function formatSavedListDate(value: string) {
@@ -39,6 +41,7 @@ export default function SavedPullListsPicker({
   isOpen,
   onOpenChange,
   onOpenJob,
+  onDiagnostic,
 }: SavedPullListsPickerProps) {
   const panelId = useId();
   const pickerRef = useRef<HTMLDivElement | null>(null);
@@ -82,7 +85,7 @@ export default function SavedPullListsPicker({
     setErrorMessage("");
     const timer = window.setTimeout(async () => {
       try {
-        const results = await listPullListJobs(searchRequest);
+        const results = await listPullListJobs(searchRequest, { onDiagnostic });
         if (generation !== requestGenerationRef.current) return;
         setJobs(results);
         setLoadState("ready");
@@ -98,7 +101,7 @@ export default function SavedPullListsPicker({
       window.clearTimeout(timer);
       if (requestGenerationRef.current === generation) requestGenerationRef.current += 1;
     };
-  }, [isOpen, onOpenChange, query, retryRevision]);
+  }, [isOpen, onDiagnostic, onOpenChange, query, retryRevision]);
 
   async function handleOpenJob(jobId: string) {
     if (openingJobId) return;

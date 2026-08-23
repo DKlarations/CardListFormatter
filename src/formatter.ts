@@ -5,6 +5,7 @@ import {
   normalizeCustomer,
   type Customer,
 } from "./customer";
+import { GENERATED_SAMPLE_CUSTOMER_NAMES } from "./generated-sample";
 
 const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -111,28 +112,6 @@ export function clearMtgjsonIndexCache() {
   mtgjsonIndexUrl = "";
 }
 
-const SAMPLE_CUSTOMER_NAMES = [
-  "Mark Rosewater",
-  "Bill Rose",
-  "Skaff Elias",
-  "Beth Moursund",
-  "Tom Wylie",
-  "Aaron Forsythe",
-  "Erik Lauer",
-  "Devin Low",
-  "Mark Gottlieb",
-  "Tom LaPille",
-  "Dave Humpherys",
-  "Sam Stoddard",
-  "Gavin Verhey",
-  "Ken Nagle",
-  "Ethan Fleischer",
-  "Melissa DeTora",
-  "Jeremy Jarvis",
-  "Carmen Klomparens",
-  "Matt Cavotta",
-];
-
 const sampleCardList = `1 Chub Toad - G unc
 Storm crow
 Psychatog r
@@ -149,7 +128,7 @@ sol ring :-)`;
 
 // Picks a random Magic design/dev name so the sample list gets a tiny shuffle on reload.
 function randomSampleCustomerName() {
-  return SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * SAMPLE_CUSTOMER_NAMES.length)];
+  return GENERATED_SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * GENERATED_SAMPLE_CUSTOMER_NAMES.length)];
 }
 
 // Makes a fake local-ish phone number; no real customers were bothered in the making of this sample.

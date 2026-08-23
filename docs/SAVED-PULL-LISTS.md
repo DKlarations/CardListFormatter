@@ -26,6 +26,8 @@ Each result remains a separate pull-list job even when several belong to the sam
 
 `/api/pull-list-jobs` currently has no application-level authentication requirement for exact job loading, create/update, recent summaries, normalized name-prefix lookup, or exact normalized phone/email lookup. It is a compact job browser, not a customer CRM. Production authentication is expected to be added later at this API boundary, likely with Microsoft Entra ID.
 
+When Diagnostics is enabled, Pullsmith also shows a session-only Saved Pull List request report for persistence troubleshooting. It retains the five newest API outcomes without storing customer data, request payloads, or credentials.
+
 ## Saved Pull List versus Copy Link
 
 - Saved Pull List load restores the exact staff Pricing Assistant working state and then rehydrates current external catalogs/prices.

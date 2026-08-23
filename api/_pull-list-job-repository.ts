@@ -8,6 +8,7 @@ import {
 import { pullListFingerprint } from "../src/pull-list-fingerprint.js";
 import {
   expiresAtFromUpdate,
+  isGeneratedSamplePullListJobDraft,
   isPersistablePullListJobDraft,
   normalizePullListJob,
   normalizePullListJobDraft,
@@ -158,6 +159,9 @@ export async function createPullListJob(
   draftValue: PullListJobDraft,
   nowMs = Date.now(),
 ): Promise<PullListJobSaveResult> {
+  if (isGeneratedSamplePullListJobDraft(draftValue)) {
+    throw new Error("Generated sample pull lists are not saved.");
+  }
   if (!isPersistablePullListJobDraft(draftValue)) {
     throw new Error("A successfully processed pull list is required.");
   }
@@ -198,6 +202,9 @@ export async function updatePullListJob(
   draftValue: PullListJobDraft,
   nowMs = Date.now(),
 ): Promise<PullListJobSaveResult> {
+  if (isGeneratedSamplePullListJobDraft(draftValue)) {
+    throw new Error("Generated sample pull lists are not saved.");
+  }
   if (!isPersistablePullListJobDraft(draftValue)) {
     throw new Error("A coherent processed pull list is required.");
   }

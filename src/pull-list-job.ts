@@ -3,6 +3,7 @@ import {
   normalizeCustomer,
   type Customer,
 } from "./customer.js";
+import { isGeneratedSampleCustomerName } from "./generated-sample.js";
 import {
   type PricingAssistantRowState,
 } from "./pricing.js";
@@ -166,7 +167,17 @@ export function normalizePullListJobDraft(value: unknown): PullListJobDraft {
 
 export function isPersistablePullListJobDraft(value: unknown) {
   const draft = normalizePullListJobDraft(value);
-  return Boolean(draft.input.trim() && draft.output.trim() && draft.formatterItems.length && draft.processedAt);
+  return Boolean(
+    draft.input.trim()
+    && draft.output.trim()
+    && draft.formatterItems.length
+    && draft.processedAt
+    && !isGeneratedSampleCustomerName(draft.customer.name),
+  );
+}
+
+export function isGeneratedSamplePullListJobDraft(value: unknown) {
+  return isGeneratedSampleCustomerName(normalizePullListJobDraft(value).customer.name);
 }
 
 export function normalizePullListJob(value: unknown): PullListJob {

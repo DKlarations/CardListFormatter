@@ -50,7 +50,17 @@ import {
   pullListJobUrl,
 } from "./pull-list-job-client";
 import {
+  addSavedPullListDiagnostic,
+  formatSavedPullListDiagnosticReport,
+  savedPullListDiagnosticOperationLabel,
+  savedPullListDiagnosticOutcomeLabel,
+  shortenedSavedPullListJobId,
+  type SavedPullListDiagnostic,
+  type SavedPullListDiagnosticReporter,
+} from "./saved-pull-list-diagnostics";
+import {
   emptySavedPricingState,
+  isGeneratedSamplePullListJobDraft,
   normalizePullListJobDraft,
   pricingStateForWorkspaceLoad,
   type PullListJobDraft,
@@ -252,6 +262,68 @@ function FormatterStatusBar({
   );
 }
 
+function formatSavedPullListDiagnosticTime(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime())
+    ? "Time unavailable"
+    : new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+      second: "2-digit",
+    }).format(date);
+}
+
+function SavedPullListReport({ events }: { events: SavedPullListDiagnostic[] }) {
+  const [copyLabel, setCopyLabel] = useState("Copy Report");
+
+  async function copyReport() {
+    try {
+      await navigator.clipboard.writeText(formatSavedPullListDiagnosticReport(events));
+      setCopyLabel("Copied");
+      window.setTimeout(() => setCopyLabel("Copy Report"), 1500);
+    } catch {
+      setCopyLabel("Copy failed");
+      window.setTimeout(() => setCopyLabel("Copy Report"), 1500);
+    }
+  }
+
+  return (
+    <section className="saved-pull-list-report" aria-label="Saved Pull List Report">
+      <div className="saved-pull-list-report-heading">
+        <h3>Saved Pull List Report</h3>
+        <IconButton onClick={copyReport} title={copyLabel} ariaLabel="Copy Saved Pull List Report" className="saved-pull-list-report-copy">
+          <Clipboard size={14} aria-hidden="true" /><span>{copyLabel}</span>
+        </IconButton>
+      </div>
+      {!events.length && <p className="saved-pull-list-report-empty">No Saved Pull List requests recorded this session.</p>}
+      {events.length > 0 && (
+        <div className="saved-pull-list-report-list">
+          {events.map((event, index) => (
+            <article className={`saved-pull-list-report-event is-${event.outcome}`} key={`${event.timestamp}-${event.operation}-${index}`}>
+              <div className="saved-pull-list-report-event-meta">
+                <time dateTime={event.timestamp}>{formatSavedPullListDiagnosticTime(event.timestamp)}</time>
+                <strong>{savedPullListDiagnosticOperationLabel(event.operation)}</strong>
+                <span>{event.method}</span>
+                {event.status && <span>HTTP {event.status}</span>}
+                <b>{savedPullListDiagnosticOutcomeLabel(event.outcome)}</b>
+              </div>
+              <p>{event.endpoint}</p>
+              <p>{event.message}</p>
+              {(event.jobId || event.requestId) && (
+                <small>
+                  {event.jobId && `Job: ${shortenedSavedPullListJobId(event.jobId)}`}
+                  {event.jobId && event.requestId && " / "}
+                  {event.requestId && `Vercel: ${event.requestId}`}
+                </small>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 function formatMtgjsonManifestLabel(manifest) {
   const generatedAt = manifest?.generatedAt || manifest?.source?.downloadedAt || "";
   const date = generatedAt ? new Date(generatedAt) : null;
@@ -416,6 +488,7 @@ function App() {
   const [copyLinkLabel, setCopyLinkLabel] = useState("Copy Link");
   const [currentJobId, setCurrentJobId] = useState("");
   const [saveState, setSaveState] = useState<SavedJobSaveState>("idle");
+  const [savedPullListDiagnostics, setSavedPullListDiagnostics] = useState<SavedPullListDiagnostic[]>([]);
   const [duplicateJob, setDuplicateJob] = useState<SavedJobSummary | null>(null);
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
@@ -480,7 +553,14 @@ function App() {
     }
   }, []);
 
+  const recordSavedPullListDiagnostic = useCallback<SavedPullListDiagnosticReporter>((event) => {
+    setSavedPullListDiagnostics((current) => addSavedPullListDiagnostic(current, event));
+  }, []);
+
   const persistJobDraft = useCallback(async (draft: PullListJobDraft, id = "") => {
+    if (isGeneratedSamplePullListJobDraft(draft)) {
+      return null;
+    }
     if (saveRequestInFlightRef.current) {
       queuedPersistenceRef.current = { id, draft };
       setSaveState((current) => nextSavedJobSaveState(current, "change"));
@@ -490,7 +570,7 @@ function App() {
     const generation = ++persistenceGenerationRef.current;
     setSaveState((current) => nextSavedJobSaveState(current, "save-start"));
     try {
-      const result = await persistPullListJob(draft, id);
+      const result = await persistPullListJob(draft, id, { onDiagnostic: recordSavedPullListDiagnostic });
       if (generation !== persistenceGenerationRef.current) return result;
       if (result.status === "duplicate") {
         setDuplicateJob(result.existingJob);
@@ -508,7 +588,7 @@ function App() {
     } catch (error) {
       if (generation !== persistenceGenerationRef.current) return null;
       setSaveState((current) => nextSavedJobSaveState(current, "save-failure"));
-      setMessage("Saved Pull List save failed. Your local work is still here.");
+      setMessage("Saved Pull List save failed. Your local work is still here. Enable Diagnostics for details.");
       return null;
     } finally {
       saveRequestInFlightRef.current = false;
@@ -519,7 +599,7 @@ function App() {
         queueMicrotask(() => void persistJobDraftRef.current(queued.draft, nextId));
       }
     }
-  }, []);
+  }, [recordSavedPullListDiagnostic]);
 
   useEffect(() => {
     persistJobDraftRef.current = persistJobDraft;
@@ -565,7 +645,7 @@ function App() {
       if (!confirmed) return { status: "canceled" };
     }
     try {
-      const job = await loadPullListJob(id);
+      const job = await loadPullListJob(id, { onDiagnostic: recordSavedPullListDiagnostic });
       restoreSavedJob(job);
       return { status: "opened" };
     } catch (error) {
@@ -573,7 +653,7 @@ function App() {
       setMessage(errorMessage);
       return { status: "error", message: errorMessage };
     }
-  }, [restoreSavedJob]);
+  }, [recordSavedPullListDiagnostic, restoreSavedJob]);
 
   const openSavedPullListFromWorkspace = useCallback(
     (id: string) => openSavedPullList(id, { protectCurrentWorkspace: true }),
@@ -778,7 +858,13 @@ function App() {
           printFallbackCount: nextFallbackCount,
         },
       });
-      void persistJobDraft(draft, currentJobId);
+      if (isGeneratedSamplePullListJobDraft(draft)) {
+        setMessage(reviewCount
+          ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review. Generated sample pull lists are not saved.`
+          : "List formatted. Generated sample pull lists are not saved.");
+      } else {
+        void persistJobDraft(draft, currentJobId);
+      }
     } catch (error) {
       if (workspaceGeneration === workspaceGenerationRef.current) {
         setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while processing.");
@@ -1086,6 +1172,7 @@ function App() {
                   isOpen={savedPickerOpen}
                   onOpenChange={setSavedPickerOpen}
                   onOpenJob={openSavedPullListFromWorkspace}
+                  onDiagnostic={recordSavedPullListDiagnostic}
                 />
                 <input
                   value={customer.name}
@@ -1357,6 +1444,7 @@ function App() {
                 </tbody>
               </table>
             </div>
+            <SavedPullListReport events={savedPullListDiagnostics} />
           </section>
         )}
 

@@ -78,6 +78,35 @@ function customerContactText(customerValue) {
   ].filter(Boolean))).join(" / ");
 }
 
+// src/generated-sample.ts
+var GENERATED_SAMPLE_CUSTOMER_NAMES = [
+  "Mark Rosewater",
+  "Bill Rose",
+  "Skaff Elias",
+  "Beth Moursund",
+  "Tom Wylie",
+  "Aaron Forsythe",
+  "Erik Lauer",
+  "Devin Low",
+  "Mark Gottlieb",
+  "Tom LaPille",
+  "Dave Humpherys",
+  "Sam Stoddard",
+  "Gavin Verhey",
+  "Ken Nagle",
+  "Ethan Fleischer",
+  "Melissa DeTora",
+  "Jeremy Jarvis",
+  "Carmen Klomparens",
+  "Matt Cavotta"
+];
+function sampleCustomerNameKey(value) {
+  return typeof value === "string" ? value.trim().replace(/\s+/g, " ").toLocaleLowerCase() : "";
+}
+var GENERATED_SAMPLE_CUSTOMER_NAME_KEYS = new Set(
+  GENERATED_SAMPLE_CUSTOMER_NAMES.map(sampleCustomerNameKey)
+);
+
 // src/formatter.ts
 var SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 var SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -104,27 +133,6 @@ function clearMtgjsonIndexCache() {
   mtgjsonIndexPromise = null;
   mtgjsonIndexUrl = "";
 }
-var SAMPLE_CUSTOMER_NAMES = [
-  "Mark Rosewater",
-  "Bill Rose",
-  "Skaff Elias",
-  "Beth Moursund",
-  "Tom Wylie",
-  "Aaron Forsythe",
-  "Erik Lauer",
-  "Devin Low",
-  "Mark Gottlieb",
-  "Tom LaPille",
-  "Dave Humpherys",
-  "Sam Stoddard",
-  "Gavin Verhey",
-  "Ken Nagle",
-  "Ethan Fleischer",
-  "Melissa DeTora",
-  "Jeremy Jarvis",
-  "Carmen Klomparens",
-  "Matt Cavotta"
-];
 var sampleCardList = `1 Chub Toad - G unc
 Storm crow
 Psychatog r
@@ -139,7 +147,7 @@ Earthbending Student
 Yargle gluttin of urborg
 sol ring :-)`;
 function randomSampleCustomerName() {
-  return SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * SAMPLE_CUSTOMER_NAMES.length)];
+  return GENERATED_SAMPLE_CUSTOMER_NAMES[Math.floor(Math.random() * GENERATED_SAMPLE_CUSTOMER_NAMES.length)];
 }
 function randomSamplePhoneNumber() {
   const areaCode = Math.random() < 0.5 ? "206" : "564";

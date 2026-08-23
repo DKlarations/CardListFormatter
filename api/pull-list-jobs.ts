@@ -6,7 +6,7 @@ import {
   updatePullListJob,
   type PullListJobStore,
 } from "./_pull-list-job-repository.js";
-import { isPersistablePullListJobDraft } from "../src/pull-list-job.js";
+import { isGeneratedSamplePullListJobDraft, isPersistablePullListJobDraft } from "../src/pull-list-job.js";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -52,6 +52,9 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
     async POST(request: Request) {
       try {
         const body = await request.json();
+        if (isGeneratedSamplePullListJobDraft(body?.job)) {
+          return jsonResponse({ error: "Generated sample pull lists are not saved." }, 400);
+        }
         if (!isPersistablePullListJobDraft(body?.job)) {
           return jsonResponse({ error: "A successfully processed pull list is required." }, 400);
         }
@@ -73,6 +76,9 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
         const body = await request.json();
         const id = String(body?.id || "").trim();
         if (!id) return jsonResponse({ error: "Saved Pull List ID is required." }, 400);
+        if (isGeneratedSamplePullListJobDraft(body?.job)) {
+          return jsonResponse({ error: "Generated sample pull lists are not saved." }, 400);
+        }
         if (!isPersistablePullListJobDraft(body?.job)) {
           return jsonResponse({ error: "A coherent processed pull list is required." }, 400);
         }

@@ -11,6 +11,7 @@ const savedPullListServerGraph = [
   "src/pricing-session.ts",
   "src/pricing.ts",
   "src/customer.ts",
+  "src/generated-sample.ts",
   "src/pull-list-fingerprint.ts",
 ];
 
