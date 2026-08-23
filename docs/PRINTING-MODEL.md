@@ -52,6 +52,8 @@ Legacy pricing-index schemas cannot safely distinguish every effective Finish an
 
 Pricing-session work is intentionally local: Found states, split rows, set/Finish/Treatment/Art selections, UUIDs, source, overrides, quantities, and manually added Pricing Assistant cards are not serialized. New links use formatter-only schema v5. Older v1-v4 links still restore their formatter data without crashing, but any embedded legacy pricing session is deliberately ignored.
 
+This differs deliberately from a **Saved Pull List**. A private Saved Pull List is a resumable staff job and persists those Pricing Assistant row selections, splits, manual rows, quantities, exact UUIDs, price overrides, receipt preference, and pricing source. It does not persist the external MTGJSON catalog or automatic market values; those rehydrate from current sources when the job is loaded. Copy Link still starts fresh pricing work.
+
 ## Manual cards and reskins
 
 Pricing Assistant can add a resolved card manually from the lower-left action beside the totals. These rows use the same Found/default-selection pipeline and have their own found state, quantity, printing selections, and price override. Original pull-list quantities remain constrained; manual rows can be adjusted independently. Because they are pricing-session work rather than formatter items, they are intentionally not included in Copy Link.

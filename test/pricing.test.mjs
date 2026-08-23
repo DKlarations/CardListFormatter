@@ -4,6 +4,7 @@ import { importBundledModule } from "./test-module-bundle.mjs";
 
 import {
   applyMinimumPrice,
+  canPrintPricingReceipt,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
   createManualPricingRow,
@@ -221,6 +222,78 @@ test("reconciles retried formatter resolution without erasing pricing work", () 
   assert.equal(reconciled[0].found, true);
   assert.equal(reconciled[0].priceOverride, "1.25");
   assert.equal(reconciled[1].manuallyCreated, true);
+});
+
+test("creates a normal manual pricing row before any formatter session exists", () => {
+  const freshRows = reconcilePricingRowsWithFormatterItems([], []);
+  const manual = createManualPricingRow(
+    "manual-quick-original",
+    "manual-quick",
+    "Quick Price Card",
+    "Quick Price Card",
+  );
+  const card = {
+    name: "Quick Price Card",
+    printings: [exactFixturePrinting({
+      uuid: "quick-price-uuid",
+      setCode: "QCK",
+      tcgplayerProductId: "100020",
+    })],
+  };
+  const found = initializeFoundPricingSelection(manual, card, "2026-08-22");
+
+  assert.equal(freshRows.length, 0);
+  assert.equal(found.manuallyCreated, true);
+  assert.equal(found.found, true);
+  assert.equal(found.setCode, "QCK");
+  assert.equal(found.selectedPrintingUuid, "quick-price-uuid");
+  assert.equal(pricingPhysicalSelectionIsValid(found, card), true);
+});
+
+test("processing a formatter list preserves manual quick-pricing rows", () => {
+  const manual = createManualPricingRow(
+    "manual-session-original",
+    "manual-session",
+    "Manual Session Card",
+    "Manual Session Card",
+  );
+  const reconciled = reconcilePricingRowsWithFormatterItems([manual], [{
+    index: 0,
+    inputName: "Processed Card",
+    quantity: 2,
+    status: "found",
+    card: { name: "Processed Card" },
+  }]);
+
+  assert.equal(reconciled.length, 2);
+  assert.equal(reconciled[0].manuallyCreated, false);
+  assert.equal(reconciled[0].canonicalName, "Processed Card");
+  assert.equal(reconciled[0].requestedQuantity, 2);
+  assert.equal(reconciled[1].id, manual.id);
+  assert.equal(reconciled[1].manuallyCreated, true);
+});
+
+test("normal processed formatter items still initialize pricing rows", () => {
+  const rows = createPricingRowsFromFormatterItems([{
+    index: 4,
+    inputName: "Normal Workflow Card",
+    quantity: 3,
+    status: "found",
+    card: { name: "Normal Workflow Card" },
+  }]);
+
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].resolved, true);
+  assert.equal(rows[0].found, false);
+  assert.equal(rows[0].requestedQuantity, 3);
+});
+
+test("empty pricing state has safe zero-card calculations", () => {
+  assert.deepEqual(reconcilePricingRowsWithFormatterItems([], []), []);
+  assert.equal(remainingRequestedQuantity(0, []), 0);
+  assert.equal(canPrintPricingReceipt(0, 0), false);
+  assert.equal(canPrintPricingReceipt(1, 0), true);
+  assert.equal(canPrintPricingReceipt(1, 1), false);
 });
 
 test("initializes a lone Borderless Non-Foil printing without inventing Standard", () => {

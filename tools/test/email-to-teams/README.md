@@ -2,6 +2,8 @@
 
 Local prototype for watching a mailbox, extracting likely pull-list text, and posting it to a Teams channel.
 
+This IMAP/GitHub Actions workflow is legacy test infrastructure. A future production inbound-mail path is expected to use Microsoft Graph with `Service@RedRaccoonGames.com`; Teams posting remains a separate transport concern. No Graph or Teams migration is implemented here.
+
 This is intentionally separate from the browser app while the workflow is experimental. It imports the shared formatter from `src/formatter.ts` so Teams posts can match the browser app's formatted output.
 
 ## Setup

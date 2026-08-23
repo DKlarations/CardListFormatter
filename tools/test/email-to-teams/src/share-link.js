@@ -23,6 +23,8 @@ export function formatterLinkForFormattedOutput(baseUrl, state) {
     reliabilityNote: state.reliabilityNote || "",
     customer: {
       name: state.customer?.name || "",
+      phone: state.customer?.phone || "",
+      email: state.customer?.email || "",
       contact: state.customer?.contact || "",
     },
     stats: {

@@ -1,3 +1,34 @@
+// src/pricing-session.ts
+function normalizePricingAssistantRow(row) {
+  const canonicalName = row.canonicalName || row.cardName || row.displayName || "";
+  const legacySurge = row.treatment === "surge" && row.finish === "foil";
+  return {
+    id: row.id || "",
+    groupId: row.groupId || "",
+    sourceIndex: Number(row.sourceIndex) || 0,
+    requestedQuantity: Math.max(1, Number(row.requestedQuantity) || 1),
+    isBasicLand: Boolean(row.isBasicLand),
+    quantity: Math.max(0, Number(row.quantity) || 0),
+    found: Boolean(row.found),
+    resolved: Boolean(row.resolved),
+    displayName: row.displayName || row.cardName || canonicalName,
+    canonicalName,
+    manuallyCreated: Boolean(row.manuallyCreated),
+    requestedFlavorName: row.requestedFlavorName || "",
+    requestedSetCode: row.requestedSetCode || "",
+    requestedFinish: row.requestedFinish,
+    requestedFoilTreatment: row.requestedFoilTreatment,
+    requestedTreatment: row.requestedTreatment || "",
+    setSelectionSource: row.setSelectionSource === "manual" ? "manual" : "default",
+    setCode: row.setCode || "",
+    selectedPrintingUuid: row.selectedPrintingUuid || "",
+    finish: row.finish || "normal",
+    treatment: legacySurge ? "standard" : row.treatment || "standard",
+    foilTreatment: legacySurge ? "surge" : row.foilTreatment || "standard",
+    priceOverride: row.priceOverride ?? null
+  };
+}
+
 // src/pricing.ts
 var FINISH_LABELS = {
   normal: "Non-Foil",
@@ -350,35 +381,6 @@ function pricingSelectionForPrintingUuid(card, current, selectedPrintingUuid, re
 function pricingDisplayName(displayName, canonicalName) {
   return pricingNameKey(displayName) === pricingNameKey(canonicalName) ? displayName : `${displayName} (${canonicalName})`;
 }
-function normalizePricingAssistantRow(row) {
-  const canonicalName = row.canonicalName || row.cardName || row.displayName || "";
-  const legacySurge = row.treatment === "surge" && row.finish === "foil";
-  return {
-    id: row.id || "",
-    groupId: row.groupId || "",
-    sourceIndex: Number(row.sourceIndex) || 0,
-    requestedQuantity: Math.max(1, Number(row.requestedQuantity) || 1),
-    isBasicLand: Boolean(row.isBasicLand),
-    quantity: Math.max(0, Number(row.quantity) || 0),
-    found: Boolean(row.found),
-    resolved: Boolean(row.resolved),
-    displayName: row.displayName || row.cardName || canonicalName,
-    canonicalName,
-    manuallyCreated: Boolean(row.manuallyCreated),
-    requestedFlavorName: row.requestedFlavorName || "",
-    requestedSetCode: row.requestedSetCode || "",
-    requestedFinish: row.requestedFinish,
-    requestedFoilTreatment: row.requestedFoilTreatment,
-    requestedTreatment: row.requestedTreatment || "",
-    setSelectionSource: row.setSelectionSource === "manual" ? "manual" : "default",
-    setCode: row.setCode || "",
-    selectedPrintingUuid: row.selectedPrintingUuid || "",
-    finish: row.finish || "normal",
-    treatment: legacySurge ? "standard" : row.treatment || "standard",
-    foilTreatment: legacySurge ? "surge" : row.foilTreatment || "standard",
-    priceOverride: row.priceOverride ?? null
-  };
-}
 function createPricingRowsFromFormatterItems(items) {
   return items.map((item, order) => {
     const inputName = item.inputName || String(order);
@@ -653,6 +655,9 @@ function remainingRequestedQuantity(requestedQuantity, foundQuantities) {
   const foundQuantity = foundQuantities.reduce((sum, quantity) => sum + Math.max(0, Math.floor(Number(quantity) || 0)), 0);
   return Math.max(0, Math.floor(Number(requestedQuantity) || 0) - foundQuantity);
 }
+function canPrintPricingReceipt(pricedRowCount, unpricedFoundCount) {
+  return pricedRowCount > 0 && unpricedFoundCount === 0;
+}
 function priceWithListedMedianFallback(listedMedian, mtgjson) {
   if (listedMedian.status === "ready" && listedMedian.price !== null) return listedMedian;
   if (["loading", "select-printing"].includes(listedMedian.status)) return listedMedian;
@@ -684,6 +689,7 @@ export {
   TREATMENT_ABBREVIATIONS,
   TREATMENT_LABELS,
   applyMinimumPrice,
+  canPrintPricingReceipt,
   cardFromCatalog,
   compatibleTreatmentOptions,
   convertCurrencyPrice,

@@ -1,4 +1,10 @@
 import { treatmentsForRawPrinting } from "./printing-normalization";
+import {
+  customerContactText,
+  formatCustomerPhone,
+  normalizeCustomer,
+  type Customer,
+} from "./customer";
 
 const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -19,11 +25,6 @@ let scryfallRequestGate = Promise.resolve();
 let lastScryfallRequestAt = 0;
 let activeScryfallSignal: AbortSignal | null = null;
 let activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
-
-type Customer = {
-  name: string;
-  contact: string;
-};
 
 type ScryfallSetSummary = {
   code: string;
@@ -420,10 +421,7 @@ function throwIfAborted() {
 
 // Normalizes phone numbers into receipt-friendly 555-555-5555 format.
 function formatPhoneNumber(value) {
-  const digits = value.replace(/\D/g, "");
-  const tenDigits = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-  if (tenDigits.length !== 10) return value.trim();
-  return `${tenDigits.slice(0, 3)}-${tenDigits.slice(3, 6)}-${tenDigits.slice(6)}`;
+  return formatCustomerPhone(value);
 }
 
 // Cleans contact details without wrapping emails or phone numbers in extra nonsense.
@@ -612,7 +610,7 @@ function parseCustomerAndCards(text) {
   customer.name = customer.name || emailHeaderContact.name;
   customer.contact = customer.contact || emailHeaderContact.contact;
 
-  return { customer, cardLines };
+  return { customer: normalizeCustomer(customer), cardLines };
 }
 
 // Converts shorthand like R, UC, and mythic into the rarity words the sorter expects.
@@ -1236,7 +1234,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit: HeadersInit | undefined) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.4.6");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.5.1");
   }
   return headers;
 }
@@ -1793,9 +1791,9 @@ function formatCardLine(item, useCheckboxes) {
 }
 
 // Formats contact info -  right now Facebook gets parentheses, phone/email do not.
-function formatContactLine(contact) {
-  if (!contact) return "";
-  const normalized = mergeContactValues(contact);
+function formatContactLine(customer) {
+  const normalized = customerContactText(customer);
+  if (!normalized) return "";
   if (/^facebook$/i.test(normalized)) return "(Facebook)";
   return normalized;
 }
@@ -1899,8 +1897,8 @@ export function formatOutput(customer, items, useCheckboxes, processedAt) {
     lines.push("");
   }
 
-  if (customer.contact) {
-    lines.push(formatContactLine(customer.contact));
+  if (customerContactText(customer)) {
+    lines.push(formatContactLine(customer));
   } else {
     lines.push("CONTACT:");
     lines.push("");
@@ -2227,6 +2225,14 @@ export function compactFormatterItems(items: any[]) {
     alternateTitle: item.alternateTitle || "",
     requestedDisplayName: item.requestedDisplayName || "",
     requestedPrinting: item.requestedPrinting || undefined,
+    statedRarities: Array.isArray(item.statedRarities) ? item.statedRarities : [],
+    specialRequests: Array.isArray(item.specialRequests) ? item.specialRequests : [],
+    nonSecretRarities: Array.isArray(item.nonSecretRarities) ? item.nonSecretRarities : [],
+    eligibleRarityChecked: Boolean(item.eligibleRarityChecked),
+    tokenDetails: Array.isArray(item.tokenDetails) ? item.tokenDetails : [],
+    caseNote: item.caseNote || "",
+    note: item.note || "",
+    printLookupFailed: Boolean(item.printLookupFailed),
     card: item.card?.name ? { name: item.card.name } : undefined,
     mtgjsonCard: item.mtgjsonCard?.name ? { name: item.mtgjsonCard.name } : undefined,
   }));

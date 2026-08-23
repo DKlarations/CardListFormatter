@@ -1,4 +1,5 @@
 import LZString from "lz-string";
+import { normalizeCustomer, type Customer } from "./customer";
 
 const INPUT_HASH_PREFIX = "#input=";
 const FORMATTED_HASH_PREFIX = "#formatted=";
@@ -8,10 +9,7 @@ export type SharedFormatterState = {
   output?: string;
   processedAt?: string;
   reliabilityNote?: string;
-  customer?: {
-    name?: string;
-    contact?: string;
-  };
+  customer?: Partial<Customer> & { contact?: string };
   stats?: {
     resolvedCount?: number;
     needsReviewCount?: number;
@@ -37,10 +35,7 @@ export function encodeFormattedHash(state: SharedFormatterState) {
     output: state.output || "",
     processedAt: state.processedAt || "",
     reliabilityNote: state.reliabilityNote || "",
-    customer: {
-      name: state.customer?.name || "",
-      contact: state.customer?.contact || "",
-    },
+    customer: normalizeCustomer(state.customer),
     stats: {
       resolvedCount: state.stats?.resolvedCount || 0,
       needsReviewCount: state.stats?.needsReviewCount || 0,
@@ -60,10 +55,7 @@ export function decodeFormatterHash(hash: string): SharedFormatterState {
         output: parsed.output || "",
         processedAt: parsed.processedAt || "",
         reliabilityNote: parsed.reliabilityNote || "",
-        customer: {
-          name: parsed.customer?.name || "",
-          contact: parsed.customer?.contact || "",
-        },
+        customer: normalizeCustomer(parsed.customer),
         stats: {
           resolvedCount: parsed.stats?.resolvedCount || 0,
           needsReviewCount: parsed.stats?.needsReviewCount || 0,

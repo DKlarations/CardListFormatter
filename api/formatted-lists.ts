@@ -1,6 +1,7 @@
-import { Redis } from "@upstash/redis";
+import { normalizeCustomer } from "../src/customer";
+import { getRedis, SAVED_PULL_LIST_TTL_SECONDS } from "./_redis";
 
-const LIST_TTL_SECONDS = 30 * 24 * 60 * 60;
+const LIST_TTL_SECONDS = SAVED_PULL_LIST_TTL_SECONDS;
 const KEY_PREFIX = "formatted-list:";
 
 type SavedFormattedList = {
@@ -8,10 +9,7 @@ type SavedFormattedList = {
   output?: string;
   processedAt?: string;
   reliabilityNote?: string;
-  customer?: {
-    name?: string;
-    contact?: string;
-  };
+  customer?: ReturnType<typeof normalizeCustomer>;
   stats?: {
     resolvedCount?: number;
     needsReviewCount?: number;
@@ -20,35 +18,8 @@ type SavedFormattedList = {
   formatterItems?: Array<Record<string, unknown>>;
 };
 
-let redis: Redis | null = null;
-
 function env(name: string, fallback = "") {
   return process.env[name] || fallback;
-}
-
-function getRedis() {
-  if (!redis) {
-    const url = restUrlFromEnv(env("UPSTASH_REDIS_REST_URL", env("lists_REDIS_URL")));
-    const token = env("UPSTASH_REDIS_REST_TOKEN", env("lists_KV_REST_API_TOKEN"));
-
-    if (!url || !token) {
-      throw new Error("Redis environment variables are not configured.");
-    }
-
-    redis = new Redis({ url, token });
-  }
-  return redis;
-}
-
-function restUrlFromEnv(value: string) {
-  if (!value.startsWith("rediss://")) return value;
-
-  try {
-    const parsed = new URL(value);
-    return `https://${parsed.hostname}`;
-  } catch {
-    return value;
-  }
 }
 
 function jsonResponse(body: unknown, status = 200) {
@@ -83,10 +54,7 @@ export function normalizePayload(payload: any): SavedFormattedList {
     output: cleanText(payload?.output),
     processedAt: cleanText(payload?.processedAt),
     reliabilityNote: cleanText(payload?.reliabilityNote),
-    customer: {
-      name: cleanText(payload?.customer?.name),
-      contact: cleanText(payload?.customer?.contact),
-    },
+    customer: normalizeCustomer(payload?.customer),
     stats: {
       resolvedCount: cleanNumber(payload?.stats?.resolvedCount),
       needsReviewCount: cleanNumber(payload?.stats?.needsReviewCount),

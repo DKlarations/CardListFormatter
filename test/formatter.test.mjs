@@ -54,7 +54,8 @@ test("parses hyphen-labeled contacts and structured price-list rows", () => {
 
   assert.deepEqual(parsed.customer, {
     name: "Aaron Greene",
-    contact: "779-555-3710 / aaron.greene@example.com",
+    phone: "779-555-3710",
+    email: "aaron.greene@example.com",
   });
   assert.equal(parsed.cardLineCount, 39);
   assert.equal(parsed.cards.length, 39);
@@ -78,7 +79,8 @@ Lightning Bolt`);
 
   assert.deepEqual(parsed.customer, {
     name: "Jane Doe",
-    contact: "206-555-0142 / jane@example.com",
+    phone: "206-555-0142",
+    email: "jane@example.com",
   });
   assert.deepEqual(parsed.cards.map((card) => card.inputName), ["Lightning Bolt"]);
 });
@@ -110,6 +112,14 @@ test("compacts resolved formatter items without losing pricing identity or inten
     alternateTitle: "Raph's Jitte",
     requestedDisplayName: "",
     requestedPrinting: { setCode: "PZA", finish: "foil", treatment: "borderless" },
+    statedRarities: [],
+    specialRequests: [],
+    nonSecretRarities: [],
+    eligibleRarityChecked: false,
+    tokenDetails: [],
+    caseNote: "",
+    note: "",
+    printLookupFailed: false,
     card: undefined,
     mtgjsonCard: { name: "Umezawa's Jitte" },
   }]);

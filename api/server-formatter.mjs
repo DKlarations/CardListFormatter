@@ -25,6 +25,59 @@ function treatmentsForRawPrinting(print) {
   return ["standard"];
 }
 
+// src/customer.ts
+var EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+var PHONE_PATTERN = /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/;
+function cleanText(value) {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+}
+function normalizePhoneForSearch(value) {
+  const digits = cleanText(value).replace(/\D/g, "");
+  return digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
+}
+function formatCustomerPhone(value) {
+  const raw = cleanText(value);
+  const digits = normalizePhoneForSearch(raw);
+  if (digits.length !== 10) return raw;
+  return `${digits.slice(0, 3)}-${digits.slice(3, 6)}-${digits.slice(6)}`;
+}
+function normalizeEmailForSearch(value) {
+  return cleanText(value).toLowerCase();
+}
+function customerFromLegacyContact(contactValue) {
+  const contact = cleanText(contactValue);
+  if (!contact) return {};
+  const phoneMatch = contact.match(PHONE_PATTERN)?.[0] || "";
+  const emailMatch = contact.match(EMAIL_PATTERN)?.[0] || "";
+  const remainder = cleanText(contact.replace(phoneMatch, " ").replace(emailMatch, " ").replace(/^\s*[\/|,;]+|[\/|,;]+\s*$/g, " ").replace(/\s*[\/|,;]+\s*/g, " "));
+  return {
+    ...phoneMatch ? { phone: formatCustomerPhone(phoneMatch) } : {},
+    ...emailMatch ? { email: normalizeEmailForSearch(emailMatch) } : {},
+    ...remainder ? { legacyContact: remainder } : {}
+  };
+}
+function normalizeCustomer(value) {
+  const raw = value && typeof value === "object" ? value : {};
+  const legacy = customerFromLegacyContact(raw.contact);
+  const phone = cleanText(raw.phone) || legacy.phone || "";
+  const email = cleanText(raw.email) || legacy.email || "";
+  const explicitLegacy = cleanText(raw.legacyContact);
+  return {
+    name: cleanText(raw.name),
+    phone: formatCustomerPhone(phone),
+    email: normalizeEmailForSearch(email),
+    ...explicitLegacy || legacy.legacyContact ? { legacyContact: explicitLegacy || legacy.legacyContact } : {}
+  };
+}
+function customerContactText(customerValue) {
+  const customer = normalizeCustomer(customerValue);
+  return Array.from(new Set([
+    customer.phone,
+    customer.email,
+    customer.legacyContact
+  ].filter(Boolean))).join(" / ");
+}
+
 // src/formatter.ts
 var SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 var SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -39,8 +92,8 @@ var CACHE_TTL_MS = 4 * 24 * 60 * 60 * 1e3;
 var CACHE_PREFIX = "rrg-scryfall-cache:";
 var BUFFER_MARKER = ".";
 var STORE_EMAIL_PATTERN = /\binfo@redraccoongames\.com\b/i;
-var EMAIL_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
-var PHONE_PATTERN = /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/;
+var EMAIL_PATTERN2 = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i;
+var PHONE_PATTERN2 = /(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}/;
 var scryfallRequestGate = Promise.resolve();
 var lastScryfallRequestAt = 0;
 var activeScryfallSignal = null;
@@ -316,22 +369,19 @@ function throwIfAborted() {
   }
 }
 function formatPhoneNumber(value) {
-  const digits = value.replace(/\D/g, "");
-  const tenDigits = digits.length === 11 && digits.startsWith("1") ? digits.slice(1) : digits;
-  if (tenDigits.length !== 10) return value.trim();
-  return `${tenDigits.slice(0, 3)}-${tenDigits.slice(3, 6)}-${tenDigits.slice(6)}`;
+  return formatCustomerPhone(value);
 }
 function normalizeContactValue(value) {
   const trimmed = value.trim();
-  if (PHONE_PATTERN.test(trimmed)) {
+  if (PHONE_PATTERN2.test(trimmed)) {
     return formatPhoneNumber(trimmed);
   }
   return trimmed;
 }
 function contactParts(value) {
   const parts = [];
-  const phone = value.match(PHONE_PATTERN)?.[0] || "";
-  const email = value.match(EMAIL_PATTERN)?.[0] || "";
+  const phone = value.match(PHONE_PATTERN2)?.[0] || "";
+  const email = value.match(EMAIL_PATTERN2)?.[0] || "";
   const facebook = /\bfacebook\b|\bfb\b/i.test(value) ? "facebook" : "";
   if (phone) parts.push(formatPhoneNumber(phone));
   if (email) parts.push(email.trim());
@@ -351,8 +401,8 @@ function stripFieldLabel(value) {
 }
 function splitNameAndContact(value, extraContact = "") {
   const cleanedValue = stripFieldLabel(value);
-  const email = value.match(EMAIL_PATTERN)?.[0] || "";
-  const phone = value.match(PHONE_PATTERN)?.[0] || "";
+  const email = value.match(EMAIL_PATTERN2)?.[0] || "";
+  const phone = value.match(PHONE_PATTERN2)?.[0] || "";
   const facebook = /\bfacebook\b|\bfb\b/i.test(value) ? "facebook" : "";
   const contact = mergeContactValues(phone, email, facebook, extraContact);
   const name = [phone, email].reduce(
@@ -415,7 +465,7 @@ function isContactSectionHeading(line, nextLine = "") {
   return /^(?:contact|contact information|customer information)$/i.test(line) && isLabeledContactLine(nextLine);
 }
 function hasContactOrHeader(line) {
-  return EMAIL_PATTERN.test(line) || PHONE_PATTERN.test(line) || isLabeledContactLine(line) || /\bpull\s+list\s+(from|for)\b/i.test(line) || /\bfacebook\b|\bfb\b/i.test(line);
+  return EMAIL_PATTERN2.test(line) || PHONE_PATTERN2.test(line) || isLabeledContactLine(line) || /\bpull\s+list\s+(from|for)\b/i.test(line) || /\bfacebook\b|\bfb\b/i.test(line);
 }
 function isFromHeaderLine(line) {
   return /^from:\s*/i.test(line);
@@ -454,7 +504,7 @@ function parseCustomerAndCards(text) {
   }
   customer.name = customer.name || emailHeaderContact.name;
   customer.contact = customer.contact || emailHeaderContact.contact;
-  return { customer, cardLines };
+  return { customer: normalizeCustomer(customer), cardLines };
 }
 function parseRarity(value) {
   const normalized = normalizeName(value);
@@ -889,7 +939,7 @@ function defaultMtgjsonManifestUrl() {
 function scryfallRequestHeaders(headersInit) {
   const headers = new Headers(headersInit || {});
   if (isServerRuntime() && !headers.has("user-agent")) {
-    headers.set("user-agent", "rrg-pull-list-formatter/0.4.6");
+    headers.set("user-agent", "rrg-pull-list-formatter/0.5.1");
   }
   return headers;
 }
@@ -1295,9 +1345,9 @@ function formatCardLine(item, useCheckboxes) {
   const reviewNote = item.status !== "found" && item.note ? ` (${item.note})` : "";
   return `${useCheckboxes ? "[ ] " : ""}${item.quantity} ${displayName(item)}${alternateTitleNote(item)}${tokenDetailsNote(item)}${specialNote}${caseNote}${reviewNote}`;
 }
-function formatContactLine(contact) {
-  if (!contact) return "";
-  const normalized = mergeContactValues(contact);
+function formatContactLine(customer) {
+  const normalized = customerContactText(customer);
+  if (!normalized) return "";
   if (/^facebook$/i.test(normalized)) return "(Facebook)";
   return normalized;
 }
@@ -1376,8 +1426,8 @@ function formatOutput(customer, items, useCheckboxes, processedAt) {
     lines.push("NAME:");
     lines.push("");
   }
-  if (customer.contact) {
-    lines.push(formatContactLine(customer.contact));
+  if (customerContactText(customer)) {
+    lines.push(formatContactLine(customer));
   } else {
     lines.push("CONTACT:");
     lines.push("");
@@ -1637,6 +1687,14 @@ function compactFormatterItems(items) {
     alternateTitle: item.alternateTitle || "",
     requestedDisplayName: item.requestedDisplayName || "",
     requestedPrinting: item.requestedPrinting || void 0,
+    statedRarities: Array.isArray(item.statedRarities) ? item.statedRarities : [],
+    specialRequests: Array.isArray(item.specialRequests) ? item.specialRequests : [],
+    nonSecretRarities: Array.isArray(item.nonSecretRarities) ? item.nonSecretRarities : [],
+    eligibleRarityChecked: Boolean(item.eligibleRarityChecked),
+    tokenDetails: Array.isArray(item.tokenDetails) ? item.tokenDetails : [],
+    caseNote: item.caseNote || "",
+    note: item.note || "",
+    printLookupFailed: Boolean(item.printLookupFailed),
     card: item.card?.name ? { name: item.card.name } : void 0,
     mtgjsonCard: item.mtgjsonCard?.name ? { name: item.mtgjsonCard.name } : void 0
   }));

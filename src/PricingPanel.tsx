@@ -21,6 +21,7 @@ import { enrichPrintHistories, outputDisplayName, resolveCardNames, sortItemsFor
 import {
   applyMinimumPrice,
   cardFromCatalog,
+  canPrintPricingReceipt,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
   createPricingRowsFromFormatterItems,
@@ -67,17 +68,26 @@ import {
   type PricingFinish,
 } from "./pricing";
 import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
+import { pricingAssistantViewState } from "./pricing-ui-state";
+import { customerContactText, type Customer } from "./customer";
+import {
+  normalizeSavedPricingState,
+  type SavedPricingState,
+} from "./pull-list-job";
 
 type PricingRow = PricingAssistantRowState;
 
 type PricingPanelProps = {
   visible: boolean;
   items: any[];
-  customer: { name?: string; contact?: string };
+  customer: Partial<Customer>;
   processedAt: string | null;
   apiOrigin: string;
   logoUrl: string;
   onMessage: (message: string) => void;
+  initialPricingState?: SavedPricingState | null;
+  sessionKey: string;
+  onPricingStateChange?: (state: SavedPricingState) => void;
 };
 
 type PricingManifest = {
@@ -299,11 +309,14 @@ export default function PricingPanel({
   apiOrigin,
   logoUrl,
   onMessage,
+  initialPricingState = null,
+  sessionKey,
+  onPricingStateChange = () => {},
 }: PricingPanelProps) {
   const [rows, setRows] = useState<PricingRow[]>([]);
   const [catalog, setCatalog] = useState<PricingCatalog>({});
   const [loadState, setLoadState] = useState<"idle" | "loading" | "ready" | "error">("idle");
-  const [loadMessage, setLoadMessage] = useState("Pricing data loads after a list is processed.");
+  const [loadMessage, setLoadMessage] = useState("Pricing data loads when cards are added.");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hydratingRows, setHydratingRows] = useState<Set<string>>(new Set());
   const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
@@ -328,6 +341,33 @@ export default function PricingPanel({
   const requestedMedianIdsRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
+  const reportedSessionKeyRef = useRef(sessionKey);
+
+  useEffect(() => {
+    loadGenerationRef.current += 1;
+    hydrationGenerationRef.current += 1;
+    hydratingKeysRef.current.clear();
+    const restored = initialPricingState
+      ? normalizeSavedPricingState(initialPricingState)
+      : normalizeSavedPricingState(null);
+    initializedAtRef.current = processedAt;
+    setRows(restored.rows);
+    setPricingSource(restored.pricingSource);
+    setIncludeNotFound(restored.includeNotFound);
+    setCatalog({});
+    catalogRef.current = {};
+    manifestRef.current = null;
+    loadedShardsRef.current.clear();
+    requestedMedianIdsRef.current.clear();
+    setListedMedianByProduct({});
+    setHydratingRows(new Set());
+    usingLiveFallbackRef.current = false;
+    setLoadState("idle");
+    setLoadMessage("Pricing data loads when cards are added.");
+    setIsAddingCard(false);
+    setManualCardName("");
+    setManualCardError("");
+  }, [sessionKey]);
 
   useEffect(() => {
     if (!receiptSettingsOpen) return;
@@ -346,19 +386,35 @@ export default function PricingPanel({
   }, [receiptSettingsOpen]);
 
   useEffect(() => {
-    if (!processedAt || !items.length) {
-      if (!items.length) setRows([]);
+    if (!items.length) {
+      setRows((current) => current.filter((row) => row.manuallyCreated));
       initializedAtRef.current = null;
       return;
     }
     const sortedItems = sortItemsForOutput(items);
     if (initializedAtRef.current !== processedAt) {
       initializedAtRef.current = processedAt;
-      setRows(createPricingRowsFromFormatterItems(sortedItems));
+      setRows((current) => [
+        ...createPricingRowsFromFormatterItems(sortedItems),
+        ...current.filter((row) => row.manuallyCreated),
+      ]);
       return;
     }
     setRows((current) => reconcilePricingRowsWithFormatterItems(current, sortedItems));
   }, [items, processedAt]);
+
+  useEffect(() => {
+    if (reportedSessionKeyRef.current !== sessionKey) {
+      reportedSessionKeyRef.current = sessionKey;
+      return;
+    }
+    onPricingStateChange(normalizeSavedPricingState({
+      version: 1,
+      rows,
+      pricingSource,
+      includeNotFound,
+    }));
+  }, [rows, pricingSource, includeNotFound, onPricingStateChange, sessionKey]);
 
   const cardNames = useMemo(
     () => Array.from(new Set(rows.filter((row) => row.resolved).map((row) => row.canonicalName))),
@@ -937,8 +993,8 @@ export default function PricingPanel({
     };
   }).filter((item) => item.quantity > 0);
   const notFoundCount = notFoundCards.reduce((sum, item) => sum + item.quantity, 0);
-  const canPrintReceipt = !unpricedFoundCount
-    && (foundRows.length > 0 || (includeNotFound && notFoundCards.length > 0));
+  const canPrintReceipt = canPrintPricingReceipt(foundRows.length, unpricedFoundCount);
+  const pricingView = pricingAssistantViewState(rows.length);
 
   async function refreshPricingIndex() {
     if (isRefreshing) return;
@@ -965,7 +1021,7 @@ export default function PricingPanel({
     if (!canPrintReceipt) {
       onMessage(unpricedFoundCount
         ? "Finish pricing every found row before printing."
-        : "Check at least one priced card or include the cards that were not found.");
+        : "Check and price at least one card before printing.");
       return;
     }
     const printWindow = window.open("", "_blank");
@@ -1031,7 +1087,7 @@ export default function PricingPanel({
         <header class="brand"><img src="${receiptLogoUrl}" alt=""><h1>Priced Pull List</h1></header>
         <section class="customer">
           <strong>${escapeHtml(customer.name || "Customer")}</strong>
-          ${customer.contact ? `<div>${escapeHtml(customer.contact)}</div>` : ""}
+          ${customerContactText(customer) ? `<div>${escapeHtml(customerContactText(customer))}</div>` : ""}
           <div class="printed">Priced ${escapeHtml(printedTimestamp(processedAt))}</div>
         </section>
         <main>${receiptRows}</main>
@@ -1100,7 +1156,7 @@ export default function PricingPanel({
               </div>
             )}
           </div>
-          <button className="icon-button primary" type="button" onClick={printPricingReceipt} disabled={!canPrintReceipt} title={unpricedFoundCount ? "Finish pricing every found row before printing" : "Print branded pricing receipt"}>
+          <button className="icon-button primary" type="button" onClick={printPricingReceipt} disabled={!canPrintReceipt} title={!foundRows.length ? "Check and price at least one card before printing" : unpricedFoundCount ? "Finish pricing every found row before printing" : "Print branded pricing receipt"}>
             <Printer size={18} /><span>Print Pricing</span>
           </button>
         </div>
@@ -1127,15 +1183,16 @@ export default function PricingPanel({
         </form>
       )}
 
-      {!rows.length ? (
-        <div className="pricing-empty">
-          <strong>Process the pull list to begin pricing.</strong>
-          <span>The pricing rows follow the formatter’s final rarity and alphabetical order.</span>
+      {pricingView.isEmpty ? (
+        <div className={`pricing-empty pricing-empty--${pricingView.emptyTextAlignment}`}>
+          <span>{pricingView.emptyMessage}</span>
         </div>
       ) : (
         <>
           <div className="pricing-column-labels" aria-hidden="true">
-            <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>Condition</span><span>{pricingSource === "tcgplayer-listed-median" ? "Each (TCG)" : "Each"}</span><span>Actions</span>
+            <div className="pricing-grid-columns">
+              <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>Condition</span><span>Price</span><span>Actions</span>
+            </div>
           </div>
           <div className="pricing-groups">
             {groups.map((group) => (
@@ -1457,18 +1514,20 @@ export default function PricingPanel({
               </div>
             ))}
           </div>
-          <footer className="pricing-total-bar">
-            <button className="icon-button pricing-add-card-action" type="button" onClick={() => { setIsAddingCard((open) => !open); setManualCardError(""); }} title="Add a card without reprocessing the pull list">
-              <Plus size={17} /><span>Add Card</span>
-            </button>
+        </>
+      )}
+      <footer className={`pricing-total-bar ${pricingView.isEmpty ? "is-empty" : ""}`}>
+        <button className="icon-button pricing-add-card-action" type="button" onClick={() => { setIsAddingCard((open) => !open); setManualCardError(""); }} title="Add a card without reprocessing the pull list">
+          <Plus size={17} /><span>Add Card</span>
+        </button>
+        {pricingView.showTotals && (
             <div className="pricing-totals-summary">
               <div className="pricing-found-summary"><strong>{foundCount}/{requestedCount}</strong><span>cards found</span></div>
               {unpricedFoundCount > 0 && <span className="pricing-incomplete">{unpricedFoundCount} found row{unpricedFoundCount === 1 ? "" : "s"} still need pricing</span>}
               <div className="pricing-grand-total"><span>Total</span><strong>{currencySymbol}{totalPrice.toFixed(2)}</strong></div>
             </div>
-          </footer>
-        </>
-      )}
+        )}
+      </footer>
     </section>
   );
 }

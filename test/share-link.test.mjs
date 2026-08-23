@@ -118,6 +118,7 @@ test("continues to decode version-one formatted links", () => {
   assert.equal(decoded.input, "Lightning Bolt");
   assert.equal(decoded.output, "saved output");
   assert.equal(decoded.customer?.name, "Jane Doe");
+  assert.equal(decoded.customer?.legacyContact, "555-0100");
   assert.deepEqual(decoded.formatterItems, []);
   assert.equal(decoded.pricing, undefined);
 });
