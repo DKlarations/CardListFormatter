@@ -67,6 +67,15 @@ import {
   type PricingAssistantRowState,
   type PricingFinish,
 } from "./pricing";
+import {
+  collapsedPrintingLabel,
+  exactPrintingForSelection,
+  exactPrintingOptionIsSelected,
+  exactPrintingSearchOptions,
+  searchExactPrintingOptions,
+  selectExactPrintingOption,
+  type ExactPrintingSearchOption,
+} from "./exact-printing-search";
 import { foilTreatmentForRawPrinting, treatmentsForRawPrinting } from "./printing-normalization";
 import { pricingAssistantViewState } from "./pricing-ui-state";
 import {
@@ -387,6 +396,10 @@ export default function PricingPanel({
   const [eurUsdRate, setEurUsdRate] = useState<EurUsdRate>({ status: "idle", rate: null, date: "" });
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
+  const [openExactPrintingRowId, setOpenExactPrintingRowId] = useState<string | null>(null);
+  const [exactPrintingMenuPosition, setExactPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
+  const [exactPrintingQuery, setExactPrintingQuery] = useState("");
+  const [highlightedExactPrintingIndex, setHighlightedExactPrintingIndex] = useState(0);
   const [listedMedianByProduct, setListedMedianByProduct] = useState<Record<string, ListedMedianEntry>>({});
   const [isAddingCard, setIsAddingCard] = useState(false);
   const [manualCardName, setManualCardName] = useState("");
@@ -405,6 +418,7 @@ export default function PricingPanel({
   const initializedAtRef = useRef<string | null>(null);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
   const reportedSessionKeyRef = useRef(sessionKey);
+  const exactPrintingTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
 
   useEffect(() => {
     loadGenerationRef.current += 1;
@@ -433,6 +447,12 @@ export default function PricingPanel({
     setIsAddingCard(false);
     setManualCardName("");
     setManualCardError("");
+    setOpenPrintingRowId(null);
+    setPrintingMenuPosition(null);
+    setOpenExactPrintingRowId(null);
+    setExactPrintingMenuPosition(null);
+    setExactPrintingQuery("");
+    setHighlightedExactPrintingIndex(0);
   }, [sessionKey]);
 
   useEffect(() => {
@@ -925,8 +945,41 @@ export default function PricingPanel({
   }, [openPrintingRowId]);
 
   useEffect(() => {
+    if (!openExactPrintingRowId) return;
+    const closeOutside = (event: PointerEvent) => {
+      const picker = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-exact-printing-row]");
+      if (picker?.dataset.exactPrintingRow !== openExactPrintingRowId) closeExactPrintingSearch(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeExactPrintingSearch();
+    };
+    const closeOnOutsideScroll = (event: Event) => {
+      const menu = (event.target as HTMLElement | null)?.closest?.<HTMLElement>("[data-exact-printing-menu]");
+      if (menu?.dataset.exactPrintingMenu === openExactPrintingRowId) return;
+      closeExactPrintingSearch(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    document.addEventListener("scroll", closeOnOutsideScroll, true);
+    const closeOnResize = () => closeExactPrintingSearch(false);
+    window.addEventListener("resize", closeOnResize);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+      document.removeEventListener("scroll", closeOnOutsideScroll, true);
+      window.removeEventListener("resize", closeOnResize);
+    };
+  }, [openExactPrintingRowId]);
+
+  useEffect(() => {
     setOpenPrintingRowId(null);
     setPrintingMenuPosition(null);
+    setOpenExactPrintingRowId(null);
+    setExactPrintingMenuPosition(null);
+    setExactPrintingQuery("");
+    setHighlightedExactPrintingIndex(0);
   }, [processedAt, visible]);
 
   useEffect(() => {
@@ -1005,6 +1058,54 @@ export default function PricingPanel({
         : candidate
     )));
     void hydrateLivePrice(selection, setCode);
+  }
+
+  function closeExactPrintingSearch(returnFocus = true) {
+    const rowIdToFocus = openExactPrintingRowId;
+    setOpenExactPrintingRowId(null);
+    setExactPrintingMenuPosition(null);
+    setExactPrintingQuery("");
+    setHighlightedExactPrintingIndex(0);
+    if (returnFocus && rowIdToFocus) {
+      window.requestAnimationFrame(() => exactPrintingTriggerRefs.current.get(rowIdToFocus)?.focus());
+    }
+  }
+
+  function openExactPrintingSearch(row: PricingRow, trigger: HTMLButtonElement) {
+    if (openExactPrintingRowId === row.id) {
+      closeExactPrintingSearch();
+      return;
+    }
+    const rect = trigger.getBoundingClientRect();
+    const width = Math.max(0, Math.min(500, window.innerWidth - 16));
+    const desiredHeight = Math.min(400, Math.max(250, window.innerHeight - 16));
+    const spaceBelow = window.innerHeight - rect.bottom - 8;
+    const spaceAbove = rect.top - 8;
+    const opensAbove = spaceBelow < Math.min(desiredHeight, 260) && spaceAbove > spaceBelow;
+    const availableHeight = opensAbove ? spaceAbove - 4 : spaceBelow - 4;
+    const maxHeight = Math.max(80, Math.min(desiredHeight, availableHeight, window.innerHeight - 16));
+    setOpenPrintingRowId(null);
+    setPrintingMenuPosition(null);
+    setExactPrintingQuery("");
+    setHighlightedExactPrintingIndex(0);
+    setExactPrintingMenuPosition({
+      rowId: row.id,
+      top: opensAbove ? Math.max(8, rect.top - maxHeight - 4) : rect.bottom + 4,
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      width,
+      maxHeight,
+    });
+    setOpenExactPrintingRowId(row.id);
+  }
+
+  function chooseExactPrinting(row: PricingRow, option: ExactPrintingSearchOption) {
+    const card = cardFromCatalog(catalog, row.canonicalName);
+    const selection = selectExactPrintingOption(row, card, option);
+    setRows((current) => current.map((candidate) => (
+      candidate.id === row.id ? selectExactPrintingOption(candidate, card, option) : candidate
+    )));
+    closeExactPrintingSearch();
+    void hydrateLivePrice(selection, option.setCode);
   }
 
   function updateFoundState(row: PricingRow, found: boolean) {
@@ -1573,9 +1674,9 @@ export default function PricingPanel({
         </div>
       ) : (
         <>
-          <div className="pricing-column-labels" aria-hidden="true">
+          <div className="pricing-column-labels">
             <div className="pricing-grid-columns">
-              <span>Found</span><span>Qty</span><span>Card</span><span>Printing</span><span>Finish</span><span>Treatment</span><span>Condition</span><span>Price</span><span>Actions</span>
+              <span>Found</span><span>Qty</span><span>Card</span><span><span className="sr-only">Exact Printing Search</span></span><span>Printing</span><span>Finish</span><span>Treatment</span><span title="Condition">Cond.</span><span>Price</span><span>Actions</span>
             </div>
           </div>
           <div className="pricing-groups">
@@ -1591,6 +1692,14 @@ export default function PricingPanel({
                   const catalogRowState = pricingCatalogRowState(row, catalogCoverage, catalog);
                   const displayedEdition = catalogRowState === "ready" ? selectedEdition : undefined;
                   const catalogPresentation = pricingCatalogRowPresentation(catalogRowState, Boolean(displayedEdition));
+                  const exactPrinting = exactPrintingForSelection(pricing.card, row);
+                  const collapsedPrinting = collapsedPrintingLabel(pricing.card, row);
+                  const exactSearchOptions = openExactPrintingRowId === row.id
+                    ? exactPrintingSearchOptions(pricing.card)
+                    : [];
+                  const exactSearchResult = openExactPrintingRowId === row.id
+                    ? searchExactPrintingOptions(exactSearchOptions, exactPrintingQuery)
+                    : { options: [], total: 0, truncated: false };
                   const priceValue = row.found
                     ? (row.priceOverride === null ? formatPrice(pricing.automatic.price) : row.priceOverride)
                     : "";
@@ -1610,6 +1719,16 @@ export default function PricingPanel({
                   const canMarkFound = row.resolved
                     && pricingCatalogControlsAvailable(catalogRowState, row.isBasicLand);
                   const controlsEnabled = row.found && canMarkFound;
+                  const exactSearchEnabled = controlsEnabled
+                    && catalogRowState === "ready"
+                    && Boolean(pricing.card?.printings.length);
+                  const exactSearchTitle = exactSearchEnabled
+                    ? "Find exact printing"
+                    : catalogRowState !== "ready" || !canMarkFound
+                      ? catalogPresentation.title
+                      : !row.found
+                        ? "Mark this card Found to choose an exact printing."
+                        : "No physical printings are available for this card.";
                   const needsWarning = warningState === "unavailable" || warningState === "ambiguous";
                   const usingMtgjsonFallback = pricingSource === "tcgplayer-listed-median"
                     && row.found
@@ -1708,6 +1827,137 @@ export default function PricingPanel({
                         )}
                       </div>
 
+                      <div className="pricing-exact-printing-search-cell" data-exact-printing-row={row.id}>
+                        <button
+                          type="button"
+                          className={`pricing-exact-printing-search-button ${openExactPrintingRowId === row.id ? "is-open" : ""}`}
+                          disabled={!exactSearchEnabled}
+                          title={exactSearchTitle}
+                          aria-label={`Find exact printing for ${row.displayName}`}
+                          aria-haspopup="dialog"
+                          aria-expanded={openExactPrintingRowId === row.id}
+                          ref={(element) => {
+                            if (element) exactPrintingTriggerRefs.current.set(row.id, element);
+                            else exactPrintingTriggerRefs.current.delete(row.id);
+                          }}
+                          onClick={(event) => openExactPrintingSearch(row, event.currentTarget)}
+                        >
+                          <Search size={14} aria-hidden="true" />
+                        </button>
+                        {openExactPrintingRowId === row.id
+                          && exactPrintingMenuPosition?.rowId === row.id
+                          && createPortal(
+                            <div
+                              className="pricing-exact-printing-menu"
+                              data-exact-printing-row={row.id}
+                              data-exact-printing-menu={row.id}
+                              role="dialog"
+                              aria-label={`Find Exact Printing for ${row.displayName}`}
+                              style={{
+                                top: exactPrintingMenuPosition.top,
+                                left: exactPrintingMenuPosition.left,
+                                width: exactPrintingMenuPosition.width,
+                                maxHeight: exactPrintingMenuPosition.maxHeight,
+                              }}
+                            >
+                              <header>
+                                <strong>Find Exact Printing</strong>
+                                <span>{row.displayName}</span>
+                              </header>
+                              <input
+                                autoFocus
+                                type="search"
+                                value={exactPrintingQuery}
+                                placeholder="Set, collector #, artist, year, finish…"
+                                aria-label={`Search exact printings for ${row.displayName}`}
+                                aria-controls={`exact-printing-results-${row.id}`}
+                                aria-activedescendant={exactSearchResult.options[highlightedExactPrintingIndex]
+                                  ? `exact-printing-option-${row.id}-${highlightedExactPrintingIndex}`
+                                  : undefined}
+                                onChange={(event) => {
+                                  setExactPrintingQuery(event.target.value);
+                                  setHighlightedExactPrintingIndex(0);
+                                }}
+                                onKeyDown={(event) => {
+                                  if (event.key === "ArrowDown") {
+                                    event.preventDefault();
+                                    setHighlightedExactPrintingIndex((current) => Math.min(
+                                      current + 1,
+                                      Math.max(0, exactSearchResult.options.length - 1),
+                                    ));
+                                  } else if (event.key === "ArrowUp") {
+                                    event.preventDefault();
+                                    setHighlightedExactPrintingIndex((current) => Math.max(0, current - 1));
+                                  } else if (event.key === "Enter") {
+                                    const option = exactSearchResult.options[highlightedExactPrintingIndex];
+                                    if (option) {
+                                      event.preventDefault();
+                                      chooseExactPrinting(row, option);
+                                    }
+                                  }
+                                }}
+                              />
+                              <p className="pricing-exact-printing-summary" role="status">
+                                {exactPrintingQuery.trim()
+                                  ? exactSearchResult.truncated
+                                    ? `Showing ${exactSearchResult.options.length} of ${exactSearchResult.total} matches. Keep typing to narrow the results.`
+                                    : `${exactSearchResult.total} matching physical option${exactSearchResult.total === 1 ? "" : "s"}.`
+                                  : `Showing the newest ${exactSearchResult.options.length} of ${exactSearchResult.total} physical options. Search to narrow the list.`}
+                              </p>
+                              <div
+                                className="pricing-exact-printing-results"
+                                id={`exact-printing-results-${row.id}`}
+                                role="listbox"
+                                aria-label={`Exact physical printings for ${row.displayName}`}
+                              >
+                                {exactSearchResult.options.map((option, optionIndex) => {
+                                  const isSelected = exactPrintingOptionIsSelected(option, row);
+                                  const details = [
+                                    option.treatmentLabel,
+                                    option.finishLabel,
+                                    option.artist,
+                                    option.releaseYear,
+                                    option.flavorName,
+                                  ].filter(Boolean);
+                                  const optionLabel = [
+                                    option.setCode,
+                                    option.collectorNumber ? `Collector #${option.collectorNumber}` : "",
+                                    option.setName,
+                                    ...details,
+                                  ].filter(Boolean).join(", ");
+                                  return (
+                                    <button
+                                      type="button"
+                                      role="option"
+                                      id={`exact-printing-option-${row.id}-${optionIndex}`}
+                                      aria-selected={isSelected}
+                                      aria-label={optionLabel}
+                                      className={`${isSelected ? "is-selected" : ""} ${optionIndex === highlightedExactPrintingIndex ? "is-highlighted" : ""}`}
+                                      key={option.key}
+                                      onPointerMove={() => setHighlightedExactPrintingIndex(optionIndex)}
+                                      onFocus={() => setHighlightedExactPrintingIndex(optionIndex)}
+                                      onClick={() => chooseExactPrinting(row, option)}
+                                    >
+                                      <span className="pricing-exact-printing-result-title">
+                                        <i className={`ss ss-${option.keyruneCode} ss-fw`} aria-hidden="true" />
+                                        <strong>{option.setCode}</strong>
+                                        {option.collectorNumber && <span>· Collector #{option.collectorNumber}</span>}
+                                        {isSelected && <Check size={15} aria-hidden="true" />}
+                                      </span>
+                                      <span className="pricing-exact-printing-set-name">{option.setName}</span>
+                                      <span className="pricing-exact-printing-result-details">{details.join(" · ")}</span>
+                                    </button>
+                                  );
+                                })}
+                                {!exactSearchResult.options.length && (
+                                  <div className="pricing-exact-printing-empty">No physical printings match all search terms.</div>
+                                )}
+                              </div>
+                            </div>,
+                            document.body,
+                          )}
+                      </div>
+
                       <div
                         className={`pricing-set-control pricing-printing-picker ${openPrintingRowId === row.id ? "is-open" : ""}`}
                         data-printing-row={row.id}
@@ -1716,8 +1966,14 @@ export default function PricingPanel({
                           type="button"
                           className={`pricing-printing-trigger is-${catalogRowState}`}
                           disabled={!controlsEnabled || !editions.length}
-                          title={catalogPresentation.title}
+                          title={exactPrinting?.number
+                            ? `${exactPrinting.setName} (${exactPrinting.setCode}) · Collector #${exactPrinting.number}`
+                            : catalogPresentation.title}
                           onClick={(event) => {
+                            setOpenExactPrintingRowId(null);
+                            setExactPrintingMenuPosition(null);
+                            setExactPrintingQuery("");
+                            setHighlightedExactPrintingIndex(0);
                             if (openPrintingRowId === row.id) {
                               setOpenPrintingRowId(null);
                               setPrintingMenuPosition(null);
@@ -1748,7 +2004,7 @@ export default function PricingPanel({
                             ? <i className={`ss ss-${displayedEdition.keyruneCode} ss-fw`} aria-hidden="true" />
                             : <span className="set-symbol-placeholder" aria-hidden="true">—</span>}
                           <span className="pricing-printing-trigger-label">
-                            <strong>{displayedEdition?.setCode || catalogPresentation.label}</strong>
+                            <strong>{displayedEdition ? collapsedPrinting : catalogPresentation.label}</strong>
                             {displayedEdition && <span>: {displayedEdition.setName}</span>}
                           </span>
                           <ChevronDown size={14} aria-hidden="true" />
@@ -1819,18 +2075,12 @@ export default function PricingPanel({
                         {treatments.map((treatment) => <option value={treatment} key={treatment}>{TREATMENT_LABELS[treatment] || treatment}</option>)}
                       </select>
 
-                      <select
-                        value="near-mint"
-                        disabled
-                        aria-label={`Condition for ${row.displayName}; condition pricing is coming soon`}
-                        title="Condition pricing is coming soon"
-                      >
-                        <option value="near-mint">NM</option>
-                        <option value="lightly-played">LP</option>
-                        <option value="moderately-played">MP</option>
-                        <option value="heavily-played">HP</option>
-                        <option value="damaged">Damaged</option>
-                      </select>
+                      <span
+                        className="pricing-condition-value"
+                        role="note"
+                        aria-label="Near Mint condition; condition pricing is not currently active"
+                        title="Condition pricing is not currently active."
+                      >NM</span>
 
                       <div className={`pricing-price ${row.priceOverride !== null ? "is-manual" : ""} ${row.found && !priceIsValid && row.setCode ? "is-missing" : ""}`}>
                         <span>{currencySymbol}</span>

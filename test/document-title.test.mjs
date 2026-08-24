@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import test from "node:test";
 import { importBundledModule } from "./test-module-bundle.mjs";
 
@@ -10,6 +10,6 @@ test("uses Pullsmith as the base browser title", () => {
 });
 
 test("uses a concise customer-aware Pullsmith browser title", () => {
-  assert.equal(documentTitle("John Smith"), "John Smith — Pullsmith");
-  assert.equal(documentTitle("  John Smith  "), "John Smith — Pullsmith");
+  assert.equal(documentTitle("John Smith"), "John Smith | Pullsmith");
+  assert.equal(documentTitle("  John Smith  "), "John Smith | Pullsmith");
 });
