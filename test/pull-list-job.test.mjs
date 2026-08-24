@@ -109,8 +109,60 @@ test("saved pricing normalization preserves exact staff selections and manual ov
   assert.equal(state.rows[1].manuallyCreated, true);
   assert.equal(state.rows[1].foilTreatment, "surge");
   assert.equal(state.rows[1].selectedPrintingUuid, "manual-exact-uuid");
+  assert.deepEqual(state.excludedSourceIndices, []);
   assert.equal(jobs.pricingStateForWorkspaceLoad("saved-job", state).rows.length, 2);
   assert.equal(jobs.pricingStateForWorkspaceLoad("copy-link", state), null);
+});
+
+test("saved pricing normalization safely defaults, deduplicates, and bounds exclusions", () => {
+  const oldState = draft().pricingState;
+  assert.deepEqual(jobs.normalizeSavedPricingState(oldState).excludedSourceIndices, []);
+
+  const malformed = jobs.normalizeSavedPricingState({
+    ...oldState,
+    excludedSourceIndices: [4, 4, "bad", null, 7, -1, 2.5, Number.POSITIVE_INFINITY],
+  });
+  assert.deepEqual(malformed.excludedSourceIndices, [4, 7]);
+
+  const bounded = jobs.normalizeSavedPricingState({
+    ...oldState,
+    excludedSourceIndices: Array.from({ length: 1005 }, (_, index) => index),
+  });
+  assert.equal(bounded.excludedSourceIndices.length, 1000);
+  assert.equal(bounded.excludedSourceIndices.at(-1), 999);
+});
+
+test("Saved Pull Lists restore exclusions while Copy Link deliberately starts fresh", () => {
+  const raw = draft().pricingState;
+  raw.excludedSourceIndices = [0, 0];
+  const saved = jobs.pricingStateForWorkspaceLoad("saved-job", raw);
+
+  assert.deepEqual(saved.excludedSourceIndices, [0]);
+  assert.equal(saved.rows.length, 1);
+  assert.equal(jobs.pricingStateForWorkspaceLoad("copy-link", raw), null);
+});
+
+test("Saved Pull List persistence retains exclusions without changing formatter card counts", async () => {
+  const store = new FakeRedis();
+  const excludedDraft = draft();
+  excludedDraft.pricingState.rows = [];
+  excludedDraft.pricingState.excludedSourceIndices = [0];
+  const created = await repository.createPullListJob(
+    store,
+    excludedDraft,
+    Date.parse("2026-08-23T12:00:00Z"),
+  );
+  const restored = await repository.getPullListJob(
+    store,
+    created.job.id,
+    Date.parse("2026-08-23T12:01:00Z"),
+  );
+  const summary = jobs.savedJobSummary(restored);
+
+  assert.deepEqual(restored.pricingState.excludedSourceIndices, [0]);
+  assert.deepEqual(restored.pricingState.rows, []);
+  assert.equal(summary.cardCount, 1);
+  assert.equal(summary.foundCount, 0);
 });
 
 test("creates cross-PC duplicate conflicts, but updates the same current job", async () => {

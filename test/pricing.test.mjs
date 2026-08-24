@@ -7,6 +7,7 @@ import {
   canPrintPricingReceipt,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
+  createFreshPricingAssistantSession,
   createManualPricingRow,
   createPricingRowsFromFormatterItems,
   editionOptions,
@@ -28,8 +29,10 @@ import {
   pricingDisplayName,
   pricingIndexSupportsPhysicalDimensions,
   pricingPhysicalSelectionIsValid,
+  pricingReceiptCardSummary,
   pricingRowWarningState,
   reconcilePricingRowsWithFormatterItems,
+  removePricingAssistantRow,
   pricingVariantOptions,
   pricingSelectionForPrintingUuid,
   printingMatchesFinishChoice,
@@ -294,6 +297,112 @@ test("empty pricing state has safe zero-card calculations", () => {
   assert.equal(canPrintPricingReceipt(0, 0), false);
   assert.equal(canPrintPricingReceipt(1, 0), true);
   assert.equal(canPrintPricingReceipt(1, 1), false);
+});
+
+test("removing the only formatter row excludes its source and reconciliation does not recreate it", () => {
+  const formatterItems = [{
+    index: 4,
+    inputName: "Lightning Bolt",
+    quantity: 1,
+    status: "found",
+    card: { name: "Lightning Bolt" },
+  }];
+  const [row] = createPricingRowsFromFormatterItems(formatterItems);
+  const removed = removePricingAssistantRow([row], row.id, []);
+
+  assert.equal(removed.removedKind, "formatter-source");
+  assert.deepEqual(removed.rows, []);
+  assert.deepEqual(removed.excludedSourceIndices, [4]);
+  assert.deepEqual(reconcilePricingRowsWithFormatterItems(
+    removed.rows,
+    formatterItems,
+    removed.excludedSourceIndices,
+  ), []);
+});
+
+test("removing formatter splits preserves the source until its final row is removed", () => {
+  const [original] = createPricingRowsFromFormatterItems([{
+    index: 4,
+    inputName: "Sol Ring",
+    quantity: 4,
+    status: "found",
+    card: { name: "Sol Ring" },
+  }]);
+  const artA = { ...original, id: `${original.groupId}-art-a`, quantity: 3 };
+  const artB = { ...original, id: `${original.groupId}-art-b`, quantity: 1 };
+
+  const splitRemoval = removePricingAssistantRow([artA, artB], artB.id, []);
+  assert.equal(splitRemoval.removedKind, "split");
+  assert.deepEqual(splitRemoval.rows, [artA]);
+  assert.deepEqual(splitRemoval.excludedSourceIndices, []);
+
+  const finalRemoval = removePricingAssistantRow(
+    splitRemoval.rows,
+    artA.id,
+    splitRemoval.excludedSourceIndices,
+  );
+  assert.equal(finalRemoval.removedKind, "formatter-source");
+  assert.deepEqual(finalRemoval.rows, []);
+  assert.deepEqual(finalRemoval.excludedSourceIndices, [4]);
+});
+
+test("removing a manual pricing row never creates a formatter exclusion", () => {
+  const manual = createManualPricingRow(
+    "manual-remove-original",
+    "manual-remove",
+    "Manual Card",
+    "Manual Card",
+  );
+  const removed = removePricingAssistantRow([manual], manual.id, [4]);
+
+  assert.equal(removed.removedKind, "manual");
+  assert.deepEqual(removed.rows, []);
+  assert.deepEqual(removed.excludedSourceIndices, [4]);
+});
+
+test("saved exclusions survive reconciliation while active and manual rows are restored", () => {
+  const formatterItems = [
+    { index: 1, inputName: "Lightning Bolt", quantity: 1, status: "found", card: { name: "Lightning Bolt" } },
+    { index: 2, inputName: "Counterspell", quantity: 1, status: "found", card: { name: "Counterspell" } },
+  ];
+  const [lightningBolt] = createPricingRowsFromFormatterItems([formatterItems[0]]);
+  const manual = createManualPricingRow("manual-restore-original", "manual-restore", "Manual Card", "Manual Card");
+  const restored = reconcilePricingRowsWithFormatterItems([lightningBolt, manual], formatterItems, [2]);
+
+  assert.deepEqual(restored.map((row) => row.displayName), ["Lightning Bolt", "Manual Card"]);
+  assert.equal(restored.some((row) => row.displayName === "Counterspell"), false);
+});
+
+test("a fresh processed-list session clears exclusions and restores every formatter source", () => {
+  const formatterItems = [
+    { index: 1, inputName: "Lightning Bolt", quantity: 1, status: "found", card: { name: "Lightning Bolt" } },
+    { index: 2, inputName: "Counterspell", quantity: 1, status: "found", card: { name: "Counterspell" } },
+  ];
+  const manual = createManualPricingRow("manual-fresh-original", "manual-fresh", "Manual Card", "Manual Card");
+  const fresh = createFreshPricingAssistantSession([manual], formatterItems);
+
+  assert.deepEqual(fresh.excludedSourceIndices, []);
+  assert.deepEqual(fresh.rows.map((row) => row.displayName), ["Lightning Bolt", "Counterspell", "Manual Card"]);
+});
+
+test("receipt counts and Not Found cards derive only from active Pricing Assistant rows", () => {
+  const formatterItems = [
+    { index: 1, inputName: "Lightning Bolt", quantity: 1, status: "found", card: { name: "Lightning Bolt" } },
+    { index: 2, inputName: "Sol Ring", quantity: 1, status: "found", card: { name: "Sol Ring" } },
+    { index: 3, inputName: "Counterspell", quantity: 1, status: "found", card: { name: "Counterspell" } },
+  ];
+  const rows = createPricingRowsFromFormatterItems(formatterItems)
+    .map((row) => row.displayName === "Lightning Bolt" ? { ...row, found: true } : row);
+  const counterspell = rows.find((row) => row.displayName === "Counterspell");
+  const active = removePricingAssistantRow(rows, counterspell.id, []);
+  const summary = pricingReceiptCardSummary(active.rows);
+
+  assert.deepEqual(summary, {
+    requestedCount: 2,
+    foundCount: 1,
+    notFoundCount: 1,
+    notFoundCards: [{ cardName: "Sol Ring", quantity: 1 }],
+  });
 });
 
 test("initializes a lone Borderless Non-Foil printing without inventing Standard", () => {

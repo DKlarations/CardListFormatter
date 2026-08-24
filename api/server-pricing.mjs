@@ -1,4 +1,9 @@
 // src/pricing-session.ts
+var MAX_SAVED_PRICING_ENTRIES = 1e3;
+function normalizeExcludedSourceIndices(value) {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.filter((sourceIndex) => typeof sourceIndex === "number" && Number.isSafeInteger(sourceIndex) && sourceIndex >= 0))).slice(0, MAX_SAVED_PRICING_ENTRIES);
+}
 function normalizePricingAssistantRow(row) {
   const canonicalName = row.canonicalName || row.cardName || row.displayName || "";
   const legacySurge = row.treatment === "surge" && row.finish === "foil";
@@ -414,8 +419,9 @@ function createPricingRowsFromFormatterItems(items) {
     });
   });
 }
-function reconcilePricingRowsWithFormatterItems(currentRows, items) {
-  const freshRows = createPricingRowsFromFormatterItems(items);
+function reconcilePricingRowsWithFormatterItems(currentRows, items, excludedSourceIndices = []) {
+  const excludedSources = new Set(normalizeExcludedSourceIndices(excludedSourceIndices));
+  const freshRows = createPricingRowsFromFormatterItems(items).filter((row) => !excludedSources.has(row.sourceIndex));
   const manualRows = currentRows.filter((row) => row.manuallyCreated);
   const formatterRows = currentRows.filter((row) => !row.manuallyCreated);
   const identityFields = (fresh) => ({
@@ -437,6 +443,64 @@ function reconcilePricingRowsWithFormatterItems(currentRows, items) {
     return existing.length ? existing.map((row) => ({ ...row, ...identityFields(fresh) })) : [fresh];
   });
   return [...reconciled, ...manualRows];
+}
+function createFreshPricingAssistantSession(currentRows, items) {
+  return {
+    rows: [
+      ...createPricingRowsFromFormatterItems(items),
+      ...currentRows.filter((row) => row.manuallyCreated)
+    ],
+    excludedSourceIndices: []
+  };
+}
+function removePricingAssistantRow(currentRows, rowId, excludedSourceIndices = []) {
+  const normalizedExclusions = normalizeExcludedSourceIndices(excludedSourceIndices);
+  const removedRow = currentRows.find((row) => row.id === rowId) || null;
+  if (!removedRow) {
+    return {
+      rows: currentRows,
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "not-found",
+      removedRow
+    };
+  }
+  if (removedRow.manuallyCreated) {
+    const remainingRows = currentRows.filter((row) => row.id !== rowId);
+    const remainingGroup = remainingRows.filter((row) => row.groupId === removedRow.groupId);
+    if (!remainingGroup.length) {
+      return {
+        rows: remainingRows,
+        excludedSourceIndices: normalizedExclusions,
+        removedKind: "manual",
+        removedRow
+      };
+    }
+    const requestedQuantity = Math.max(1, remainingGroup.reduce((sum, row) => sum + row.quantity, 0));
+    return {
+      rows: remainingRows.map((row) => row.groupId === removedRow.groupId ? { ...row, requestedQuantity } : row),
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "manual",
+      removedRow
+    };
+  }
+  const formatterSourceRows = currentRows.filter((row) => !row.manuallyCreated && row.sourceIndex === removedRow.sourceIndex);
+  if (formatterSourceRows.length > 1) {
+    return {
+      rows: currentRows.filter((row) => row.id !== rowId),
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "split",
+      removedRow
+    };
+  }
+  return {
+    rows: currentRows.filter((row) => row.manuallyCreated || row.sourceIndex !== removedRow.sourceIndex),
+    excludedSourceIndices: normalizeExcludedSourceIndices([
+      ...normalizedExclusions,
+      removedRow.sourceIndex
+    ]),
+    removedKind: "formatter-source",
+    removedRow
+  };
 }
 function pricingPhysicalSelectionIsValid(row, card) {
   return matchingPrintings(
@@ -655,6 +719,27 @@ function remainingRequestedQuantity(requestedQuantity, foundQuantities) {
   const foundQuantity = foundQuantities.reduce((sum, quantity) => sum + Math.max(0, Math.floor(Number(quantity) || 0)), 0);
   return Math.max(0, Math.floor(Number(requestedQuantity) || 0) - foundQuantity);
 }
+function pricingReceiptCardSummary(rows) {
+  const grouped = /* @__PURE__ */ new Map();
+  rows.forEach((row) => grouped.set(row.groupId, [...grouped.get(row.groupId) || [], row]));
+  const groups = Array.from(grouped.values());
+  const notFoundCards = groups.map((group) => {
+    const requestedQuantity = group[0]?.requestedQuantity || 0;
+    return {
+      cardName: group[0]?.displayName || "Unknown card",
+      quantity: remainingRequestedQuantity(
+        requestedQuantity,
+        group.filter((row) => row.found).map((row) => row.quantity)
+      )
+    };
+  }).filter((item) => item.quantity > 0);
+  return {
+    requestedCount: groups.reduce((sum, group) => sum + (group[0]?.requestedQuantity || 0), 0),
+    foundCount: rows.filter((row) => row.found && row.quantity > 0).reduce((sum, row) => sum + row.quantity, 0),
+    notFoundCount: notFoundCards.reduce((sum, item) => sum + item.quantity, 0),
+    notFoundCards
+  };
+}
 function canPrintPricingReceipt(pricedRowCount, unpricedFoundCount) {
   return pricedRowCount > 0 && unpricedFoundCount === 0;
 }
@@ -693,6 +778,7 @@ export {
   cardFromCatalog,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
+  createFreshPricingAssistantSession,
   createManualPricingRow,
   createPricingRowsFromFormatterItems,
   editionOptions,
@@ -723,6 +809,7 @@ export {
   pricingNameKey,
   pricingPhysicalSelectionIsValid,
   pricingQuantityMaximum,
+  pricingReceiptCardSummary,
   pricingRowWarningState,
   pricingSelectionForPrintingUuid,
   pricingShardKey,
@@ -732,6 +819,7 @@ export {
   receiptTreatment,
   reconcilePricingRowsWithFormatterItems,
   remainingRequestedQuantity,
+  removePricingAssistantRow,
   requiresPriceVarianceReview,
   selectManualPricingSet,
   selectableMtgjsonPriceSources,

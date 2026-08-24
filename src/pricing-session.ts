@@ -1,5 +1,17 @@
 import type { PricingAssistantRowState } from "./pricing.js";
 
+export const MAX_SAVED_PRICING_ENTRIES = 1000;
+
+/** Keeps persisted formatter-source exclusions small and safe to reconcile. */
+export function normalizeExcludedSourceIndices(value: unknown): number[] {
+  if (!Array.isArray(value)) return [];
+  return Array.from(new Set(value.filter((sourceIndex): sourceIndex is number => (
+    typeof sourceIndex === "number"
+    && Number.isSafeInteger(sourceIndex)
+    && sourceIndex >= 0
+  )))).slice(0, MAX_SAVED_PRICING_ENTRIES);
+}
+
 /** Normalizes serializable Pricing Assistant work without loading market catalogs. */
 export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowState>): PricingAssistantRowState {
   const canonicalName = row.canonicalName || row.cardName || row.displayName || "";

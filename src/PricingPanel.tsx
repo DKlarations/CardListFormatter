@@ -24,7 +24,7 @@ import {
   canPrintPricingReceipt,
   compatibleTreatmentOptions,
   convertCurrencyPrice,
-  createPricingRowsFromFormatterItems,
+  createFreshPricingAssistantSession,
   editionOptions,
   finishChoiceKey,
   finishChoices,
@@ -46,8 +46,9 @@ import {
   pricingRowWarningState,
   pricingQuantityMaximum,
   pricingShardKey,
-  remainingRequestedQuantity,
+  pricingReceiptCardSummary,
   receiptTreatment,
+  removePricingAssistantRow,
   requiresPriceVarianceReview,
   selectableMtgjsonPriceSources,
   TREATMENT_LABELS,
@@ -392,6 +393,7 @@ export default function PricingPanel({
   const [pricingSource, setPricingSource] = useState("tcgplayer-listed-median");
   const [mtgjsonPriceSources, setMtgjsonPriceSources] = useState<MtgjsonPriceSourceOption[]>(LEGACY_MTGJSON_PRICE_SOURCES);
   const [includeNotFound, setIncludeNotFound] = useState(true);
+  const [excludedSourceIndices, setExcludedSourceIndices] = useState<number[]>([]);
   const [receiptSettingsOpen, setReceiptSettingsOpen] = useState(false);
   const [eurUsdRate, setEurUsdRate] = useState<EurUsdRate>({ status: "idle", rate: null, date: "" });
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
@@ -416,6 +418,7 @@ export default function PricingPanel({
   const requestedMedianIdsRef = useRef(new Set<string>());
   const autoRecoveryAttemptedRef = useRef(new Set<string>());
   const initializedAtRef = useRef<string | null>(null);
+  const excludedSourceIndicesRef = useRef<number[]>([]);
   const receiptSettingsRef = useRef<HTMLDivElement | null>(null);
   const reportedSessionKeyRef = useRef(sessionKey);
   const exactPrintingTriggerRefs = useRef(new Map<string, HTMLButtonElement>());
@@ -429,6 +432,8 @@ export default function PricingPanel({
       : normalizeSavedPricingState(null);
     initializedAtRef.current = processedAt;
     setRows(restored.rows);
+    excludedSourceIndicesRef.current = restored.excludedSourceIndices;
+    setExcludedSourceIndices(restored.excludedSourceIndices);
     setPricingSource(restored.pricingSource);
     setIncludeNotFound(restored.includeNotFound);
     setCatalog({});
@@ -480,13 +485,17 @@ export default function PricingPanel({
     const sortedItems = sortItemsForOutput(items);
     if (initializedAtRef.current !== processedAt) {
       initializedAtRef.current = processedAt;
-      setRows((current) => [
-        ...createPricingRowsFromFormatterItems(sortedItems),
-        ...current.filter((row) => row.manuallyCreated),
-      ]);
+      const freshSession = createFreshPricingAssistantSession(rows, sortedItems);
+      excludedSourceIndicesRef.current = freshSession.excludedSourceIndices;
+      setExcludedSourceIndices(freshSession.excludedSourceIndices);
+      setRows(freshSession.rows);
       return;
     }
-    setRows((current) => reconcilePricingRowsWithFormatterItems(current, sortedItems));
+    setRows((current) => reconcilePricingRowsWithFormatterItems(
+      current,
+      sortedItems,
+      excludedSourceIndicesRef.current,
+    ));
   }, [items, processedAt]);
 
   useEffect(() => {
@@ -497,10 +506,11 @@ export default function PricingPanel({
     onPricingStateChange(normalizeSavedPricingState({
       version: 1,
       rows,
+      excludedSourceIndices,
       pricingSource,
       includeNotFound,
     }));
-  }, [rows, pricingSource, includeNotFound, onPricingStateChange, sessionKey]);
+  }, [rows, excludedSourceIndices, pricingSource, includeNotFound, onPricingStateChange, sessionKey]);
 
   const cardNames = useMemo(
     () => Array.from(new Set(rows.filter((row) => row.resolved).map((row) => row.canonicalName))),
@@ -1319,15 +1329,19 @@ export default function PricingPanel({
   }
 
   function removeRow(id: string) {
-    setRows((current) => {
-      const removed = current.find((row) => row.id === id);
-      const next = current.filter((row) => row.id !== id);
-      if (!removed?.manuallyCreated) return next;
-      const remaining = next.filter((row) => row.groupId === removed.groupId);
-      if (!remaining.length) return next;
-      const requestedQuantity = Math.max(1, remaining.reduce((sum, row) => sum + row.quantity, 0));
-      return next.map((row) => row.groupId === removed.groupId ? { ...row, requestedQuantity } : row);
-    });
+    const result = removePricingAssistantRow(rows, id, excludedSourceIndicesRef.current);
+    if (result.removedKind === "not-found") return;
+    setRows(result.rows);
+    excludedSourceIndicesRef.current = result.excludedSourceIndices;
+    setExcludedSourceIndices(result.excludedSourceIndices);
+    if (openPrintingRowId === id) {
+      setOpenPrintingRowId(null);
+      setPrintingMenuPosition(null);
+    }
+    if (openExactPrintingRowId === id) closeExactPrintingSearch();
+    if (result.removedKind === "formatter-source" && result.removedRow) {
+      onMessage(`${result.removedRow.displayName} removed from Pricing Assistant.`);
+    }
   }
 
   function listedMedianPricing(row: PricingRow) {
@@ -1447,23 +1461,16 @@ export default function PricingPanel({
     return Array.from(grouped.values());
   }, [rows]);
 
-  const requestedCount = groups.reduce((sum, group) => sum + (group[0]?.requestedQuantity || 0), 0);
   const checkedRows = rows.filter((row) => row.found && row.quantity > 0);
   const foundRows = checkedRows.filter((row) => effectivePricing(row).price !== null);
-  const foundCount = checkedRows.reduce((sum, row) => sum + row.quantity, 0);
   const unpricedFoundCount = checkedRows.length - foundRows.length;
   const totalPrice = foundRows.reduce((sum, row) => sum + row.quantity * (effectivePricing(row).price || 0), 0);
-  const notFoundCards = groups.map((group) => {
-    const requestedQuantity = group[0]?.requestedQuantity || 0;
-    return {
-      cardName: group[0]?.displayName || "Unknown card",
-      quantity: remainingRequestedQuantity(
-        requestedQuantity,
-        group.filter((row) => row.found).map((row) => row.quantity),
-      ),
-    };
-  }).filter((item) => item.quantity > 0);
-  const notFoundCount = notFoundCards.reduce((sum, item) => sum + item.quantity, 0);
+  const {
+    requestedCount,
+    foundCount,
+    notFoundCards,
+    notFoundCount,
+  } = useMemo(() => pricingReceiptCardSummary(rows), [rows]);
   const canPrintReceipt = canPrintPricingReceipt(foundRows.length, unpricedFoundCount);
   const pricingView = pricingAssistantViewState(rows.length);
 
@@ -1747,7 +1754,14 @@ export default function PricingPanel({
                       : isPriceLoading
                         ? pricing.automatic.message || "Loading this printing's current price."
                         : pricing.automatic.message || "This found card still needs a price.";
-                  const groupCanRemove = group.length > 1 || row.manuallyCreated;
+                  const removeTitle = row.manuallyCreated
+                    ? "Remove manually added card"
+                    : group.length > 1 ? "Remove this split row" : "Remove from Pricing Assistant";
+                  const removeAriaLabel = row.manuallyCreated
+                    ? `Remove manually added ${row.displayName}`
+                    : group.length > 1
+                      ? `Remove ${row.displayName} split row`
+                      : `Remove ${row.displayName} from Pricing Assistant`;
                   const maxQuantity = quantityMaximum(row);
                   const tcgplayerProductId = tcgplayerProductIdForSelection(
                     pricing.card,
@@ -2133,7 +2147,7 @@ export default function PricingPanel({
                           ><AlertTriangle size={18} /></a>
                         )}
                         <button type="button" disabled={!controlsEnabled} onClick={() => duplicateRow(row)} title="Break out into another printing" aria-label={`Break out ${row.displayName} into another printing`}><CornerDownLeft size={17} /></button>
-                        {groupCanRemove && <button type="button" onClick={() => removeRow(row.id)} title={row.manuallyCreated ? "Remove manually added card" : "Remove this split row"} aria-label={`Remove ${row.displayName}`}><Trash2 size={16} /></button>}
+                        <button type="button" onClick={() => removeRow(row.id)} title={removeTitle} aria-label={removeAriaLabel}><Trash2 size={16} /></button>
                       </div>
                     </div>
                     {shouldShowPricingVariant(row.found, variantOptions) && (

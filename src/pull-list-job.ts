@@ -7,7 +7,11 @@ import { isGeneratedSampleCustomerName } from "./generated-sample.js";
 import {
   type PricingAssistantRowState,
 } from "./pricing.js";
-import { normalizePricingAssistantRow } from "./pricing-session.js";
+import {
+  MAX_SAVED_PRICING_ENTRIES,
+  normalizeExcludedSourceIndices,
+  normalizePricingAssistantRow,
+} from "./pricing-session.js";
 
 export const SAVED_PULL_LIST_TTL_SECONDS = 30 * 24 * 60 * 60;
 export const SAVED_PULL_LIST_SCHEMA_VERSION = 1;
@@ -16,6 +20,7 @@ export const SAVED_PRICING_STATE_VERSION = 1;
 export type SavedPricingState = {
   version: 1;
   rows: PricingAssistantRowState[];
+  excludedSourceIndices: number[];
   pricingSource: string;
   includeNotFound: boolean;
 };
@@ -111,6 +116,7 @@ export function emptySavedPricingState(): SavedPricingState {
   return {
     version: SAVED_PRICING_STATE_VERSION,
     rows: [],
+    excludedSourceIndices: [],
     pricingSource: "tcgplayer-listed-median",
     includeNotFound: true,
   };
@@ -123,9 +129,10 @@ export function normalizeSavedPricingState(value: unknown): SavedPricingState {
     rows: Array.isArray(raw.rows)
       ? raw.rows
         .filter((row) => row && typeof row === "object")
-        .slice(0, 1000)
+        .slice(0, MAX_SAVED_PRICING_ENTRIES)
         .map((row) => normalizePricingAssistantRow(row))
       : [],
+    excludedSourceIndices: normalizeExcludedSourceIndices(raw.excludedSourceIndices),
     pricingSource: cleanText(raw.pricingSource) || "tcgplayer-listed-median",
     includeNotFound: raw.includeNotFound !== false,
   };

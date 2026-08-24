@@ -1,4 +1,7 @@
-import { normalizePricingAssistantRow } from "./pricing-session.js";
+import {
+  normalizeExcludedSourceIndices,
+  normalizePricingAssistantRow,
+} from "./pricing-session.js";
 export { normalizePricingAssistantRow } from "./pricing-session.js";
 
 export type PricingFinish = "normal" | "foil" | "etched";
@@ -126,6 +129,22 @@ export type PricingSelection = {
 };
 
 export type PricingRowWarningState = "none" | "loading" | "unavailable" | "ambiguous";
+
+export type PricingAssistantRowRemovalKind = "manual" | "split" | "formatter-source" | "not-found";
+
+export type PricingAssistantRowRemoval = {
+  rows: PricingAssistantRowState[];
+  excludedSourceIndices: number[];
+  removedKind: PricingAssistantRowRemovalKind;
+  removedRow: PricingAssistantRowState | null;
+};
+
+export type PricingReceiptCardSummary = {
+  requestedCount: number;
+  foundCount: number;
+  notFoundCount: number;
+  notFoundCards: Array<{ cardName: string; quantity: number }>;
+};
 
 export type TcgplayerPricePoint = {
   printingType: string;
@@ -736,8 +755,11 @@ export function createPricingRowsFromFormatterItems(items: FormatterPricingItem[
 export function reconcilePricingRowsWithFormatterItems(
   currentRows: PricingAssistantRowState[],
   items: FormatterPricingItem[],
+  excludedSourceIndices: number[] = [],
 ) {
-  const freshRows = createPricingRowsFromFormatterItems(items);
+  const excludedSources = new Set(normalizeExcludedSourceIndices(excludedSourceIndices));
+  const freshRows = createPricingRowsFromFormatterItems(items)
+    .filter((row) => !excludedSources.has(row.sourceIndex));
   const manualRows = currentRows.filter((row) => row.manuallyCreated);
   const formatterRows = currentRows.filter((row) => !row.manuallyCreated);
   const identityFields = (fresh: PricingAssistantRowState) => ({
@@ -761,6 +783,84 @@ export function reconcilePricingRowsWithFormatterItems(
       : [fresh];
   });
   return [...reconciled, ...manualRows];
+}
+
+/** Starts a new processed-list pricing session while retaining manual quick-pricing rows. */
+export function createFreshPricingAssistantSession(
+  currentRows: PricingAssistantRowState[],
+  items: FormatterPricingItem[],
+) {
+  return {
+    rows: [
+      ...createPricingRowsFromFormatterItems(items),
+      ...currentRows.filter((row) => row.manuallyCreated),
+    ],
+    excludedSourceIndices: [] as number[],
+  };
+}
+
+/** Applies compact row-removal semantics without changing formatter-owned data. */
+export function removePricingAssistantRow(
+  currentRows: PricingAssistantRowState[],
+  rowId: string,
+  excludedSourceIndices: number[] = [],
+): PricingAssistantRowRemoval {
+  const normalizedExclusions = normalizeExcludedSourceIndices(excludedSourceIndices);
+  const removedRow = currentRows.find((row) => row.id === rowId) || null;
+  if (!removedRow) {
+    return {
+      rows: currentRows,
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "not-found",
+      removedRow,
+    };
+  }
+
+  if (removedRow.manuallyCreated) {
+    const remainingRows = currentRows.filter((row) => row.id !== rowId);
+    const remainingGroup = remainingRows.filter((row) => row.groupId === removedRow.groupId);
+    if (!remainingGroup.length) {
+      return {
+        rows: remainingRows,
+        excludedSourceIndices: normalizedExclusions,
+        removedKind: "manual",
+        removedRow,
+      };
+    }
+    const requestedQuantity = Math.max(1, remainingGroup.reduce((sum, row) => sum + row.quantity, 0));
+    return {
+      rows: remainingRows.map((row) => (
+        row.groupId === removedRow.groupId ? { ...row, requestedQuantity } : row
+      )),
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "manual",
+      removedRow,
+    };
+  }
+
+  const formatterSourceRows = currentRows.filter((row) => (
+    !row.manuallyCreated && row.sourceIndex === removedRow.sourceIndex
+  ));
+  if (formatterSourceRows.length > 1) {
+    return {
+      rows: currentRows.filter((row) => row.id !== rowId),
+      excludedSourceIndices: normalizedExclusions,
+      removedKind: "split",
+      removedRow,
+    };
+  }
+
+  return {
+    rows: currentRows.filter((row) => (
+      row.manuallyCreated || row.sourceIndex !== removedRow.sourceIndex
+    )),
+    excludedSourceIndices: normalizeExcludedSourceIndices([
+      ...normalizedExclusions,
+      removedRow.sourceIndex,
+    ]),
+    removedKind: "formatter-source",
+    removedRow,
+  };
 }
 
 export function pricingPhysicalSelectionIsValid(
@@ -1123,6 +1223,34 @@ export function remainingRequestedQuantity(requestedQuantity: number, foundQuant
     sum + Math.max(0, Math.floor(Number(quantity) || 0))
   ), 0);
   return Math.max(0, Math.floor(Number(requestedQuantity) || 0) - foundQuantity);
+}
+
+/** Derives receipt card counts solely from the active Pricing Assistant rows. */
+export function pricingReceiptCardSummary(
+  rows: PricingAssistantRowState[],
+): PricingReceiptCardSummary {
+  const grouped = new Map<string, PricingAssistantRowState[]>();
+  rows.forEach((row) => grouped.set(row.groupId, [...(grouped.get(row.groupId) || []), row]));
+  const groups = Array.from(grouped.values());
+  const notFoundCards = groups.map((group) => {
+    const requestedQuantity = group[0]?.requestedQuantity || 0;
+    return {
+      cardName: group[0]?.displayName || "Unknown card",
+      quantity: remainingRequestedQuantity(
+        requestedQuantity,
+        group.filter((row) => row.found).map((row) => row.quantity),
+      ),
+    };
+  }).filter((item) => item.quantity > 0);
+
+  return {
+    requestedCount: groups.reduce((sum, group) => sum + (group[0]?.requestedQuantity || 0), 0),
+    foundCount: rows
+      .filter((row) => row.found && row.quantity > 0)
+      .reduce((sum, row) => sum + row.quantity, 0),
+    notFoundCount: notFoundCards.reduce((sum, item) => sum + item.quantity, 0),
+    notFoundCards,
+  };
 }
 
 export function canPrintPricingReceipt(pricedRowCount: number, unpricedFoundCount: number) {
