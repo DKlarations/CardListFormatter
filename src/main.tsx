@@ -69,11 +69,15 @@ import {
   type PricingDataDiagnosticReporter,
 } from "./pricing-data-diagnostics";
 import {
+  emptyPullListJobPrintStatus,
   emptySavedPricingState,
   isGeneratedSamplePullListJobDraft,
   normalizePullListJobDraft,
   pricingStateForWorkspaceLoad,
+  updatePullListJobPrintStatus,
   type PullListJobDraft,
+  type PullListJobPrintStatus,
+  type PullListJobPrintTarget,
   type SavedJobSummary,
   type SavedPricingState,
 } from "./pull-list-job";
@@ -552,6 +556,7 @@ function App() {
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
   const [autosaveRestartRevision, setAutosaveRestartRevision] = useState(0);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
+  const [printStatus, setPrintStatus] = useState<PullListJobPrintStatus>(() => emptyPullListJobPrintStatus());
   const [initialPricingState, setInitialPricingState] = useState<SavedPricingState | null>(() => (
     pricingStateForWorkspaceLoad("copy-link", null)
   ));
@@ -600,11 +605,12 @@ function App() {
     output,
     formatterItems: compactFormatterItems(formatterItems.length ? formatterItems : resolvedItems),
     pricingState,
+    printStatus,
     source: "manual",
     formatterSettings: { useCheckboxes },
     processedAt: processedAt || new Date().toISOString(),
     stats: { resolvedCount, needsReviewCount: needsReview, printFallbackCount: printFallbacks },
-  }), [customer, input, output, formatterItems, resolvedItems, pricingState, processedAt, resolvedCount, needsReview, printFallbacks, useCheckboxes]);
+  }), [customer, input, output, formatterItems, resolvedItems, pricingState, printStatus, processedAt, resolvedCount, needsReview, printFallbacks, useCheckboxes]);
   const jobDraftSignature = useMemo(() => JSON.stringify(jobDraft), [jobDraft]);
 
   const handlePricingStateChange = useCallback((state: SavedPricingState) => {
@@ -613,6 +619,14 @@ function App() {
       setSaveState((current) => current === "idle" ? "dirty" : current);
     }
   }, []);
+
+  const recordPrintStatus = useCallback((target: PullListJobPrintTarget, printedAt: string) => {
+    setPrintStatus((current) => updatePullListJobPrintStatus(current, target, printedAt));
+  }, []);
+
+  const recordPricingPrinted = useCallback((printedAt: string) => {
+    recordPrintStatus("pricing", printedAt);
+  }, [recordPrintStatus]);
 
   const recordSavedPullListDiagnostic = useCallback<SavedPullListDiagnosticReporter>((event) => {
     setSavedPullListDiagnostics((current) => addSavedPullListDiagnostic(current, event));
@@ -698,6 +712,7 @@ function App() {
     setReliabilityNote("");
     setPricingState(restoredPricing);
     setInitialPricingState(restoredPricing);
+    setPrintStatus(job.printStatus);
     setPricingSessionKey(`job:${job.id}:${job.updatedAt}`);
     setDuplicateJob(null);
     setSavedPickerOpen(false);
@@ -909,6 +924,8 @@ function App() {
       setPreloadedOutput("");
       setPreloadedStats(null);
       setProcessedAt(nextProcessedAt);
+      const nextPrintStatus = emptyPullListJobPrintStatus();
+      setPrintStatus(nextPrintStatus);
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
       const nextReliabilityNote = reliabilityMessage(inferred.items, providerOptions);
       setReliabilityNote(nextReliabilityNote);
@@ -921,6 +938,7 @@ function App() {
         output: nextOutput,
         formatterItems: compactItems,
         pricingState: pricingStateRef.current,
+        printStatus: nextPrintStatus,
         source: "manual",
         formatterSettings: { useCheckboxes },
         processedAt: nextProcessedAt,
@@ -994,6 +1012,7 @@ function App() {
 
       setResolvedItems(nextItems);
       setFormatterItems(nextItems);
+      setPrintStatus(emptyPullListJobPrintStatus());
       const reviewCount = nextItems.filter((item) => item.status !== "found").length;
       setReliabilityNote(reliabilityMessage(nextItems, providerOptions));
       setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
@@ -1095,6 +1114,7 @@ function App() {
     printWindow.document.close();
     setTimeout(() => {
       printWindow.focus();
+      recordPrintStatus("pull-list", new Date().toISOString());
       printWindow.print();
     }, 100);
   }
@@ -1112,6 +1132,7 @@ function App() {
     setPreloadedStats(null);
     setReliabilityNote("");
     setFormatterItems([]);
+    setPrintStatus(emptyPullListJobPrintStatus());
     setDuplicateJob(null);
     setSaveState((current) => currentJobId
       ? nextSavedJobSaveState(current, "invalidate")
@@ -1248,6 +1269,7 @@ function App() {
     setDuplicateJob(null);
     setPricingState(emptySavedPricingState());
     setInitialPricingState(null);
+    setPrintStatus(emptyPullListJobPrintStatus());
     setPricingSessionKey((current) => `fresh:${current}:${Date.now()}`);
     setSaveState("idle");
     setSavedPickerOpen(false);
@@ -1383,6 +1405,7 @@ function App() {
                     if (currentJobId) setSaveState("stale");
                     setProcessedAt(null);
                     setFormatterItems([]);
+                    setPrintStatus(emptyPullListJobPrintStatus());
                     setReliabilityNote("");
                     setMessage("MTGJSON setting changed. Process again when ready.");
                   }}
@@ -1401,6 +1424,7 @@ function App() {
                     if (currentJobId) setSaveState("stale");
                     setProcessedAt(null);
                     setFormatterItems([]);
+                    setPrintStatus(emptyPullListJobPrintStatus());
                     setReliabilityNote("");
                     setMessage(enabled
                       ? "Scryfall enabled. Process again when ready."
@@ -1419,6 +1443,7 @@ function App() {
                     if (currentJobId) setSaveState("stale");
                     setProcessedAt(null);
                     setFormatterItems([]);
+                    setPrintStatus(emptyPullListJobPrintStatus());
                     setReliabilityNote("");
                     setMessage("Careful Mode setting changed. Process again when ready.");
                   }}
@@ -1491,6 +1516,7 @@ function App() {
                     if (currentJobId) setSaveState("stale");
                     setProcessedAt(null);
                     setFormatterItems([]);
+                    setPrintStatus(emptyPullListJobPrintStatus());
                     setReliabilityNote("");
                     setMessage("Case check setting changed. Process again when ready.");
                   }}
@@ -1537,6 +1563,7 @@ function App() {
               sessionKey={pricingSessionKey}
               onPricingStateChange={handlePricingStateChange}
               onPricingDataDiagnostic={recordPricingDataDiagnostic}
+              onPricingPrinted={recordPricingPrinted}
             />
         </Suspense>
 

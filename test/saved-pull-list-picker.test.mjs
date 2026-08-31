@@ -7,12 +7,50 @@ const picker = await importBundledModule("src/saved-pull-list-picker.ts", "saved
 const client = await importBundledModule("src/pull-list-job-client.ts", "saved-pull-list-client");
 const pickerComponentSource = await readFile(new URL("../src/SavedPullListsPicker.tsx", import.meta.url), "utf8");
 const deleteDialogSource = await readFile(new URL("../src/DeleteSavedPullListDialog.tsx", import.meta.url), "utf8");
+const stylesSource = await readFile(new URL("../src/styles.css", import.meta.url), "utf8");
 
 test("picker opens from the full details control and keeps Delete as the only sibling action", () => {
   assert.match(pickerComponentSource, /className="saved-pull-list-result-main"/);
   assert.match(pickerComponentSource, /onClick=\{\(\) => void handleOpenJob\(job\.id\)\}/);
   assert.doesNotMatch(pickerComponentSource, /saved-pull-list-open/);
   assert.match(pickerComponentSource, /className="icon-button danger saved-pull-list-delete"/);
+});
+
+test("picker print-status badges are omitted, shown singly, or ordered together", () => {
+  assert.deepEqual(picker.savedPullListPrintStatusBadges({ printStatus: {} }), []);
+  assert.deepEqual(
+    picker.savedPullListPrintStatusBadges({ printStatus: { pullListPrintedAt: "2026-08-30T23:16:00.000Z" } })
+      .map((badge) => badge.kind),
+    ["pull-list"],
+  );
+  assert.deepEqual(
+    picker.savedPullListPrintStatusBadges({ printStatus: { pricingPrintedAt: "2026-08-30T23:42:00.000Z" } })
+      .map((badge) => badge.kind),
+    ["pricing"],
+  );
+  const both = picker.savedPullListPrintStatusBadges({
+    printStatus: {
+      pullListPrintedAt: "2026-08-30T23:16:00.000Z",
+      pricingPrintedAt: "2026-08-30T23:42:00.000Z",
+    },
+  });
+  assert.deepEqual(both.map((badge) => badge.kind), ["pull-list", "pricing"]);
+  assert.match(both[0].label, /^Print Pull List used Aug 30,/);
+  assert.match(both[1].label, /^Print Pricing used Aug 30,/);
+  assert.deepEqual(
+    picker.savedPullListPrintStatusBadges({ printStatus: { pullListPrintedAt: "bad", pricingPrintedAt: "worse" } }),
+    [],
+  );
+  const statusMarkup = pickerComponentSource.indexOf("printBadges.map");
+  const deleteMarkup = pickerComponentSource.indexOf('className="icon-button danger saved-pull-list-delete"');
+  assert.ok(statusMarkup >= 0 && deleteMarkup > statusMarkup);
+  assert.match(pickerComponentSource.slice(statusMarkup, deleteMarkup), /role="img"/);
+  assert.match(pickerComponentSource.slice(statusMarkup, deleteMarkup), /aria-label=\{badge\.label\}/);
+  assert.match(pickerComponentSource.slice(statusMarkup, deleteMarkup), /aria-hidden="true"/);
+  assert.doesNotMatch(pickerComponentSource.slice(statusMarkup, deleteMarkup), /onClick=/);
+  assert.match(stylesSource, /\.saved-pull-list-print-status \{[\s\S]*?width:\s*28px;[\s\S]*?height:\s*28px;[\s\S]*?border-radius:\s*8px;[\s\S]*?cursor:\s*default;/);
+  assert.match(stylesSource, /\.saved-pull-list-result \.saved-pull-list-print-status\.is-pull-list/);
+  assert.match(stylesSource, /\.saved-pull-list-result \.saved-pull-list-print-status\.is-pricing/);
 });
 
 test("picker open state closes for Escape, outside clicks, and successful Open", () => {

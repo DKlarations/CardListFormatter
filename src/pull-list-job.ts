@@ -48,6 +48,13 @@ export type PullListJobSearchFields = {
   email: string;
 };
 
+export type PullListJobPrintStatus = {
+  pullListPrintedAt: string;
+  pricingPrintedAt: string;
+};
+
+export type PullListJobPrintTarget = "pull-list" | "pricing";
+
 export type PullListJob = {
   schemaVersion: 1;
   id: string;
@@ -60,6 +67,7 @@ export type PullListJob = {
   output: string;
   formatterItems: Array<Record<string, unknown>>;
   pricingState: SavedPricingState;
+  printStatus: PullListJobPrintStatus;
   source: "manual" | "email" | "microsoft-graph" | string;
   status?: string;
   teams?: PullListJobTeamsMetadata;
@@ -72,7 +80,7 @@ export type PullListJob = {
 
 export type PullListJobDraft = Pick<
   PullListJob,
-  "customer" | "input" | "output" | "formatterItems" | "pricingState" | "source" | "processedAt" | "stats" | "formatterSettings"
+  "customer" | "input" | "output" | "formatterItems" | "pricingState" | "printStatus" | "source" | "processedAt" | "stats" | "formatterSettings"
 > & {
   status?: string;
   teams?: PullListJobTeamsMetadata;
@@ -86,6 +94,7 @@ export type SavedJobSummary = {
   processedAt: string;
   cardCount: number;
   foundCount: number;
+  printStatus: PullListJobPrintStatus;
   source: string;
 };
 
@@ -108,6 +117,13 @@ function safeDate(value: unknown, fallback = new Date(0).toISOString()) {
   return Number.isNaN(date.getTime()) ? fallback : date.toISOString();
 }
 
+function safeOptionalDate(value: unknown) {
+  const text = cleanText(value);
+  if (!text) return "";
+  const date = new Date(text);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString();
+}
+
 export function expiresAtFromUpdate(updatedAt: string) {
   return new Date(new Date(updatedAt).getTime() + SAVED_PULL_LIST_TTL_SECONDS * 1000).toISOString();
 }
@@ -120,6 +136,34 @@ export function emptySavedPricingState(): SavedPricingState {
     pricingSource: "tcgplayer-listed-median",
     includeNotFound: true,
   };
+}
+
+export function emptyPullListJobPrintStatus(): PullListJobPrintStatus {
+  return {
+    pullListPrintedAt: "",
+    pricingPrintedAt: "",
+  };
+}
+
+export function normalizePullListJobPrintStatus(value: unknown): PullListJobPrintStatus {
+  const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
+  return {
+    pullListPrintedAt: safeOptionalDate(raw.pullListPrintedAt),
+    pricingPrintedAt: safeOptionalDate(raw.pricingPrintedAt),
+  };
+}
+
+export function updatePullListJobPrintStatus(
+  value: unknown,
+  target: PullListJobPrintTarget,
+  printedAt: unknown,
+) {
+  const current = normalizePullListJobPrintStatus(value);
+  const timestamp = safeOptionalDate(printedAt);
+  if (!timestamp) return current;
+  return target === "pull-list"
+    ? { ...current, pullListPrintedAt: timestamp }
+    : { ...current, pricingPrintedAt: timestamp };
 }
 
 export function normalizeSavedPricingState(value: unknown): SavedPricingState {
@@ -150,6 +194,7 @@ export function normalizePullListJobDraft(value: unknown): PullListJobDraft {
       ? raw.formatterItems.filter((item) => item && typeof item === "object").slice(0, 1000)
       : [],
     pricingState: normalizeSavedPricingState(raw.pricingState),
+    printStatus: normalizePullListJobPrintStatus(raw.printStatus),
     source: cleanText(raw.source) || "manual",
     processedAt: safeDate(raw.processedAt, new Date().toISOString()),
     stats: {
@@ -215,6 +260,7 @@ export function savedJobSummary(jobValue: PullListJob): SavedJobSummary {
     foundCount: job.pricingState.rows
       .filter((row) => row.found)
       .reduce((sum, row) => sum + Math.max(0, Number(row.quantity) || 0), 0),
+    printStatus: job.printStatus,
     source: job.source,
   };
 }
@@ -229,6 +275,7 @@ export function normalizeSavedJobSummary(value: unknown): SavedJobSummary {
     processedAt: safeDate(raw.processedAt),
     cardCount: cleanCount(raw.cardCount),
     foundCount: cleanCount(raw.foundCount),
+    printStatus: normalizePullListJobPrintStatus(raw.printStatus),
     source: cleanText(raw.source) || "manual",
   };
 }

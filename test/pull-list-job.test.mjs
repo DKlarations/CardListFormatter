@@ -86,6 +86,92 @@ function draft({ quantity = 1, setCode = "", customerName = "Jane Doe", price = 
   };
 }
 
+test("old Saved Pull Lists normalize with empty print status", () => {
+  const normalizedDraft = jobs.normalizePullListJobDraft(draft());
+  const normalizedJob = jobs.normalizePullListJob({
+    ...draft(),
+    id: "pl_old",
+    createdAt: "2026-08-23T12:00:00.000Z",
+    updatedAt: "2026-08-23T12:00:00.000Z",
+    expiresAt: "2026-09-22T12:00:00.000Z",
+  });
+  assert.deepEqual(normalizedDraft.printStatus, jobs.emptyPullListJobPrintStatus());
+  assert.deepEqual(normalizedJob.printStatus, jobs.emptyPullListJobPrintStatus());
+});
+
+test("valid print timestamps survive draft, job, and summary normalization", () => {
+  const printStatus = {
+    pullListPrintedAt: "2026-08-30T23:16:00.000Z",
+    pricingPrintedAt: "2026-08-30T23:42:00.000Z",
+  };
+  const normalizedDraft = jobs.normalizePullListJobDraft({ ...draft(), printStatus });
+  const normalizedJob = jobs.normalizePullListJob({
+    ...draft(),
+    printStatus,
+    id: "pl_printed",
+    createdAt: "2026-08-23T12:00:00.000Z",
+    updatedAt: "2026-08-30T23:42:00.000Z",
+    expiresAt: "2026-09-29T23:42:00.000Z",
+  });
+  const summary = jobs.savedJobSummary(normalizedJob);
+  const normalizedSummary = jobs.normalizeSavedJobSummary(summary);
+  assert.deepEqual(normalizedDraft.printStatus, printStatus);
+  assert.deepEqual(normalizedJob.printStatus, printStatus);
+  assert.deepEqual(summary.printStatus, printStatus);
+  assert.deepEqual(normalizedSummary.printStatus, printStatus);
+});
+
+test("malformed print timestamps are ignored without fake fallback dates", () => {
+  const malformed = jobs.normalizePullListJobPrintStatus({
+    pullListPrintedAt: "not-a-date",
+    pricingPrintedAt: 123,
+  });
+  assert.deepEqual(malformed, { pullListPrintedAt: "", pricingPrintedAt: "" });
+});
+
+test("print updates change only their target and repeated prints keep the latest timestamp", () => {
+  const firstPull = jobs.updatePullListJobPrintStatus(
+    jobs.emptyPullListJobPrintStatus(),
+    "pull-list",
+    "2026-08-30T23:16:00.000Z",
+  );
+  assert.deepEqual(firstPull, {
+    pullListPrintedAt: "2026-08-30T23:16:00.000Z",
+    pricingPrintedAt: "",
+  });
+  const pricing = jobs.updatePullListJobPrintStatus(firstPull, "pricing", "2026-08-30T23:42:00.000Z");
+  assert.deepEqual(pricing, {
+    pullListPrintedAt: "2026-08-30T23:16:00.000Z",
+    pricingPrintedAt: "2026-08-30T23:42:00.000Z",
+  });
+  const repeatedPull = jobs.updatePullListJobPrintStatus(pricing, "pull-list", "2026-08-31T00:01:00.000Z");
+  assert.deepEqual(repeatedPull, {
+    pullListPrintedAt: "2026-08-31T00:01:00.000Z",
+    pricingPrintedAt: "2026-08-30T23:42:00.000Z",
+  });
+  assert.deepEqual(jobs.emptyPullListJobPrintStatus(), {
+    pullListPrintedAt: "",
+    pricingPrintedAt: "",
+  });
+});
+
+test("Recent and Search summaries include normalized print status", async () => {
+  const store = new FakeRedis();
+  const printedDraft = {
+    ...draft(),
+    printStatus: {
+      pullListPrintedAt: "2026-08-30T23:16:00.000Z",
+      pricingPrintedAt: "2026-08-30T23:42:00.000Z",
+    },
+  };
+  const created = await repository.createPullListJob(store, printedDraft, Date.parse("2026-08-30T23:42:00Z"));
+  const recent = await repository.searchPullListJobs(store, {}, Date.parse("2026-08-30T23:43:00Z"));
+  const search = await repository.searchPullListJobs(store, { namePrefix: "jane" }, Date.parse("2026-08-30T23:43:00Z"));
+  assert.deepEqual(created.job.printStatus, printedDraft.printStatus);
+  assert.deepEqual(recent[0].printStatus, printedDraft.printStatus);
+  assert.deepEqual(search[0].printStatus, printedDraft.printStatus);
+});
+
 test("saved pricing normalization preserves exact staff selections and manual overrides", () => {
   const raw = draft({ price: "1.25" }).pricingState;
   raw.rows.push({

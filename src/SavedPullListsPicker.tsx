@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from "react";
-import { ChevronDown, Loader2, RefreshCw, Search, Trash2 } from "lucide-react";
+import { ChevronDown, DollarSign, Loader2, Printer, RefreshCw, Search, Trash2 } from "lucide-react";
 import DeleteSavedPullListDialog from "./DeleteSavedPullListDialog";
 import { listPullListJobs } from "./pull-list-job-client";
 import type { SavedJobSummary } from "./pull-list-job";
@@ -8,6 +8,7 @@ import {
   formatSavedPullListDate,
   nextSavedPullListsPickerOpen,
   removeDeletedSavedPullList,
+  savedPullListPrintStatusBadges,
   savedPullListSearchRequest,
   SAVED_PULL_LIST_SEARCH_DEBOUNCE_MS,
   type SavedPullListOpenResult,
@@ -251,6 +252,7 @@ export default function SavedPullListsPicker({
                   const isDeleting = deletingJobId === job.id;
                   const waitForCurrentSave = job.id === currentJobId && currentJobSaveInFlight;
                   const actionsDisabled = Boolean(openingJobId || deletingJobId || deleteConfirmationJob);
+                  const printBadges = savedPullListPrintStatusBadges(job);
                   return (
                     <article className="saved-pull-list-result" role="listitem" key={job.id}>
                       <button
@@ -269,6 +271,19 @@ export default function SavedPullListsPicker({
                         <small>{resultDetails(job)}</small>
                       </button>
                       <div className="saved-pull-list-result-actions">
+                        {printBadges.map((badge) => (
+                          <span
+                            className={`saved-pull-list-print-status is-${badge.kind}`}
+                            role="img"
+                            aria-label={badge.label}
+                            title={badge.label}
+                            key={badge.kind}
+                          >
+                            {badge.kind === "pull-list"
+                              ? <Printer size={14} aria-hidden="true" />
+                              : <DollarSign size={14} aria-hidden="true" />}
+                          </span>
+                        ))}
                         <button
                           className="icon-button danger saved-pull-list-delete"
                           type="button"

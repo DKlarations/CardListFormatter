@@ -16,7 +16,9 @@ Input Text and Output Text use a side-by-side desktop workspace and automaticall
 
 Pricing Assistant is also available as a standalone quick-pricing workspace: open **Add Card**, resolve a card, and use the normal printing and pricing controls without processing a pull list first.
 
-Successful **Process List** runs create or update a private Saved Pull List working session. The compact Customer / Phone / Email row includes a small Saved Pull Lists picker for recent jobs and customer name/phone/email search, plus the current autosave state and **New List** action. Saved Pull Lists retain formatter and Pricing Assistant work for 30 days from the latest meaningful update; standalone quick-pricing work remains transient until a list is processed. See [docs/SAVED-PULL-LISTS.md](docs/SAVED-PULL-LISTS.md).
+Successful **Process List** runs create or update a private Saved Pull List working session. The compact Customer / Phone / Email row includes a small Saved Pull Lists picker for recent jobs and customer name/phone/email search, plus the current autosave state and **New List** action. Saved Pull Lists retain formatter and Pricing Assistant work for 30 days from the latest meaningful update and show compact badges for the latest initiated Pull List/Pricing print flows; browser/physical print completion cannot be verified, and a fresh process clears those indicators. Standalone quick-pricing work remains transient until a list is processed. See [docs/SAVED-PULL-LISTS.md](docs/SAVED-PULL-LISTS.md).
+
+The normal Pricing Assistant **Printing** menu can be searched by set code or set name. **Exact Printing Search** remains the separate advanced tool for collector number, artist, finish/treatment, and exact physical selection.
 
 ## Technology
 

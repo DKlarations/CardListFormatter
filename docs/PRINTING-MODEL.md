@@ -38,6 +38,10 @@ Surge is a foil technology, not a visual treatment. Internally it is `finish: "f
 
 Staff selections resolve in this order: **Card -> Set -> Finish -> Treatment -> Art / Variant -> exact UUID**. Finish choices come from the selected card and set. Treatment choices come only from exact records in the selected effective Finish bucket, and Art / Variant choices come only from exact records that also match the selected Treatment. Ordinary Foil and Surge are mutually exclusive candidate pools even though both use the provider finish value `foil`.
 
+The normal **Printing** menu has a focused set-level search field. Staff can type a case-insensitive set code such as `P10`, `MKM`, or `PLST`, or a full/partial set name such as `player rewards` or `ravnica remastered`. Exact set-code and set-code-prefix matches rank before set-name matches; multi-word names require every entered token. Arrow keys move through matches, Enter uses the same normal set-selection pipeline, and Escape closes the menu.
+
+This set search does not replace **Exact Printing Search**. The magnifying-glass tool remains the advanced cross-set search for collector number, artist, year, finish, treatment, and exact physical UUID.
+
 Requested flavor/reskin identity is an **initial** printing preference. When staff manually change Set, that choice is authoritative: the row keeps its customer-facing display and canonical identities, but recalculates **Set -> Finish -> Treatment -> Art -> exact UUID** from the canonical card in the new set. Previous finish, treatment, art UUID, and reskin preference do not constrain the new physical selection.
 
 The normal Pricing Assistant row remains the primary requested-card row. After it is marked Found, and after set, effective finish (including foil treatment), and visual treatment are applied, an indented **Art / Variant** row appears only when multiple human-distinct collector/art variants remain. A branch connector and left border make the relationship unmistakable. Options group equivalent provider records by collector number, flavor name, and artist, then display the collector number plus useful name/artist detail.

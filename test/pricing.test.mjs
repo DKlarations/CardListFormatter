@@ -43,6 +43,7 @@ import {
   remainingRequestedQuantity,
   receiptTreatment,
   requiresPriceVarianceReview,
+  searchEditionOptions,
   selectableMtgjsonPriceSources,
   setSearchTerm,
   tcgplayerCardSearchUrl,
@@ -645,6 +646,77 @@ test("sorts printing choices newest to oldest", () => {
     ],
   };
   assert.deepEqual(editionOptions(card).map((edition) => edition.setCode), ["2XM", "RAV"]);
+});
+
+test("searches normal Printing editions by ranked set code and set name", () => {
+  const editions = [
+    { setCode: "MKM", setName: "Murders at Karlov Manor", keyruneCode: "mkm", releaseDate: "2024-02-09" },
+    { setCode: "RVR", setName: "Ravnica Remastered", keyruneCode: "rvr", releaseDate: "2024-01-12" },
+    { setCode: "PLST", setName: "The List", keyruneCode: "plst", releaseDate: "2023-09-08" },
+    { setCode: "P10", setName: "Magic Player Rewards 2010", keyruneCode: "p10", releaseDate: "2010-01-01" },
+    { setCode: "MPR", setName: "Magic Player Rewards", keyruneCode: "mpr", releaseDate: "2001-01-01" },
+  ];
+
+  assert.equal(searchEditionOptions(editions, "  "), editions);
+  assert.deepEqual(searchEditionOptions(editions, "p10").map((edition) => edition.setCode), ["P10"]);
+  assert.deepEqual(searchEditionOptions(editions, "P1").map((edition) => edition.setCode), ["P10"]);
+  assert.deepEqual(searchEditionOptions(editions, "ravnica remastered").map((edition) => edition.setCode), ["RVR"]);
+  assert.deepEqual(searchEditionOptions(editions, "karlov").map((edition) => edition.setCode), ["MKM"]);
+  assert.deepEqual(searchEditionOptions(editions, "player rewards").map((edition) => edition.setCode), ["P10", "MPR"]);
+  assert.deepEqual(searchEditionOptions(editions, "ravnica missing"), []);
+  assert.deepEqual(searchEditionOptions(editions, "no such set"), []);
+});
+
+test("normal Printing search ranks exact code, code prefix, name prefix, and name contains deterministically", () => {
+  const editions = [
+    { setCode: "OLD", setName: "P10 Archive", keyruneCode: "old", releaseDate: "2026-01-01" },
+    { setCode: "P10X", setName: "Promo Ten Extras", keyruneCode: "p10x", releaseDate: "2025-01-01" },
+    { setCode: "P10", setName: "Magic Player Rewards 2010", keyruneCode: "p10", releaseDate: "2010-01-01" },
+    { setCode: "TEN", setName: "P10 Remastered", keyruneCode: "ten", releaseDate: "2009-01-01" },
+  ];
+  assert.deepEqual(searchEditionOptions(editions, "p10").map((edition) => edition.setCode), ["P10", "P10X", "OLD", "TEN"]);
+
+  const tied = [
+    { setCode: "NEW", setName: "Magic Newest", keyruneCode: "new", releaseDate: "2026-01-01" },
+    { setCode: "OLD", setName: "Magic Oldest", keyruneCode: "old", releaseDate: "2001-01-01" },
+  ];
+  assert.deepEqual(searchEditionOptions(tied, "magic").map((edition) => edition.setCode), ["NEW", "OLD"]);
+});
+
+test("a searched normal Printing result still uses manual set-selection semantics", () => {
+  const card = {
+    name: "Searchable Set Card",
+    printings: [
+      exactFixturePrinting({ uuid: "old-surge", setCode: "OLD", finishes: ["foil"], foilTreatment: "surge", treatments: ["borderless"] }),
+      { ...exactFixturePrinting({ uuid: "p10-normal", setCode: "P10", finishes: ["normal"], treatments: ["standard"] }), setName: "Magic Player Rewards 2010" },
+    ],
+  };
+  const row = initializeFoundPricingSelection(freshFormatterPricingRow(card.name, {
+    setCode: "OLD",
+    finish: "foil",
+    foilTreatment: "surge",
+    treatment: "borderless",
+  }), card, "2026-08-30");
+  const match = searchEditionOptions(editionOptions(card), "p10")[0];
+  const selected = selectManualPricingSet(row, card, match.setCode);
+  assert.deepEqual(
+    {
+      setCode: selected.setCode,
+      setSelectionSource: selected.setSelectionSource,
+      finish: selected.finish,
+      foilTreatment: selected.foilTreatment,
+      treatment: selected.treatment,
+      selectedPrintingUuid: selected.selectedPrintingUuid,
+    },
+    {
+      setCode: "P10",
+      setSelectionSource: "manual",
+      finish: "normal",
+      foilTreatment: "standard",
+      treatment: "standard",
+      selectedPrintingUuid: "p10-normal",
+    },
+  );
 });
 
 test("defaults to the newest printing that is not a Secret Lair", () => {

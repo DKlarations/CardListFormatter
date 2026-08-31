@@ -3,7 +3,10 @@ import {
   normalizeEmailForSearch,
   normalizePhoneForSearch,
 } from "./customer";
-import type { SavedJobSummary } from "./pull-list-job";
+import {
+  normalizePullListJobPrintStatus,
+  type SavedJobSummary,
+} from "./pull-list-job";
 import { shouldConfirmNewList, type SavedJobSaveState } from "./saved-session-state";
 
 export const SAVED_PULL_LIST_RECENT_LIMIT = 15;
@@ -92,6 +95,29 @@ export function savedPullListDeleteDialogDetails(job: SavedJobSummary) {
     updatedAt: formatSavedPullListDate(job.updatedAt),
     warning: "This permanently deletes this saved pull list. This cannot be undone.",
   };
+}
+
+export type SavedPullListPrintBadge = {
+  kind: "pull-list" | "pricing";
+  label: string;
+};
+
+export function savedPullListPrintStatusBadges(job: Pick<SavedJobSummary, "printStatus">) {
+  const status = normalizePullListJobPrintStatus(job.printStatus);
+  const badges: SavedPullListPrintBadge[] = [];
+  if (status.pullListPrintedAt) {
+    badges.push({
+      kind: "pull-list",
+      label: `Print Pull List used ${formatSavedPullListDate(status.pullListPrintedAt)}`,
+    });
+  }
+  if (status.pricingPrintedAt) {
+    badges.push({
+      kind: "pricing",
+      label: `Print Pricing used ${formatSavedPullListDate(status.pricingPrintedAt)}`,
+    });
+  }
+  return badges;
 }
 
 export function removeDeletedSavedPullList(

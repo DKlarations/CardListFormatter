@@ -45,6 +45,13 @@ export type PricingCard = {
   printings: PricingPrinting[];
 };
 
+export type PricingEditionOption = {
+  setCode: string;
+  setName: string;
+  keyruneCode: string;
+  releaseDate: string;
+};
+
 export type PricingCatalog = Record<string, PricingCard>;
 
 /** Serializable Pricing Assistant work; market data is rehydrated separately. */
@@ -290,12 +297,7 @@ export function printingMatchesFinishChoice(
 export function editionOptions(card: PricingCard | null) {
   if (!card) return [];
 
-  const editions = new Map<string, {
-    setCode: string;
-    setName: string;
-    keyruneCode: string;
-    releaseDate: string;
-  }>();
+  const editions = new Map<string, PricingEditionOption>();
 
   card.printings.forEach((printing) => {
     const existing = editions.get(printing.setCode);
@@ -313,6 +315,41 @@ export function editionOptions(card: PricingCard | null) {
     b.releaseDate.localeCompare(a.releaseDate)
       || a.setCode.localeCompare(b.setCode)
   ));
+}
+
+function normalizedEditionSearchText(value: unknown) {
+  return String(value || "")
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function searchEditionOptions(
+  editions: PricingEditionOption[],
+  queryValue: unknown,
+) {
+  const query = normalizedEditionSearchText(queryValue);
+  if (!query) return editions;
+
+  const compactQuery = query.replace(/\s+/g, "");
+  const queryTokens = query.split(" ").filter(Boolean);
+  return editions
+    .map((edition, originalIndex) => {
+      const setCode = normalizedEditionSearchText(edition.setCode).replace(/\s+/g, "");
+      const setName = normalizedEditionSearchText(edition.setName);
+      let rank = Number.POSITIVE_INFINITY;
+      if (setCode === compactQuery) rank = 0;
+      else if (setCode.startsWith(compactQuery)) rank = 1;
+      else if (setName.startsWith(query)) rank = 2;
+      else if (queryTokens.every((token) => setName.includes(token))) rank = 3;
+      return { edition, originalIndex, rank };
+    })
+    .filter((result) => Number.isFinite(result.rank))
+    .sort((left, right) => left.rank - right.rank || left.originalIndex - right.originalIndex)
+    .map((result) => result.edition);
 }
 
 function localDateKey(date: Date) {

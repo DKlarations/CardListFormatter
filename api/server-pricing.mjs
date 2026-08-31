@@ -140,6 +140,25 @@ function editionOptions(card) {
   });
   return Array.from(editions.values()).sort((a, b) => b.releaseDate.localeCompare(a.releaseDate) || a.setCode.localeCompare(b.setCode));
 }
+function normalizedEditionSearchText(value) {
+  return String(value || "").toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").replace(/\s+/g, " ").trim();
+}
+function searchEditionOptions(editions, queryValue) {
+  const query = normalizedEditionSearchText(queryValue);
+  if (!query) return editions;
+  const compactQuery = query.replace(/\s+/g, "");
+  const queryTokens = query.split(" ").filter(Boolean);
+  return editions.map((edition, originalIndex) => {
+    const setCode = normalizedEditionSearchText(edition.setCode).replace(/\s+/g, "");
+    const setName = normalizedEditionSearchText(edition.setName);
+    let rank = Number.POSITIVE_INFINITY;
+    if (setCode === compactQuery) rank = 0;
+    else if (setCode.startsWith(compactQuery)) rank = 1;
+    else if (setName.startsWith(query)) rank = 2;
+    else if (queryTokens.every((token) => setName.includes(token))) rank = 3;
+    return { edition, originalIndex, rank };
+  }).filter((result) => Number.isFinite(result.rank)).sort((left, right) => left.rank - right.rank || left.originalIndex - right.originalIndex).map((result) => result.edition);
+}
 function localDateKey(date) {
   return [
     date.getFullYear(),
@@ -821,6 +840,7 @@ export {
   remainingRequestedQuantity,
   removePricingAssistantRow,
   requiresPriceVarianceReview,
+  searchEditionOptions,
   selectManualPricingSet,
   selectableMtgjsonPriceSources,
   setSearchTerm,

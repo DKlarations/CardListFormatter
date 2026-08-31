@@ -50,6 +50,7 @@ import {
   receiptTreatment,
   removePricingAssistantRow,
   requiresPriceVarianceReview,
+  searchEditionOptions,
   selectableMtgjsonPriceSources,
   TREATMENT_LABELS,
   tcgplayerCardSearchUrl,
@@ -125,6 +126,7 @@ type PricingPanelProps = {
   sessionKey: string;
   onPricingStateChange?: (state: SavedPricingState) => void;
   onPricingDataDiagnostic?: PricingDataDiagnosticReporter;
+  onPricingPrinted: (printedAt: string) => void;
 };
 
 type PricingManifest = {
@@ -382,6 +384,7 @@ export default function PricingPanel({
   sessionKey,
   onPricingStateChange = () => {},
   onPricingDataDiagnostic = () => {},
+  onPricingPrinted,
 }: PricingPanelProps) {
   const [rows, setRows] = useState<PricingRow[]>([]);
   const [catalog, setCatalog] = useState<PricingCatalog>({});
@@ -398,6 +401,8 @@ export default function PricingPanel({
   const [eurUsdRate, setEurUsdRate] = useState<EurUsdRate>({ status: "idle", rate: null, date: "" });
   const [openPrintingRowId, setOpenPrintingRowId] = useState<string | null>(null);
   const [printingMenuPosition, setPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
+  const [printingSearchQuery, setPrintingSearchQuery] = useState("");
+  const [highlightedPrintingIndex, setHighlightedPrintingIndex] = useState(0);
   const [openExactPrintingRowId, setOpenExactPrintingRowId] = useState<string | null>(null);
   const [exactPrintingMenuPosition, setExactPrintingMenuPosition] = useState<PrintingMenuPosition | null>(null);
   const [exactPrintingQuery, setExactPrintingQuery] = useState("");
@@ -454,6 +459,8 @@ export default function PricingPanel({
     setManualCardError("");
     setOpenPrintingRowId(null);
     setPrintingMenuPosition(null);
+    setPrintingSearchQuery("");
+    setHighlightedPrintingIndex(0);
     setOpenExactPrintingRowId(null);
     setExactPrintingMenuPosition(null);
     setExactPrintingQuery("");
@@ -926,10 +933,6 @@ export default function PricingPanel({
 
   useEffect(() => {
     if (!openPrintingRowId) return;
-    const closePrintingMenu = () => {
-      setOpenPrintingRowId(null);
-      setPrintingMenuPosition(null);
-    };
     const closeOutside = (event: PointerEvent) => {
       const picker = (event.target as HTMLElement | null)?.closest<HTMLElement>("[data-printing-row]");
       if (picker?.dataset.printingRow !== openPrintingRowId) closePrintingMenu();
@@ -986,6 +989,8 @@ export default function PricingPanel({
   useEffect(() => {
     setOpenPrintingRowId(null);
     setPrintingMenuPosition(null);
+    setPrintingSearchQuery("");
+    setHighlightedPrintingIndex(0);
     setOpenExactPrintingRowId(null);
     setExactPrintingMenuPosition(null);
     setExactPrintingQuery("");
@@ -1070,6 +1075,18 @@ export default function PricingPanel({
     void hydrateLivePrice(selection, setCode);
   }
 
+  function closePrintingMenu() {
+    setOpenPrintingRowId(null);
+    setPrintingMenuPosition(null);
+    setPrintingSearchQuery("");
+    setHighlightedPrintingIndex(0);
+  }
+
+  function choosePrintingSet(row: PricingRow, setCode: string) {
+    selectPrintingSet(row, setCode);
+    closePrintingMenu();
+  }
+
   function closeExactPrintingSearch(returnFocus = true) {
     const rowIdToFocus = openExactPrintingRowId;
     setOpenExactPrintingRowId(null);
@@ -1094,8 +1111,7 @@ export default function PricingPanel({
     const opensAbove = spaceBelow < Math.min(desiredHeight, 260) && spaceAbove > spaceBelow;
     const availableHeight = opensAbove ? spaceAbove - 4 : spaceBelow - 4;
     const maxHeight = Math.max(80, Math.min(desiredHeight, availableHeight, window.innerHeight - 16));
-    setOpenPrintingRowId(null);
-    setPrintingMenuPosition(null);
+    closePrintingMenu();
     setExactPrintingQuery("");
     setHighlightedExactPrintingIndex(0);
     setExactPrintingMenuPosition({
@@ -1576,6 +1592,7 @@ export default function PricingPanel({
     printWindow.document.close();
     setTimeout(() => {
       printWindow.focus();
+      onPricingPrinted(new Date().toISOString());
       printWindow.print();
     }, 400);
   }
@@ -1692,6 +1709,9 @@ export default function PricingPanel({
                 {group.map((row, rowIndex) => {
                   const pricing = effectivePricing(row);
                   const editions = editionOptions(pricing.card);
+                  const matchingEditions = openPrintingRowId === row.id
+                    ? searchEditionOptions(editions, printingSearchQuery)
+                    : editions;
                   const selectedEdition = editions.find((edition) => edition.setCode === row.setCode);
                   const treatments = compatibleTreatmentOptions(pricing.card, row.setCode, row.finish, row.foilTreatment);
                   const finishChoiceOptions = finishChoices(pricing.card, row.setCode, row.treatment);
@@ -1989,16 +2009,19 @@ export default function PricingPanel({
                             setExactPrintingQuery("");
                             setHighlightedExactPrintingIndex(0);
                             if (openPrintingRowId === row.id) {
-                              setOpenPrintingRowId(null);
-                              setPrintingMenuPosition(null);
+                              closePrintingMenu();
                               return;
                             }
                             const rect = event.currentTarget.getBoundingClientRect();
                             const width = Math.max(rect.width, 300);
-                            const desiredHeight = Math.min(280, editions.length * 43 + 10);
+                            const desiredHeight = Math.min(330, Math.max(154, editions.length * 43 + 54));
                             const spaceBelow = window.innerHeight - rect.bottom - 8;
-                            const opensAbove = spaceBelow < Math.min(desiredHeight, 180) && rect.top > spaceBelow;
-                            const maxHeight = Math.max(120, Math.min(desiredHeight, opensAbove ? rect.top - 12 : spaceBelow));
+                            const spaceAbove = rect.top - 8;
+                            const opensAbove = spaceBelow < Math.min(desiredHeight, 180) && spaceAbove > spaceBelow;
+                            const availableHeight = opensAbove ? spaceAbove - 4 : spaceBelow - 4;
+                            const maxHeight = Math.max(80, Math.min(desiredHeight, availableHeight, window.innerHeight - 16));
+                            setPrintingSearchQuery("");
+                            setHighlightedPrintingIndex(0);
                             setPrintingMenuPosition({
                               rowId: row.id,
                               top: opensAbove ? Math.max(8, rect.top - maxHeight - 4) : rect.bottom + 4,
@@ -2009,7 +2032,7 @@ export default function PricingPanel({
                             setOpenPrintingRowId(row.id);
                           }}
                           aria-label={`Printing for ${row.displayName}`}
-                          aria-haspopup="listbox"
+                          aria-haspopup="dialog"
                           aria-expanded={openPrintingRowId === row.id}
                         >
                           {catalogPresentation.loading
@@ -2028,8 +2051,8 @@ export default function PricingPanel({
                             className="pricing-printing-menu"
                             data-printing-row={row.id}
                             data-printing-menu={row.id}
-                            role="listbox"
-                            aria-label={`Available printings for ${row.displayName}`}
+                            role="dialog"
+                            aria-label={`Choose Printing for ${row.displayName}`}
                             style={{
                               top: printingMenuPosition.top,
                               left: printingMenuPosition.left,
@@ -2037,26 +2060,70 @@ export default function PricingPanel({
                               maxHeight: printingMenuPosition.maxHeight,
                             }}
                           >
-                            {editions.map((edition) => (
-                              <button
-                                type="button"
-                                role="option"
-                                aria-selected={edition.setCode === row.setCode}
-                                className={edition.setCode === row.setCode ? "is-selected" : ""}
-                                key={edition.setCode}
-                                onClick={() => {
-                                  const setCode = edition.setCode;
-                                  selectPrintingSet(row, setCode);
-                                  setOpenPrintingRowId(null);
-                                  setPrintingMenuPosition(null);
-                                }}
-                                title={`${edition.setName} (${edition.releaseDate})`}
-                              >
-                                <i className={`ss ss-${edition.keyruneCode} ss-fw`} aria-hidden="true" />
-                                <span><strong>{edition.setCode}</strong><small>{edition.setName}</small></span>
-                                {edition.setCode === row.setCode && <Check size={15} aria-hidden="true" />}
-                              </button>
-                            ))}
+                            <input
+                              autoFocus
+                              type="search"
+                              value={printingSearchQuery}
+                              placeholder="Set code or set nameâ€¦"
+                              aria-label={`Search sets for ${row.displayName}`}
+                              aria-controls={`printing-results-${row.id}`}
+                              aria-activedescendant={matchingEditions[highlightedPrintingIndex]
+                                ? `printing-option-${row.id}-${highlightedPrintingIndex}`
+                                : undefined}
+                              onChange={(event) => {
+                                setPrintingSearchQuery(event.target.value);
+                                setHighlightedPrintingIndex(0);
+                              }}
+                              onKeyDown={(event) => {
+                                if (event.key === "ArrowDown") {
+                                  event.preventDefault();
+                                  setHighlightedPrintingIndex((current) => Math.min(
+                                    current + 1,
+                                    Math.max(0, matchingEditions.length - 1),
+                                  ));
+                                } else if (event.key === "ArrowUp") {
+                                  event.preventDefault();
+                                  setHighlightedPrintingIndex((current) => Math.max(0, current - 1));
+                                } else if (event.key === "Enter") {
+                                  const edition = matchingEditions[highlightedPrintingIndex] || matchingEditions[0];
+                                  if (edition) {
+                                    event.preventDefault();
+                                    choosePrintingSet(row, edition.setCode);
+                                  }
+                                } else if (event.key === "Escape") {
+                                  event.preventDefault();
+                                  closePrintingMenu();
+                                }
+                              }}
+                            />
+                            <div
+                              className="pricing-printing-results"
+                              id={`printing-results-${row.id}`}
+                              role="listbox"
+                              aria-label={`Available printings for ${row.displayName}`}
+                            >
+                              {matchingEditions.map((edition, editionIndex) => (
+                                <button
+                                  type="button"
+                                  role="option"
+                                  id={`printing-option-${row.id}-${editionIndex}`}
+                                  aria-selected={edition.setCode === row.setCode}
+                                  className={`${edition.setCode === row.setCode ? "is-selected" : ""} ${editionIndex === highlightedPrintingIndex ? "is-highlighted" : ""}`}
+                                  key={edition.setCode}
+                                  onPointerMove={() => setHighlightedPrintingIndex(editionIndex)}
+                                  onFocus={() => setHighlightedPrintingIndex(editionIndex)}
+                                  onClick={() => choosePrintingSet(row, edition.setCode)}
+                                  title={`${edition.setName} (${edition.releaseDate})`}
+                                >
+                                  <i className={`ss ss-${edition.keyruneCode} ss-fw`} aria-hidden="true" />
+                                  <span><strong>{edition.setCode}</strong><small>{edition.setName}</small></span>
+                                  {edition.setCode === row.setCode && <Check size={15} aria-hidden="true" />}
+                                </button>
+                              ))}
+                              {!matchingEditions.length && (
+                                <div className="pricing-printing-empty">No sets match â€œ{printingSearchQuery.trim()}â€.</div>
+                              )}
+                            </div>
                           </div>,
                           document.body,
                         )}
