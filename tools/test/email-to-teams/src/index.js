@@ -3,7 +3,7 @@ import { simpleParser } from "mailparser";
 import process from "node:process";
 import { processPullListText } from "../../../../src/formatter.ts";
 import { readConfig, validateConfig } from "./config.js";
-import { formatEmailForTeams, makeTeamsPayload } from "./format-email.js";
+import { emailParserOptions, formatEmailForTeams, makeTeamsPayload } from "./format-email.js";
 import { baseListIdForDate, saveFormattedList } from "./formatted-list-store.js";
 import { loadProcessedStore, saveProcessedStore } from "./processed-store.js";
 import { postToTeams } from "./teams.js";
@@ -198,7 +198,7 @@ async function inspectMailbox(config, processedIds, dryRun) {
           continue;
         }
 
-        const parsed = await simpleParser(message.source);
+        const parsed = await simpleParser(message.source, emailParserOptions);
         const key = messageKey(message, parsed);
         const formatted = formatMessage(parsed, config);
         console.log(

@@ -1,17 +1,40 @@
+// Keep genuine plain text MIME parts, but let our fallback preserve HTML table cells.
+export const emailParserOptions = { skipHtmlToText: true };
+
+function decodeHtmlEntities(value) {
+  const named = {
+    nbsp: " ", amp: "&", lt: "<", gt: ">", quot: '"', apos: "'",
+    ndash: "–", mdash: "—", lsquo: "‘", rsquo: "’", ldquo: "“", rdquo: "”",
+  };
+  return value.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (entity, name) => {
+    if (!name.startsWith("#")) return named[name.toLowerCase()] ?? entity;
+    const hexadecimal = name[1].toLowerCase() === "x";
+    const codePoint = Number.parseInt(name.slice(hexadecimal ? 2 : 1), hexadecimal ? 16 : 10);
+    return codePoint > 0 && codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)
+      ? String.fromCodePoint(codePoint)
+      : entity;
+  });
+}
+
 function plainTextFromMessage(parsed) {
   const text = parsed.text?.trim();
   if (text) return text;
 
-  return (parsed.html || "")
+  const htmlText = (parsed.html || "")
+    .replace(/\r?\n/g, " ")
+    // Cell contents can contain block markup; keep that whitespace inside the cell.
+    .replace(/<(td|th)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi, (_match, _tag, content) => (
+      `${content.replace(/<br\s*\/?>|<\/(?:p|div)>/gi, " ")}\t`
+    ))
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/\s+\n/g, "\n")
-    .replace(/\n\s+/g, "\n")
-    .replace(/[ \t]{2,}/g, " ")
-    .trim();
+    .replace(/<\/(?:tr|p|div|li)>/gi, "\n")
+    .replace(/<[^>]+>/g, "");
+
+  return decodeHtmlEntities(htmlText)
+    .split("\n")
+    .map((line) => line.replace(/[ \u00a0]+/g, " ").replace(/ *\t */g, "\t").trim())
+    .filter(Boolean)
+    .join("\n");
 }
 
 function trimQuotedReply(text) {

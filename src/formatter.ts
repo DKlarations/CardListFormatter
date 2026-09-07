@@ -316,20 +316,6 @@ function compactName(value) {
   return normalizeName(value).replace(/\s+/g, "");
 }
 
-// Gives unmatched names a readable title-case glow-up when Scryfall cannot bless us with the official name.
-function titleCaseFallback(value) {
-  const smallWords = new Set(["a", "an", "and", "at", "by", "for", "in", "of", "or", "the", "to"]);
-  return value
-    .split(/\s+/)
-    .filter(Boolean)
-    .map((word, index) => {
-      const lower = word.toLowerCase();
-      if (index > 0 && smallWords.has(lower)) return lower;
-      return lower.charAt(0).toUpperCase() + lower.slice(1);
-    })
-    .join(" ");
-}
-
 // Tiny pause helper for being polite to APIs and letting retry loops breathe so we can maybe stop breaking Scryfall so dang much :-)
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -592,34 +578,17 @@ function parseCustomerAndCards(text) {
   return { customer: normalizeCustomer(customer), cardLines };
 }
 
-// Converts shorthand like R, UC, and mythic into the rarity words the sorter expects.
+const RARITY_ALIASES: Record<string, string> = {
+  m: "mythic", mr: "mythic", mythic: "mythic", "mythic rare": "mythic",
+  r: "rare", rare: "rare",
+  u: "uncommon", uc: "uncommon", unc: "uncommon", uncommon: "uncommon",
+  c: "common", com: "common", common: "common",
+};
+
+// Converts complete rarity fields, using the same aliases as the suffix grammar.
 function parseRarity(value) {
-  const normalized = normalizeName(value);
-  if (normalized === "m" || normalized === "mr" || normalized === "mythic" || normalized === "mythic rare") return "mythic";
-  if (normalized === "r" || normalized === "rare") return "rare";
-  if (normalized === "u" || normalized === "uc" || normalized === "unc" || normalized === "uncommon") return "uncommon";
-  if (normalized === "c" || normalized === "com" || normalized === "common") return "common";
-  return "";
-}
-
-// Handles rarity combos like "C / R" without making everyone sad.
-function parseRarities(value) {
-  return value
-    .split(/[,/]+|\band\b/i)
-    .map((part) => parseRarity(part.trim()))
-    .filter(Boolean);
-}
-
-function parseMetadataRarities(value) {
-  const matches = value.match(/\b(?:mythic rare|mythic|rare|uncommon|common|mr|unc|uc|com)\b/ig) || [];
-  return matches.map((part) => parseRarity(part)).filter(Boolean);
-}
-
-function descriptorRarities(value) {
-  return Array.from(new Set([
-    ...parseRarities(value),
-    ...parseMetadataRarities(value),
-  ]));
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return Object.hasOwn(RARITY_ALIASES, normalized) ? RARITY_ALIASES[normalized] : "";
 }
 
 function splitCommaFields(value) {
@@ -627,8 +596,14 @@ function splitCommaFields(value) {
   let current = "";
   let inQuotes = false;
 
-  for (const character of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
     if (character === "\"") {
+      current += character;
+      if (inQuotes && value[index + 1] === "\"") {
+        current += value[++index];
+        continue;
+      }
       inQuotes = !inQuotes;
       continue;
     }
@@ -643,75 +618,121 @@ function splitCommaFields(value) {
   }
 
   fields.push(current.trim());
-  return fields.filter(Boolean);
+  return fields;
 }
 
-function quantityFromMetadataField(value) {
+function unquoteField(value: string) {
   const trimmed = value.trim();
-  const explicitMatch = trimmed.match(/\b(?:quantity|qty)\s*[:=]?\s*(\d+)\b/i);
-  const shorthandMatch = trimmed.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\b/i);
-  const plainMatch = trimmed.match(/^\d+$/);
-  const quantity = Number(explicitMatch?.[1] || shorthandMatch?.[1] || shorthandMatch?.[2] || plainMatch?.[0] || 0);
-
-  return Number.isFinite(quantity) && quantity > 0 ? quantity : 0;
+  return /^("|')[\s\S]*\1$/.test(trimmed)
+    ? trimmed.slice(1, -1).replace(/""/g, '"').trim()
+    : trimmed;
 }
 
-function stripQuantityMetadata(value) {
-  return value
-    .replace(/\b(?:quantity|qty)\s*[:=]?\s*\d+\b.*$/i, " ")
-    .replace(/\b(?:x\s*\d+|\d+\s*x)\b/ig, " ")
-    .replace(/\s+/g, " ")
-    .trim();
+type ParsedMetadata = {
+  rarities: string[];
+  specialRequests: string[];
+  quantity?: number;
+  setCode?: string;
+  price?: number;
+  color?: string;
+};
+
+function emptyMetadata(): ParsedMetadata {
+  return { rarities: [], specialRequests: [] };
 }
 
-function looksLikeListMetadata(value) {
-  const withoutQuantity = stripQuantityMetadata(value);
-  if (!withoutQuantity) return Boolean(quantityFromMetadataField(value));
+// A field is metadata only if EVERY part is understood. Classification and
+// extraction share this result, including field-aware single-letter rarities.
+function parseMetadataField(value: string, delimited = true): ParsedMetadata | null {
+  let remaining = unquoteField(value);
+  if (!remaining) return null;
+  const result = emptyMetadata();
+  let invalidQuantity = false;
+  remaining = remaining.replace(/(?:^|\s)(?:(?:quantity|qty)\s*[:=]?\s*(\d+)|x\s*(\d+)|(\d+)\s*x)(?=\s|$)/ig,
+    (_, explicit, prefix, suffix) => {
+      const quantity = Number(explicit || prefix || suffix);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0 || result.quantity !== undefined) invalidQuantity = true;
+      result.quantity = quantity;
+      return " ";
+    }).trim();
+  if (invalidQuantity) return null;
+  if (!remaining) return result;
 
-  const normalized = normalizeName(withoutQuantity);
-  const trimmed = withoutQuantity.trim();
-  return Boolean(
-    parseMetadataRarities(withoutQuantity).length
-      || SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(withoutQuantity))
-      || /^[<>]?\$?\d+(?:\.\d{1,2})?$/.test(trimmed)
-      || /^[A-Z0-9]{2,6}$/.test(trimmed)
-      || /^(?:yes|no|y|n)$/i.test(trimmed)
-      || /^(?:[WUBRG]{1,5}|colorless|land|doesn'?t matter|does not matter)$/i.test(trimmed)
-      || /^(?:white|blue|black|red|green|colorless|land)(\/(?:white|blue|black|red|green|colorless|land))*$/i.test(trimmed)
-      || normalized === "cheapest you have",
-  );
-}
-
-function applyCommaMetadata(line, statedRarities, specialRequests) {
-  const fields = splitCommaFields(line);
-  if (fields.length < 2) return { line, quantity: 0 };
-
-  let metadataStart = fields.length;
-  for (let index = fields.length - 1; index >= 1; index -= 1) {
-    if (!looksLikeListMetadata(fields[index])) break;
-    metadataStart = index;
+  if (/^\d+$/.test(remaining) && delimited && result.quantity === undefined) {
+    const quantity = Number(remaining);
+    return Number.isSafeInteger(quantity) && quantity > 0 ? { ...result, quantity } : null;
   }
 
-  const metadata = fields.slice(metadataStart);
-  const nameFields = fields.slice(0, metadataStart);
-  const metadataScore = metadata.filter(looksLikeListMetadata).length;
-  const isBasicLandNote = BASIC_LAND_NAMES.has(fields[0]);
-  if (!metadata.length || !nameFields.length) return { line, quantity: 0 };
-  if (!isBasicLandNote && metadataScore !== metadata.length) return { line, quantity: 0 };
+  while (remaining) {
+    const rarity = remaining.match(new RegExp(`^${rarityPattern()}(?=$|\\s|/|,)`, "i"));
+    const request = SPECIAL_REQUEST_PATTERNS.find(({ pattern }) => {
+      const match = remaining.match(pattern);
+      return match?.index === 0 && /^(?:$|\s|\/|,)/.test(remaining.slice(match[0].length));
+    });
+    const color = remaining.match(/^(?:white|blue|black|red|green|colorless|[WUBRG]{1,5})(?=$|\s|\/|,)/i);
+    const hint = remaining.match(/^[a-z]+(?=$|\s|\/|,)/i);
+    let consumed = "";
+    if (rarity) {
+      result.rarities.push(parseRarity(rarity[0]));
+      consumed = rarity[0];
+    } else if (request) {
+      result.specialRequests.push(request.label);
+      // Preserve the existing SURGE FOIL + FOIL request representation.
+      if (request.label === "SURGE FOIL") result.specialRequests.push("FOIL");
+      consumed = remaining.match(request.pattern)[0];
+    } else if (color && delimited) {
+      result.color = [result.color, color[0]].filter(Boolean).join("/");
+      consumed = color[0];
+    } else if (hint && CARD_HINTS.has(hint[0].toLowerCase()) && (delimited || hint[0].toLowerCase() === "land")) {
+      consumed = hint[0];
+    } else if (delimited && /^[<>]?\$?\d+(?:\.\d{1,2})?$/.test(remaining)) {
+      result.price = Number(remaining.replace(/^[<>]?\$?/, ""));
+      consumed = remaining;
+    } else if (delimited && /^[A-Z0-9]{2,6}(?:\s*\/\s*[A-Z0-9]{2,6})*$/.test(remaining)) {
+      const codes = remaining.split(/\s*\/\s*/);
+      if (codes.length === 1) result.setCode = codes[0];
+      consumed = remaining;
+    } else if (delimited && /^(?:yes|no|y|n|doesn'?t matter|does not matter|cheapest you have)$/i.test(remaining)) {
+      consumed = remaining;
+    } else {
+      return null;
+    }
+    remaining = remaining.slice(consumed.length);
+    if (!remaining) break;
+    remaining = remaining.replace(/^(?:\s*[,/]\s*|\s+and\s+|\s+)/i, "");
+    if (!remaining) return null; // A dangling separator is not a complete field.
+  }
+  return result;
+}
 
-  let quantity = 0;
-  metadata.forEach((field) => {
-    statedRarities.push(...parseMetadataRarities(field));
-    specialRequests.push(...extractSpecialRequests(field));
-    quantity = quantityFromMetadataField(field) || quantity;
-  });
+function mergeMetadata(target: ParsedMetadata, field: ParsedMetadata) {
+  target.rarities.push(...field.rarities);
+  target.specialRequests.push(...field.specialRequests);
+  for (const key of ["quantity", "setCode", "price", "color"] as const) {
+    if (field[key] !== undefined) Object.assign(target, { [key]: field[key] });
+  }
+}
 
-  return { line: nameFields.join(", ").trim(), quantity };
+function applyCommaMetadata(line: string, metadata: ParsedMetadata) {
+  const fields = splitCommaFields(line);
+  if (fields.length < 2) return line;
+
+  let metadataStart = fields.length;
+  const parsedFields: ParsedMetadata[] = [];
+  for (let index = fields.length - 1; index >= 1; index -= 1) {
+    const parsed = parseMetadataField(fields[index]);
+    if (!parsed) break;
+    parsedFields.unshift(parsed);
+    metadataStart = index;
+  }
+  if (!parsedFields.length) return line;
+  parsedFields.forEach((field) => mergeMetadata(metadata, field));
+  return fields.slice(0, metadataStart).join(", ").trim();
 }
 
 // Builds the regex chunk for rarity labels that may appear after card names. Hopefully this uncompasses all the options, but stuff could break it.
 function rarityPattern() {
-  return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
+  return `(?:${Object.keys(RARITY_ALIASES).sort((a, b) => b.length - a.length).join("|")})`;
 }
 
 // Recognizes price-list exports shaped like Card - Rarity - Price - Set(s) - Color.
@@ -761,15 +782,11 @@ function isStandaloneRarityLine(line) {
 
 function normalizeHorizontalTableRow(line) {
   const fields = splitTableFields(line);
-  if (fields.length < 3 || isTableHeaderLine(line)) return "";
-  if (!parseRarity(fields[1])) return "";
+  if (fields.length < 2 || isTableHeaderLine(line)) return "";
+  if (!fields.slice(1).every((field) => parseMetadataField(field))) return "";
 
-  const lastField = fields[fields.length - 1] || "";
-  const hasQuantityColumn = Boolean(quantityFromMetadataField(lastField));
-  const metadataCount = fields.slice(1).filter(looksLikeListMetadata).length;
-  if (!hasQuantityColumn && metadataCount < 2) return "";
-
-  return fields.join(", ");
+  // Keep the whole name cell together, including its internal commas/quotes.
+  return [`"${unquoteField(fields[0]).replace(/"/g, '""')}"`, ...fields.slice(1)].join(", ");
 }
 
 // Reassembles messy copied tables back into "qty card rarity" lines. This is worth a review if shit gets weird - we've had a few copy-pasted tables into teams and this should hopefully resolve it.
@@ -807,54 +824,19 @@ function normalizeCopiedTableLines(lines) {
   return normalized;
 }
 
-// Decides whether a trailing chunk is metadata, not part of a hyphenated card name.
-function isDescriptor(part) {
-  const normalized = normalizeName(part);
-  if (descriptorRarities(part).length) return true;
-  if (SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(part))) return true;
-  if (CARD_HINTS.has(normalized)) return true;
-  if (/^[wubrg]$/i.test(part)) return true;
-  if (/^(white|blue|black|red|green|colorless)(\/(white|blue|black|red|green|colorless))*$/i.test(part)) return true;
-  return false;
-}
-
-function isTrailingWordDescriptor(part) {
-  const normalized = normalizeName(part);
-  return CARD_HINTS.has(normalized)
-    || /^(white|blue|black|red|green|colorless|land)(\/(white|blue|black|red|green|colorless|land))*$/i.test(part);
-}
-
-// Collects asks like FOIL, FULL ART, BORDERLESS, and other picky-printing business.
-function extractSpecialRequests(value) {
-  return SPECIAL_REQUEST_PATTERNS
-    .filter(({ pattern }) => pattern.test(value))
-    .map(({ label }) => label);
-}
-
-// Removes special-printing words from the lookup name while keeping them for the final note.
-function stripSpecialRequests(value) {
-  return SPECIAL_REQUEST_PATTERNS.reduce(
-    (current, { pattern }) => current.replace(pattern, ""),
-    value,
-  );
-}
-
 // Tidies punctuation and pasted list leftovers before we ask Scryfall what this thing is.
 function cleanCardName(value) {
-  return value
-    .replace(/[•*]/g, "")
-    .replace(/\([^)]*\)\s*\d*$/g, "")
-    .replace(/\[[^\]]+\]\s*$/g, "")
+  const cleaned = value
+    .replace(/^[•*]\s+/, "")
     .replace(/\s+[:;=8xX][-']?[)(DPp]\s*$/g, "")
     .replace(/\s+/g, " ")
-    .trim()
-    .replace(/^["']|["']$/g, "")
     .trim();
+  return splitCommaFields(cleaned).map(unquoteField).join(", ");
 }
 
 // Produces the Scryfall lookup name after special requests have been safely peeled off.
 function cleanLookupName(value) {
-  return cleanCardName(stripSpecialRequests(value));
+  return cleanCardName(value);
 }
 
 // Spots token requests so they can skip Scryfall and go to their own little token corner.
@@ -900,6 +882,7 @@ function cleanTokenName(value) {
 
   return cleaned
     .replace(/\b(?:with|and|or|has|having)\b/ig, " ")
+    .replace(/\([\s,;/]*\)|\[[\s,;/]*\]/g, " ")
     .replace(/\s*[,.;:-]\s*$/g, "")
     .replace(/\s+/g, " ")
     .trim();
@@ -1022,47 +1005,75 @@ function pullTrailingParentheticalQuantity(line) {
 }
 
 // Reads parenthetical rarities/print asks, then removes only the useful metadata bits.
-function stripReviewParentheticals(line, statedRarities, specialRequests) {
-  return line.replace(/\(([^)]*)\)/g, (match, content) => {
-    const rarities = parseRarities(content);
-    const requests = extractSpecialRequests(content);
-    if (!rarities.length && !requests.length) return match;
-
-    statedRarities.push(...rarities);
-    specialRequests.push(...requests);
-    return "";
-  });
+function stripReviewParentheticals(line: string, metadata: ParsedMetadata) {
+  const match = line.match(/\(([^()]*)\)\s*$|\[([^\[\]]*)\]\s*$/);
+  if (!match || !match.index) return line;
+  const parsed = parseMetadataField(match[1] ?? match[2]);
+  if (!parsed) return line;
+  mergeMetadata(metadata, parsed);
+  return line.slice(0, match.index).trim();
 }
 
-// Peels off trailing descriptors like "- rare" without chopping real names (e.g. "Retro-Mutation" threw an error previously, hopefully this fixes that)
-function stripTrailingDescriptors(line, statedRarities) {
-  let remaining = line.trim();
+// Peel only complete suffixes. Try dash boundaries from right to left so earlier
+// internal punctuation never becomes an automatic end-of-name marker.
+function stripTrailingDescriptors(line: string, metadata: ParsedMetadata) {
+  let remaining = line.trim().replace(/,\s*$/, "").trim();
 
   while (remaining) {
-    const spacedDescriptorMatch = remaining.match(/^(.*?)\s{2,}(.+)$/);
-    if (spacedDescriptorMatch && isDescriptor(spacedDescriptorMatch[2])) {
-      statedRarities.push(...descriptorRarities(spacedDescriptorMatch[2]));
-      remaining = spacedDescriptorMatch[1].trim();
+    const parenthetical = stripReviewParentheticals(remaining, metadata);
+    if (parenthetical !== remaining) {
+      remaining = parenthetical;
+      continue;
+    }
+    const comma = applyCommaMetadata(remaining, metadata);
+    if (comma !== remaining) {
+      remaining = comma;
+      // The first unknown comma field established the name boundary. Don't
+      // reinterpret words within it as a second, shorter candidate.
+      if (splitCommaFields(remaining).length > 1) break;
       continue;
     }
 
-    const hyphenDescriptorMatch = remaining.match(/^(.*)\s*[-–—]\s*([^-–—]+)$/);
-    if (hyphenDescriptorMatch && isDescriptor(hyphenDescriptorMatch[2])) {
-      statedRarities.push(...descriptorRarities(hyphenDescriptorMatch[2]));
-      remaining = hyphenDescriptorMatch[1].trim();
+    // A quoted name is one name field; its contents aren't metadata.
+    if (unquoteField(remaining) !== remaining) break;
+
+    const hasCommaFields = splitCommaFields(remaining).length > 1;
+    const dashes = Array.from(remaining.matchAll(/[-–—]/g)).reverse().filter((match) => (
+      !hasCommaFields || /\s/.test(remaining[match.index - 1] || "") && /\s/.test(remaining[match.index + 1] || "")
+    ));
+    const dashSuffix = dashes.map((match) => ({
+      index: match.index,
+      parsed: parseMetadataField(remaining.slice(match.index + 1), /\s/.test(remaining[match.index - 1] || "") && /\s/.test(remaining[match.index + 1] || "")),
+    })).find(({ index, parsed }) => index > 0 && parsed);
+    if (dashSuffix) {
+      mergeMetadata(metadata, dashSuffix.parsed);
+      remaining = remaining.slice(0, dashSuffix.index).trim();
       continue;
     }
+    if (/\s[-–—]\s/.test(remaining)) break;
 
-    const wordDescriptorMatch = remaining.match(/^(.*?)\s+([A-Za-z/]+)$/);
-    if (wordDescriptorMatch && isTrailingWordDescriptor(wordDescriptorMatch[2])) {
-      remaining = wordDescriptorMatch[1].trim();
+    // Retain legacy space-separated asks, including multiword SURGE FOIL and
+    // Mythic Rare. Set codes/prices/plain numbers require a field delimiter.
+    let wordSuffix: { index: number; parsed: ParsedMetadata } | null = null;
+    for (const match of Array.from(remaining.matchAll(/\s+/g)).reverse()) {
+      if (/[:/]$/.test(remaining.slice(0, match.index))) break;
+      const parsed = parseMetadataField(remaining.slice(match.index + match[0].length), false);
+      // Bare printing asks on comma-bearing names are established input syntax.
+      // Other comma fields must pass the full-field grammar above.
+      if (hasCommaFields && (!parsed?.specialRequests.length || parsed.rarities.length || parsed.quantity !== undefined || parsed.color)) continue;
+      if (parsed) wordSuffix = { index: match.index, parsed };
+      else if (wordSuffix) break;
+    }
+    if (wordSuffix) {
+      mergeMetadata(metadata, wordSuffix.parsed);
+      remaining = remaining.slice(0, wordSuffix.index).trim();
       continue;
     }
-
     break;
   }
 
-  return remaining;
+  // Remove only an orphan final separator, never internal punctuation.
+  return remaining.replace(/\s*,\s*$/, "").trim();
 }
 
 // Converts one raw pasted line into a structured card/token/basic-land request.
@@ -1089,40 +1100,19 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
     };
   }
 
-  const statedRarities = [];
+  const metadata = emptyMetadata();
   const structuredPriceRow = parseStructuredPriceRow(line);
-  let requestedSetCode = "";
   if (structuredPriceRow) {
     line = structuredPriceRow.name;
-    statedRarities.push(structuredPriceRow.rarity);
-    requestedSetCode = structuredPriceRow.setCode;
+    metadata.rarities.push(structuredPriceRow.rarity);
+    metadata.setCode = structuredPriceRow.setCode;
   }
 
-  const specialRequests = extractSpecialRequests(line);
   const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
   line = parentheticalQuantity.line;
   quantity = parentheticalQuantity.quantity || quantity;
-  line = stripReviewParentheticals(line, statedRarities, specialRequests).trim();
-  const commaMetadata = applyCommaMetadata(line, statedRarities, specialRequests);
-  line = commaMetadata.line.trim();
-  quantity = commaMetadata.quantity || quantity;
-
-  const trailingQuantityMatch = line.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\s*$/i);
-  if (trailingQuantityMatch) {
-    const trailingQuantity = Number(trailingQuantityMatch[1] || trailingQuantityMatch[2]);
-    if (Number.isFinite(trailingQuantity) && trailingQuantity > 0) {
-      quantity = trailingQuantity;
-      line = line.slice(0, trailingQuantityMatch.index).trim();
-    }
-  }
-
-  line = stripTrailingDescriptors(line, statedRarities);
-
-  const trailingRaritiesMatch = line.match(new RegExp(`\\s+(${rarityPattern()}(?:\\s*(?:/|,|and)\\s*${rarityPattern()})*)$`, "i"));
-  if (trailingRaritiesMatch) {
-    statedRarities.push(...parseRarities(trailingRaritiesMatch[1]));
-    line = line.slice(0, trailingRaritiesMatch.index).trim();
-  }
+  if (!structuredPriceRow) line = stripTrailingDescriptors(line, metadata);
+  quantity = metadata.quantity || quantity;
 
   let inputName = cleanLookupName(line);
   if (!inputName) return null;
@@ -1132,15 +1122,15 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
   if (isToken) inputName = applyTokenColors(cleanTokenName(inputName), tokenColors);
   if (!inputName) return null;
 
-  const uniqueSpecialRequests = Array.from(new Set(specialRequests));
+  const uniqueSpecialRequests = Array.from(new Set(metadata.specialRequests));
   return {
     index,
     original: rawLine,
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
     inputName,
-    statedRarities: Array.from(new Set(statedRarities)),
+    statedRarities: Array.from(new Set(metadata.rarities)),
     specialRequests: uniqueSpecialRequests,
-    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, requestedSetCode),
+    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, metadata.setCode),
     lookupKey: isToken ? normalizeName(`${inputName} ${tokenDetails.join(" ")}`) : normalizeName(inputName),
     ...(isToken ? {
       status: "found",
@@ -1719,9 +1709,9 @@ function rarityBucket(item) {
   return "low";
 }
 
-// Picks the official card name when we have it, otherwise makes the input not look like bootysauce
+// Use provider spelling when resolved; otherwise preserve the customer's name.
 function displayName(item) {
-  return item.card?.name || titleCaseFallback(item.inputName);
+  return item.card?.name || item.inputName;
 }
 
 // Adds the requested reskin name in parentheses after the real card name. So far this is working fine, but I do have concerns with it & scryfall's output

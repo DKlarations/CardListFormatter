@@ -65,9 +65,10 @@ button {
 }
 
 .formatter:not(.test-page) .app-header {
+  --header-logo-size: 126px;
   width: min(840px, 100%);
-  min-height: 104px;
-  grid-template-columns: 104px minmax(0, 1fr) 104px;
+  min-height: var(--header-logo-size);
+  grid-template-columns: var(--header-logo-size) minmax(0, 1fr) var(--header-logo-size);
   gap: 14px;
   justify-self: center;
 }
@@ -93,14 +94,10 @@ button {
   object-fit: contain;
 }
 
-.formatter:not(.test-page) .logo-slot {
-  width: 104px;
-  height: 104px;
-}
-
+.formatter:not(.test-page) .logo-slot,
 .formatter:not(.test-page) .logo-slot img {
-  width: 104px;
-  height: 104px;
+  width: var(--header-logo-size);
+  height: var(--header-logo-size);
 }
 
 .eyebrow,
@@ -2277,6 +2274,19 @@ h2 {
 
   .app-header > div:last-child {
     text-align: left;
+  }
+
+  .formatter:not(.test-page) .app-header {
+    --header-logo-size: clamp(40px, 10vw, 72px);
+    display: grid;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .formatter:not(.test-page) .title-row {
+    max-width: 100%;
+    flex-wrap: wrap;
+    row-gap: 0;
   }
 
   .actions {

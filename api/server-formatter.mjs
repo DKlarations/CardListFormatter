@@ -316,14 +316,6 @@ function normalizeName(value) {
 function compactName(value) {
   return normalizeName(value).replace(/\s+/g, "");
 }
-function titleCaseFallback(value) {
-  const smallWords = /* @__PURE__ */ new Set(["a", "an", "and", "at", "by", "for", "in", "of", "or", "the", "to"]);
-  return value.split(/\s+/).filter(Boolean).map((word, index) => {
-    const lower = word.toLowerCase();
-    if (index > 0 && smallWords.has(lower)) return lower;
-    return lower.charAt(0).toUpperCase() + lower.slice(1);
-  }).join(" ");
-}
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -514,33 +506,37 @@ function parseCustomerAndCards(text) {
   customer.contact = customer.contact || emailHeaderContact.contact;
   return { customer: normalizeCustomer(customer), cardLines };
 }
+var RARITY_ALIASES = {
+  m: "mythic",
+  mr: "mythic",
+  mythic: "mythic",
+  "mythic rare": "mythic",
+  r: "rare",
+  rare: "rare",
+  u: "uncommon",
+  uc: "uncommon",
+  unc: "uncommon",
+  uncommon: "uncommon",
+  c: "common",
+  com: "common",
+  common: "common"
+};
 function parseRarity(value) {
-  const normalized = normalizeName(value);
-  if (normalized === "m" || normalized === "mr" || normalized === "mythic" || normalized === "mythic rare") return "mythic";
-  if (normalized === "r" || normalized === "rare") return "rare";
-  if (normalized === "u" || normalized === "uc" || normalized === "unc" || normalized === "uncommon") return "uncommon";
-  if (normalized === "c" || normalized === "com" || normalized === "common") return "common";
-  return "";
-}
-function parseRarities(value) {
-  return value.split(/[,/]+|\band\b/i).map((part) => parseRarity(part.trim())).filter(Boolean);
-}
-function parseMetadataRarities(value) {
-  const matches = value.match(/\b(?:mythic rare|mythic|rare|uncommon|common|mr|unc|uc|com)\b/ig) || [];
-  return matches.map((part) => parseRarity(part)).filter(Boolean);
-}
-function descriptorRarities(value) {
-  return Array.from(/* @__PURE__ */ new Set([
-    ...parseRarities(value),
-    ...parseMetadataRarities(value)
-  ]));
+  const normalized = value.trim().toLowerCase().replace(/\s+/g, " ");
+  return Object.hasOwn(RARITY_ALIASES, normalized) ? RARITY_ALIASES[normalized] : "";
 }
 function splitCommaFields(value) {
   const fields = [];
   let current = "";
   let inQuotes = false;
-  for (const character of value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
     if (character === '"') {
+      current += character;
+      if (inQuotes && value[index + 1] === '"') {
+        current += value[++index];
+        continue;
+      }
       inQuotes = !inQuotes;
       continue;
     }
@@ -552,52 +548,99 @@ function splitCommaFields(value) {
     current += character;
   }
   fields.push(current.trim());
-  return fields.filter(Boolean);
+  return fields;
 }
-function quantityFromMetadataField(value) {
+function unquoteField(value) {
   const trimmed = value.trim();
-  const explicitMatch = trimmed.match(/\b(?:quantity|qty)\s*[:=]?\s*(\d+)\b/i);
-  const shorthandMatch = trimmed.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\b/i);
-  const plainMatch = trimmed.match(/^\d+$/);
-  const quantity = Number(explicitMatch?.[1] || shorthandMatch?.[1] || shorthandMatch?.[2] || plainMatch?.[0] || 0);
-  return Number.isFinite(quantity) && quantity > 0 ? quantity : 0;
+  return /^("|')[\s\S]*\1$/.test(trimmed) ? trimmed.slice(1, -1).replace(/""/g, '"').trim() : trimmed;
 }
-function stripQuantityMetadata(value) {
-  return value.replace(/\b(?:quantity|qty)\s*[:=]?\s*\d+\b.*$/i, " ").replace(/\b(?:x\s*\d+|\d+\s*x)\b/ig, " ").replace(/\s+/g, " ").trim();
+function emptyMetadata() {
+  return { rarities: [], specialRequests: [] };
 }
-function looksLikeListMetadata(value) {
-  const withoutQuantity = stripQuantityMetadata(value);
-  if (!withoutQuantity) return Boolean(quantityFromMetadataField(value));
-  const normalized = normalizeName(withoutQuantity);
-  const trimmed = withoutQuantity.trim();
-  return Boolean(
-    parseMetadataRarities(withoutQuantity).length || SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(withoutQuantity)) || /^[<>]?\$?\d+(?:\.\d{1,2})?$/.test(trimmed) || /^[A-Z0-9]{2,6}$/.test(trimmed) || /^(?:yes|no|y|n)$/i.test(trimmed) || /^(?:[WUBRG]{1,5}|colorless|land|doesn'?t matter|does not matter)$/i.test(trimmed) || /^(?:white|blue|black|red|green|colorless|land)(\/(?:white|blue|black|red|green|colorless|land))*$/i.test(trimmed) || normalized === "cheapest you have"
-  );
+function parseMetadataField(value, delimited = true) {
+  let remaining = unquoteField(value);
+  if (!remaining) return null;
+  const result = emptyMetadata();
+  let invalidQuantity = false;
+  remaining = remaining.replace(
+    /(?:^|\s)(?:(?:quantity|qty)\s*[:=]?\s*(\d+)|x\s*(\d+)|(\d+)\s*x)(?=\s|$)/ig,
+    (_, explicit, prefix, suffix) => {
+      const quantity = Number(explicit || prefix || suffix);
+      if (!Number.isSafeInteger(quantity) || quantity <= 0 || result.quantity !== void 0) invalidQuantity = true;
+      result.quantity = quantity;
+      return " ";
+    }
+  ).trim();
+  if (invalidQuantity) return null;
+  if (!remaining) return result;
+  if (/^\d+$/.test(remaining) && delimited && result.quantity === void 0) {
+    const quantity = Number(remaining);
+    return Number.isSafeInteger(quantity) && quantity > 0 ? { ...result, quantity } : null;
+  }
+  while (remaining) {
+    const rarity = remaining.match(new RegExp(`^${rarityPattern()}(?=$|\\s|/|,)`, "i"));
+    const request = SPECIAL_REQUEST_PATTERNS.find(({ pattern }) => {
+      const match = remaining.match(pattern);
+      return match?.index === 0 && /^(?:$|\s|\/|,)/.test(remaining.slice(match[0].length));
+    });
+    const color = remaining.match(/^(?:white|blue|black|red|green|colorless|[WUBRG]{1,5})(?=$|\s|\/|,)/i);
+    const hint = remaining.match(/^[a-z]+(?=$|\s|\/|,)/i);
+    let consumed = "";
+    if (rarity) {
+      result.rarities.push(parseRarity(rarity[0]));
+      consumed = rarity[0];
+    } else if (request) {
+      result.specialRequests.push(request.label);
+      if (request.label === "SURGE FOIL") result.specialRequests.push("FOIL");
+      consumed = remaining.match(request.pattern)[0];
+    } else if (color && delimited) {
+      result.color = [result.color, color[0]].filter(Boolean).join("/");
+      consumed = color[0];
+    } else if (hint && CARD_HINTS.has(hint[0].toLowerCase()) && (delimited || hint[0].toLowerCase() === "land")) {
+      consumed = hint[0];
+    } else if (delimited && /^[<>]?\$?\d+(?:\.\d{1,2})?$/.test(remaining)) {
+      result.price = Number(remaining.replace(/^[<>]?\$?/, ""));
+      consumed = remaining;
+    } else if (delimited && /^[A-Z0-9]{2,6}(?:\s*\/\s*[A-Z0-9]{2,6})*$/.test(remaining)) {
+      const codes = remaining.split(/\s*\/\s*/);
+      if (codes.length === 1) result.setCode = codes[0];
+      consumed = remaining;
+    } else if (delimited && /^(?:yes|no|y|n|doesn'?t matter|does not matter|cheapest you have)$/i.test(remaining)) {
+      consumed = remaining;
+    } else {
+      return null;
+    }
+    remaining = remaining.slice(consumed.length);
+    if (!remaining) break;
+    remaining = remaining.replace(/^(?:\s*[,/]\s*|\s+and\s+|\s+)/i, "");
+    if (!remaining) return null;
+  }
+  return result;
 }
-function applyCommaMetadata(line, statedRarities, specialRequests) {
+function mergeMetadata(target, field) {
+  target.rarities.push(...field.rarities);
+  target.specialRequests.push(...field.specialRequests);
+  for (const key of ["quantity", "setCode", "price", "color"]) {
+    if (field[key] !== void 0) Object.assign(target, { [key]: field[key] });
+  }
+}
+function applyCommaMetadata(line, metadata) {
   const fields = splitCommaFields(line);
-  if (fields.length < 2) return { line, quantity: 0 };
+  if (fields.length < 2) return line;
   let metadataStart = fields.length;
+  const parsedFields = [];
   for (let index = fields.length - 1; index >= 1; index -= 1) {
-    if (!looksLikeListMetadata(fields[index])) break;
+    const parsed = parseMetadataField(fields[index]);
+    if (!parsed) break;
+    parsedFields.unshift(parsed);
     metadataStart = index;
   }
-  const metadata = fields.slice(metadataStart);
-  const nameFields = fields.slice(0, metadataStart);
-  const metadataScore = metadata.filter(looksLikeListMetadata).length;
-  const isBasicLandNote = BASIC_LAND_NAMES.has(fields[0]);
-  if (!metadata.length || !nameFields.length) return { line, quantity: 0 };
-  if (!isBasicLandNote && metadataScore !== metadata.length) return { line, quantity: 0 };
-  let quantity = 0;
-  metadata.forEach((field) => {
-    statedRarities.push(...parseMetadataRarities(field));
-    specialRequests.push(...extractSpecialRequests(field));
-    quantity = quantityFromMetadataField(field) || quantity;
-  });
-  return { line: nameFields.join(", ").trim(), quantity };
+  if (!parsedFields.length) return line;
+  parsedFields.forEach((field) => mergeMetadata(metadata, field));
+  return fields.slice(0, metadataStart).join(", ").trim();
 }
 function rarityPattern() {
-  return "(?:mythic rare|mythic|rare|uncommon|common|mr|unc|com|uc|m|r|u|c)";
+  return `(?:${Object.keys(RARITY_ALIASES).sort((a, b) => b.length - a.length).join("|")})`;
 }
 function parseStructuredPriceRow(line) {
   const match = line.match(new RegExp(
@@ -628,13 +671,9 @@ function isStandaloneRarityLine(line) {
 }
 function normalizeHorizontalTableRow(line) {
   const fields = splitTableFields(line);
-  if (fields.length < 3 || isTableHeaderLine(line)) return "";
-  if (!parseRarity(fields[1])) return "";
-  const lastField = fields[fields.length - 1] || "";
-  const hasQuantityColumn = Boolean(quantityFromMetadataField(lastField));
-  const metadataCount = fields.slice(1).filter(looksLikeListMetadata).length;
-  if (!hasQuantityColumn && metadataCount < 2) return "";
-  return fields.join(", ");
+  if (fields.length < 2 || isTableHeaderLine(line)) return "";
+  if (!fields.slice(1).every((field) => parseMetadataField(field))) return "";
+  return [`"${unquoteField(fields[0]).replace(/"/g, '""')}"`, ...fields.slice(1)].join(", ");
 }
 function normalizeCopiedTableLines(lines) {
   const normalized = [];
@@ -656,33 +695,12 @@ function normalizeCopiedTableLines(lines) {
   }
   return normalized;
 }
-function isDescriptor(part) {
-  const normalized = normalizeName(part);
-  if (descriptorRarities(part).length) return true;
-  if (SPECIAL_REQUEST_PATTERNS.some(({ pattern }) => pattern.test(part))) return true;
-  if (CARD_HINTS.has(normalized)) return true;
-  if (/^[wubrg]$/i.test(part)) return true;
-  if (/^(white|blue|black|red|green|colorless)(\/(white|blue|black|red|green|colorless))*$/i.test(part)) return true;
-  return false;
-}
-function isTrailingWordDescriptor(part) {
-  const normalized = normalizeName(part);
-  return CARD_HINTS.has(normalized) || /^(white|blue|black|red|green|colorless|land)(\/(white|blue|black|red|green|colorless|land))*$/i.test(part);
-}
-function extractSpecialRequests(value) {
-  return SPECIAL_REQUEST_PATTERNS.filter(({ pattern }) => pattern.test(value)).map(({ label }) => label);
-}
-function stripSpecialRequests(value) {
-  return SPECIAL_REQUEST_PATTERNS.reduce(
-    (current, { pattern }) => current.replace(pattern, ""),
-    value
-  );
-}
 function cleanCardName(value) {
-  return value.replace(/[•*]/g, "").replace(/\([^)]*\)\s*\d*$/g, "").replace(/\[[^\]]+\]\s*$/g, "").replace(/\s+[:;=8xX][-']?[)(DPp]\s*$/g, "").replace(/\s+/g, " ").trim().replace(/^["']|["']$/g, "").trim();
+  const cleaned = value.replace(/^[•*]\s+/, "").replace(/\s+[:;=8xX][-']?[)(DPp]\s*$/g, "").replace(/\s+/g, " ").trim();
+  return splitCommaFields(cleaned).map(unquoteField).join(", ");
 }
 function cleanLookupName(value) {
-  return cleanCardName(stripSpecialRequests(value));
+  return cleanCardName(value);
 }
 function isTokenRequestName(value) {
   return /\btoken\b/i.test(value);
@@ -708,7 +726,7 @@ function cleanTokenName(value) {
   TOKEN_COLOR_PATTERNS.forEach(([, pattern]) => {
     cleaned = cleaned.replace(pattern, " ");
   });
-  return cleaned.replace(/\b(?:with|and|or|has|having)\b/ig, " ").replace(/\s*[,.;:-]\s*$/g, "").replace(/\s+/g, " ").trim();
+  return cleaned.replace(/\b(?:with|and|or|has|having)\b/ig, " ").replace(/\([\s,;/]*\)|\[[\s,;/]*\]/g, " ").replace(/\s*[,.;:-]\s*$/g, "").replace(/\s+/g, " ").trim();
 }
 function applyTokenColors(name, colors = []) {
   if (!colors.length) return name;
@@ -788,39 +806,57 @@ function pullTrailingParentheticalQuantity(line) {
     quantity
   };
 }
-function stripReviewParentheticals(line, statedRarities, specialRequests) {
-  return line.replace(/\(([^)]*)\)/g, (match, content) => {
-    const rarities = parseRarities(content);
-    const requests = extractSpecialRequests(content);
-    if (!rarities.length && !requests.length) return match;
-    statedRarities.push(...rarities);
-    specialRequests.push(...requests);
-    return "";
-  });
+function stripReviewParentheticals(line, metadata) {
+  const match = line.match(/\(([^()]*)\)\s*$|\[([^\[\]]*)\]\s*$/);
+  if (!match || !match.index) return line;
+  const parsed = parseMetadataField(match[1] ?? match[2]);
+  if (!parsed) return line;
+  mergeMetadata(metadata, parsed);
+  return line.slice(0, match.index).trim();
 }
-function stripTrailingDescriptors(line, statedRarities) {
-  let remaining = line.trim();
+function stripTrailingDescriptors(line, metadata) {
+  let remaining = line.trim().replace(/,\s*$/, "").trim();
   while (remaining) {
-    const spacedDescriptorMatch = remaining.match(/^(.*?)\s{2,}(.+)$/);
-    if (spacedDescriptorMatch && isDescriptor(spacedDescriptorMatch[2])) {
-      statedRarities.push(...descriptorRarities(spacedDescriptorMatch[2]));
-      remaining = spacedDescriptorMatch[1].trim();
+    const parenthetical = stripReviewParentheticals(remaining, metadata);
+    if (parenthetical !== remaining) {
+      remaining = parenthetical;
       continue;
     }
-    const hyphenDescriptorMatch = remaining.match(/^(.*)\s*[-–—]\s*([^-–—]+)$/);
-    if (hyphenDescriptorMatch && isDescriptor(hyphenDescriptorMatch[2])) {
-      statedRarities.push(...descriptorRarities(hyphenDescriptorMatch[2]));
-      remaining = hyphenDescriptorMatch[1].trim();
+    const comma = applyCommaMetadata(remaining, metadata);
+    if (comma !== remaining) {
+      remaining = comma;
+      if (splitCommaFields(remaining).length > 1) break;
       continue;
     }
-    const wordDescriptorMatch = remaining.match(/^(.*?)\s+([A-Za-z/]+)$/);
-    if (wordDescriptorMatch && isTrailingWordDescriptor(wordDescriptorMatch[2])) {
-      remaining = wordDescriptorMatch[1].trim();
+    if (unquoteField(remaining) !== remaining) break;
+    const hasCommaFields = splitCommaFields(remaining).length > 1;
+    const dashes = Array.from(remaining.matchAll(/[-–—]/g)).reverse().filter((match) => !hasCommaFields || /\s/.test(remaining[match.index - 1] || "") && /\s/.test(remaining[match.index + 1] || ""));
+    const dashSuffix = dashes.map((match) => ({
+      index: match.index,
+      parsed: parseMetadataField(remaining.slice(match.index + 1), /\s/.test(remaining[match.index - 1] || "") && /\s/.test(remaining[match.index + 1] || ""))
+    })).find(({ index, parsed }) => index > 0 && parsed);
+    if (dashSuffix) {
+      mergeMetadata(metadata, dashSuffix.parsed);
+      remaining = remaining.slice(0, dashSuffix.index).trim();
+      continue;
+    }
+    if (/\s[-–—]\s/.test(remaining)) break;
+    let wordSuffix = null;
+    for (const match of Array.from(remaining.matchAll(/\s+/g)).reverse()) {
+      if (/[:/]$/.test(remaining.slice(0, match.index))) break;
+      const parsed = parseMetadataField(remaining.slice(match.index + match[0].length), false);
+      if (hasCommaFields && (!parsed?.specialRequests.length || parsed.rarities.length || parsed.quantity !== void 0 || parsed.color)) continue;
+      if (parsed) wordSuffix = { index: match.index, parsed };
+      else if (wordSuffix) break;
+    }
+    if (wordSuffix) {
+      mergeMetadata(metadata, wordSuffix.parsed);
+      remaining = remaining.slice(0, wordSuffix.index).trim();
       continue;
     }
     break;
   }
-  return remaining;
+  return remaining.replace(/\s*,\s*$/, "").trim();
 }
 function parseCardLine(rawLine, index) {
   let line = rawLine.trim().replace(/^[-•]\s*/, "");
@@ -842,36 +878,18 @@ function parseCardLine(rawLine, index) {
       lookupKey: normalizeName(landName)
     };
   }
-  const statedRarities = [];
+  const metadata = emptyMetadata();
   const structuredPriceRow = parseStructuredPriceRow(line);
-  let requestedSetCode = "";
   if (structuredPriceRow) {
     line = structuredPriceRow.name;
-    statedRarities.push(structuredPriceRow.rarity);
-    requestedSetCode = structuredPriceRow.setCode;
+    metadata.rarities.push(structuredPriceRow.rarity);
+    metadata.setCode = structuredPriceRow.setCode;
   }
-  const specialRequests = extractSpecialRequests(line);
   const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
   line = parentheticalQuantity.line;
   quantity = parentheticalQuantity.quantity || quantity;
-  line = stripReviewParentheticals(line, statedRarities, specialRequests).trim();
-  const commaMetadata = applyCommaMetadata(line, statedRarities, specialRequests);
-  line = commaMetadata.line.trim();
-  quantity = commaMetadata.quantity || quantity;
-  const trailingQuantityMatch = line.match(/\b(?:x\s*(\d+)|(\d+)\s*x)\s*$/i);
-  if (trailingQuantityMatch) {
-    const trailingQuantity = Number(trailingQuantityMatch[1] || trailingQuantityMatch[2]);
-    if (Number.isFinite(trailingQuantity) && trailingQuantity > 0) {
-      quantity = trailingQuantity;
-      line = line.slice(0, trailingQuantityMatch.index).trim();
-    }
-  }
-  line = stripTrailingDescriptors(line, statedRarities);
-  const trailingRaritiesMatch = line.match(new RegExp(`\\s+(${rarityPattern()}(?:\\s*(?:/|,|and)\\s*${rarityPattern()})*)$`, "i"));
-  if (trailingRaritiesMatch) {
-    statedRarities.push(...parseRarities(trailingRaritiesMatch[1]));
-    line = line.slice(0, trailingRaritiesMatch.index).trim();
-  }
+  if (!structuredPriceRow) line = stripTrailingDescriptors(line, metadata);
+  quantity = metadata.quantity || quantity;
   let inputName = cleanLookupName(line);
   if (!inputName) return null;
   const isToken = isTokenRequestName(inputName);
@@ -879,15 +897,15 @@ function parseCardLine(rawLine, index) {
   const tokenColors = isToken ? extractTokenColors(rawLine) : [];
   if (isToken) inputName = applyTokenColors(cleanTokenName(inputName), tokenColors);
   if (!inputName) return null;
-  const uniqueSpecialRequests = Array.from(new Set(specialRequests));
+  const uniqueSpecialRequests = Array.from(new Set(metadata.specialRequests));
   return {
     index,
     original: rawLine,
     quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
     inputName,
-    statedRarities: Array.from(new Set(statedRarities)),
+    statedRarities: Array.from(new Set(metadata.rarities)),
     specialRequests: uniqueSpecialRequests,
-    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, requestedSetCode),
+    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, metadata.setCode),
     lookupKey: isToken ? normalizeName(`${inputName} ${tokenDetails.join(" ")}`) : normalizeName(inputName),
     ...isToken ? {
       status: "found",
@@ -1319,7 +1337,7 @@ function rarityBucket(item) {
   return "low";
 }
 function displayName(item) {
-  return item.card?.name || titleCaseFallback(item.inputName);
+  return item.card?.name || item.inputName;
 }
 function alternateTitleNote(item) {
   return item.alternateTitle ? ` (${item.alternateTitle})` : "";

@@ -4,6 +4,7 @@
   "version": "0.0.1",
   "type": "module",
   "scripts": {
+    "test": "node --test test/*.test.js",
     "once": "tsx src/index.js --once",
     "watch": "tsx src/index.js",
     "dry-run": "tsx src/index.js --once --dry-run",
