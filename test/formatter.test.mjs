@@ -8,7 +8,7 @@ import {
   parsePullList,
   processPullListText,
   resolveCardNames,
-} from "../api/server-formatter.mjs";
+} from "../server/generated/server-formatter.mjs";
 
 const structuredPriceList = `Contact
 Name - Aaron Greene

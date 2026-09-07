@@ -1,4 +1,4 @@
-import { compactFormatterItems, processPullListText } from "./server-formatter.mjs";
+import { compactFormatterItems, processPullListText } from "../server/generated/server-formatter.mjs";
 import { initialTeamsCardPayload } from "../shared/pull-list-teams-card.mjs";
 
 function env(name: string, fallback = "") {

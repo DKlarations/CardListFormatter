@@ -54,7 +54,7 @@ import {
   shouldShowPricingVariant,
   selectManualPricingSet,
   normalizePricingAssistantRow,
-} from "../api/server-pricing.mjs";
+} from "../server/generated/server-pricing.mjs";
 
 const { foilTreatmentForRawPrinting, treatmentsForRawPrinting } = await importBundledModule(
   "src/printing-normalization.ts",

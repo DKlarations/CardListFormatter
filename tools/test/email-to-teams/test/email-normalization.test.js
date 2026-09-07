@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { simpleParser } from "mailparser";
-import { parsePullList } from "../../../../api/server-formatter.mjs";
+import { parsePullList } from "../../../../server/generated/server-formatter.mjs";
 import { emailParserOptions, formatEmailForTeams } from "../src/format-email.js";
 
 function message(contentType, body) {

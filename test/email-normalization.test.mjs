@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { parsePullList, processPullListText } from "../api/server-formatter.mjs";
+import { parsePullList, processPullListText } from "../server/generated/server-formatter.mjs";
 import { emailBodyText, formatEmailForTeams } from "../tools/test/email-to-teams/src/format-email.js";
 
 const names = ["Ajani, Mentor of Heroes", "Death-Greeter's Champion"];

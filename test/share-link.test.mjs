@@ -7,7 +7,7 @@ import {
   initializeFoundPricingSelection,
   priceForSelection,
   pricingRowWarningState,
-} from "../api/server-pricing.mjs";
+} from "../server/generated/server-pricing.mjs";
 
 const { decodeFormatterHash, encodeFormattedHash } = await importBundledModule("src/share-link.ts", "share-link");
 const { normalizePayload } = await importBundledModule("api/formatted-lists.ts", "formatted-lists");

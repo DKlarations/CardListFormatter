@@ -1,6 +1,8 @@
 # Email jobs and original Teams card status — implementation report
 
-September 7, 2026. Implemented and validated locally. **Not committed, pushed, deployed, or tested against live Teams.** Existing Microsoft Graph work was preserved.
+> **Historical implementation-session report.** The implementation below subsequently entered `main` in commit `071cc03`. Repository cleanup verification on September 7, 2026 found that its Vercel deployment failed because it exceeded the Hobby plan's 12-function limit; the canonical production alias still served commit `878647f`. The session's local checks and configuration observations below describe that earlier implementation session, not current deployment proof. Current architecture and release findings are recorded in [the repository cleanup audit](../REPOSITORY-CLEANUP-AUDIT.md), and current operational instructions are in [the Teams workflow guide](../TEAMS-WORKFLOW.md).
+
+**Status as of the original implementation session, before commit `071cc03`:** September 7, 2026. Implemented and validated locally. Not yet committed, pushed, deployed, or tested against live Teams. Existing Microsoft Graph work was preserved.
 
 ## Check Email Now audit
 
@@ -30,7 +32,7 @@ On missing configuration/identity or failed update, timestamps remain saved, dia
 
 ## Derek's remaining setup
 
-Exact numbered workflow actions, expressions, sanitized requests/callbacks/responses, ownership instructions, all environment variables and defaults, troubleshooting, and controlled live verification steps are in [TEAMS-WORKFLOW.md](TEAMS-WORKFLOW.md).
+Exact numbered workflow actions, expressions, sanitized requests/callbacks/responses, ownership instructions, all environment variables and defaults, troubleshooting, and controlled live verification steps are in [TEAMS-WORKFLOW.md](../TEAMS-WORKFLOW.md).
 
 The Vercel Production audit found these missing:
 

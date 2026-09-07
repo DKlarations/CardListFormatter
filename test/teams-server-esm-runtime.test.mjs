@@ -10,7 +10,7 @@ import ts from "typescript";
 import { transformSync } from "esbuild";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const entries = ["api/teams-actions.ts", "api/pull-list-jobs.ts"];
+const entries = ["api/teams-actions.ts", "api/pull-list-jobs.ts", "api/send-test-teams.ts"];
 
 function moduleSpecifiers(source, filename) {
   const tree = ts.createSourceFile(filename, source, ts.ScriptTarget.Latest, true);
@@ -63,6 +63,7 @@ test("Teams and saved-job server graphs use explicit resolvable ESM runtime impo
   assert.ok(modules.has(resolve(root, "api/_teams-sync.ts")));
   assert.ok(modules.has(resolve(root, "shared/pull-list-teams-card.mjs")));
   assert.ok(modules.has(resolve(root, "src/pull-list-job.ts")));
+  assert.ok(modules.has(resolve(root, "server/generated/server-formatter.mjs")));
 });
 
 test("Teams and saved-job handlers import and execute validation under native unbundled Node ESM", async (t) => {
@@ -84,8 +85,12 @@ test("Teams and saved-job handlers import and execute validation under native un
     globalThis.fetch = async () => { throw new Error("External requests are forbidden in ESM smoke tests."); };
     const teams = await import(${JSON.stringify(pathToFileURL(join(directory, "api/teams-actions.js")).href)});
     const jobs = await import(${JSON.stringify(pathToFileURL(join(directory, "api/pull-list-jobs.js")).href)});
+    const diagnostic = await import(${JSON.stringify(pathToFileURL(join(directory, "api/send-test-teams.js")).href)});
     for (const name of ["GET", "POST"]) assert.equal(typeof teams[name], "function");
     for (const name of ["GET", "POST", "PUT", "DELETE"]) assert.equal(typeof jobs[name], "function");
+    for (const name of ["POST", "OPTIONS"]) assert.equal(typeof diagnostic[name], "function");
+    const diagnosticHandler = diagnostic.createSendTestTeamsHandler({ readEnv: () => "" });
+    assert.equal((await diagnosticHandler(new Request("https://pullsmith.example/api/send-test-teams", { method: "POST" }))).status, 500);
     const noStore = () => { throw new Error("Validation must not access Redis."); };
     const teamsHandler = teams.createTeamsActionHandlers({ env: {}, getStore: noStore });
     assert.equal((await teamsHandler.GET(new Request("https://pullsmith.example/api/teams-actions"))).status, 404);
