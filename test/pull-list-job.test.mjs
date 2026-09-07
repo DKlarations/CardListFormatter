@@ -7,40 +7,7 @@ const repository = await importBundledModule("api/_pull-list-job-repository.ts",
 const jobApi = await importBundledModule("api/pull-list-jobs.ts", "pull-list-jobs-api");
 const jobClient = await importBundledModule("src/pull-list-job-client.ts", "pull-list-job-client");
 
-class FakeRedis {
-  values = new Map();
-  ttls = new Map();
-  zsets = new Map();
-
-  async get(key) { return this.values.get(key) ?? null; }
-  async set(key, value, options = {}) {
-    if (options.nx && this.values.has(key)) return null;
-    this.values.set(key, structuredClone(value));
-    if (options.ex) this.ttls.set(key, options.ex);
-    return "OK";
-  }
-  async del(...keys) {
-    keys.forEach((key) => { this.values.delete(key); this.ttls.delete(key); });
-    return keys.length;
-  }
-  async expire(key, seconds) { this.ttls.set(key, seconds); return 1; }
-  async zadd(key, { score, member }) {
-    const entries = this.zsets.get(key) || new Map();
-    entries.set(member, score);
-    this.zsets.set(key, entries);
-    return 1;
-  }
-  async zrange(key, start, stop, options = {}) {
-    const entries = Array.from(this.zsets.get(key)?.entries() || []);
-    entries.sort((left, right) => options.rev ? right[1] - left[1] : left[1] - right[1]);
-    return entries.slice(start, stop + 1).map(([member]) => member);
-  }
-  async zrem(key, ...members) {
-    const entries = this.zsets.get(key);
-    members.forEach((member) => entries?.delete(member));
-    return members.length;
-  }
-}
+import { FakePullListRedis as FakeRedis } from "./fake-pull-list-redis.mjs";
 
 function draft({ quantity = 1, setCode = "", customerName = "Jane Doe", price = null } = {}) {
   return {
@@ -472,4 +439,298 @@ test("Copy Link URL construction strips private job identity", () => {
   const saved = jobClient.pullListJobUrl("pl_next", source);
   assert.equal(saved.searchParams.get("job"), "pl_next");
   assert.equal(saved.searchParams.has("list"), false);
+});
+
+test("email display and complete Teams identity survive normalization without truncating content", () => {
+  const emailDisplay = { sender: " Sender <sender@example.com> ", subject: "Full subject", receivedAt: "2026-09-07T06:00:00Z", body: "Original list\n".repeat(1000) };
+  const teams = { teamId: "team", channelId: "channel", conversationId: "conversation", messageId: "message", messageLink: "https://teams.microsoft.com/message", postedAt: "2026-09-07T06:01:00.000Z" };
+  const job = jobs.normalizePullListJobDraft({ ...draft(), source: "email", teams, emailDisplay });
+  assert.deepEqual(job.teams, teams);
+  assert.equal(job.emailDisplay.body, emailDisplay.body);
+  assert.equal(job.emailDisplay.sender, emailDisplay.sender);
+  assert.equal(job.emailDisplay.receivedAt, "2026-09-07T06:00:00.000Z");
+  assert.equal(jobs.normalizePullListJobDraft(draft()).emailDisplay, undefined);
+});
+
+const mutationNow = Date.parse("2026-09-07T08:00:00Z");
+function emailDraft() {
+  return {
+    ...draft({ price: "4.25" }), source: "email",
+    teams: { teamId: "team-1", channelId: "channel-1", conversationId: "conversation-1", messageId: "message-1", messageLink: "https://teams.microsoft.com/message-1", postedAt: "2026-09-07T07:00:00.000Z" },
+    emailDisplay: { sender: "Jane", subject: "Pull list", receivedAt: "2026-09-07T06:59:00.000Z", body: "Original complete email\n1 Lightning Bolt" },
+  };
+}
+
+test("narrow print status preserves every unrelated raw field and refreshes existing job and index TTLs", async () => {
+  const store = new FakeRedis();
+  const created = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  const key = `${repository.PULL_LIST_JOB_KEY_PREFIX}${created.job.id}`;
+  const before = await store.get(key);
+  before.futureServerMetadata = { unknown: [[], { exactly: "001234" }] };
+  before.pricingState.futureOption = ["retained"];
+  before.printStatus.futureStatus = "retained";
+  await store.set(key, before);
+  const indexNames = [...store.zsets.keys()];
+  const result = await repository.mutatePullListJobPrintStatus(store, before.id, "pull-list", "2026-09-07T03:02:00-05:00", mutationNow + 120000);
+  assert.equal(result.status, "updated");
+  assert.equal(result.changed, true);
+  const after = await store.get(key);
+  assert.deepEqual(after, { ...before, printStatus: { ...before.printStatus, pullListPrintedAt: "2026-09-07T08:02:00.000Z" }, updatedAt: "2026-09-07T08:02:00.000Z", expiresAt: "2026-10-07T08:02:00.000Z" });
+  assert.deepEqual([...store.zsets.keys()], indexNames);
+  for (const index of indexNames) {
+    assert.equal(store.zsets.get(index).get(before.id), mutationNow + 120000);
+    assert.equal(store.ttls.get(index), jobs.SAVED_PULL_LIST_TTL_SECONDS);
+  }
+  assert.equal(store.ttls.get(key), jobs.SAVED_PULL_LIST_TTL_SECONDS);
+  assert.equal(store.ttls.get(`${repository.PULL_LIST_FINGERPRINT_KEY_PREFIX}${before.fingerprint}`), jobs.SAVED_PULL_LIST_TTL_SECONDS);
+  assert.equal([...store.values.keys()].filter((entry) => entry.startsWith(repository.PULL_LIST_JOB_KEY_PREFIX)).length, 1);
+});
+
+test("narrow mutation independently handles both statuses, repeat requests, old timestamps, missing jobs, and malformed input", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  const first = await repository.mutatePullListJobPrintStatus(store, job.id, "pull-list", "2026-09-07T08:01:00Z", mutationNow + 60000);
+  const pricing = await repository.mutatePullListJobPrintStatus(store, job.id, "pricing", "2026-09-07T08:02:00Z", mutationNow + 120000);
+  assert.deepEqual(pricing.job.printStatus, { pullListPrintedAt: first.job.printStatus.pullListPrintedAt, pricingPrintedAt: "2026-09-07T08:02:00.000Z" });
+  const repeated = await repository.mutatePullListJobPrintStatus(store, job.id, "pull-list", first.job.printStatus.pullListPrintedAt, mutationNow + 180000);
+  assert.equal(repeated.changed, false);
+  const older = await repository.mutatePullListJobPrintStatus(store, job.id, "pricing", "2026-09-07T08:00:00Z", mutationNow + 180000);
+  assert.equal(older.changed, false);
+  assert.deepEqual(older.job.printStatus, pricing.job.printStatus);
+  assert.deepEqual(await repository.mutatePullListJobPrintStatus(store, "pl_missing", "pricing", "2026-09-07T08:00:00Z", mutationNow), { status: "not-found" });
+  for (const values of [["invalid:id", "pricing", "2026-09-07T08:00:00Z"], [job.id, "pricedAt", "2026-09-07T08:00:00Z"], [job.id, "pricing", "bad"], [job.id, "pricing", 123]]) {
+    await assert.rejects(repository.mutatePullListJobPrintStatus(store, ...values, mutationNow));
+  }
+});
+
+test("stale autosave cannot erase a print or protected email metadata when a print wins the write race", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  store.beforeCompareAndSet = async () => {
+    await repository.mutatePullListJobPrintStatus(store, job.id, "pull-list", "2026-09-07T08:01:00Z", mutationNow + 60000);
+  };
+  const stale = { ...draft({ price: "9.99" }), source: "manual", teams: { messageId: "forged" }, emailDisplay: { body: "forged" }, printStatus: jobs.emptyPullListJobPrintStatus() };
+  const result = await repository.updatePullListJob(store, job.id, stale, mutationNow + 120000);
+  assert.equal(result.job.source, "email");
+  assert.deepEqual(result.job.teams, job.teams);
+  assert.deepEqual(result.job.emailDisplay, job.emailDisplay);
+  assert.equal(result.job.printStatus.pullListPrintedAt, "2026-09-07T08:01:00.000Z");
+  assert.equal(result.job.pricingState.rows[0].priceOverride, "9.99");
+  assert.deepEqual(result.job.customer, job.customer);
+  assert.deepEqual(result.job.formatterItems, job.formatterItems);
+  assert.equal(result.job.fingerprint, job.fingerprint);
+});
+
+test("print CAS retries against the newest autosave and two concurrent print targets both survive", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  store.beforeCompareAndSet = async () => {
+    await repository.updatePullListJob(store, job.id, draft({ price: "12.50" }), mutationNow + 60000);
+  };
+  await repository.mutatePullListJobPrintStatus(store, job.id, "pull-list", "2026-09-07T08:02:00Z", mutationNow + 120000);
+  store.beforeCompareAndSet = async () => {
+    await repository.mutatePullListJobPrintStatus(store, job.id, "pull-list", "2026-09-07T08:03:00Z", mutationNow + 180000);
+  };
+  const result = await repository.mutatePullListJobPrintStatus(store, job.id, "pricing", "2026-09-07T08:04:00Z", mutationNow + 240000);
+  assert.equal(result.job.pricingState.rows[0].priceOverride, "12.50");
+  assert.deepEqual(result.job.printStatus, { pullListPrintedAt: "2026-09-07T08:03:00.000Z", pricingPrintedAt: "2026-09-07T08:04:00.000Z" });
+  assert.deepEqual(result.job.teams, job.teams);
+});
+
+test("a deletion racing with print status never recreates the job", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  store.beforeCompareAndSet = async () => { await repository.deletePullListJob(store, job.id, mutationNow); };
+  const result = await repository.mutatePullListJobPrintStatus(store, job.id, "pricing", "2026-09-07T08:01:00Z", mutationNow + 60000);
+  assert.deepEqual(result, { status: "not-found" });
+  assert.equal(await repository.getPullListJob(store, job.id, mutationNow), null);
+});
+
+test("protected Teams registration is idempotent, enriches missing identifiers, and rejects replacement", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, { ...emailDraft(), teams: undefined }, mutationNow);
+  const metadata = emailDraft().teams;
+  const first = await repository.registerPullListJobTeams(store, job.id, { messageId: metadata.messageId }, mutationNow + 60000);
+  assert.equal(first.changed, true);
+  const enriched = await repository.registerPullListJobTeams(store, job.id, metadata, mutationNow + 120000);
+  assert.equal(enriched.changed, true);
+  assert.equal(enriched.job.teams.messageLink, metadata.messageLink);
+  assert.equal(enriched.job.teams.conversationId, metadata.conversationId);
+  assert.equal(enriched.job.teams.postedAt, first.job.teams.postedAt);
+  const repeated = await repository.registerPullListJobTeams(store, job.id, metadata, mutationNow + 180000);
+  assert.equal(repeated.changed, false);
+  for (const field of ["teamId", "channelId", "conversationId", "messageId", "messageLink"]) {
+    const rejected = await repository.registerPullListJobTeams(store, job.id, { ...metadata, [field]: "another-identity" }, mutationNow + 240000);
+    assert.equal(rejected.status, "conflict");
+  }
+  assert.deepEqual((await repository.getPullListJob(store, job.id, mutationNow + 300000)).teams, enriched.job.teams);
+});
+
+function statusRequest(body, headers = {}) {
+  return new Request("https://pullsmith.example/api/pull-list-jobs?action=print-status", {
+    method: "POST", headers: { "content-type": "application/json", origin: "https://pullsmith.example", ...headers }, body: JSON.stringify(body),
+  });
+}
+
+test("public narrow print endpoint validates its boundary and preserves the complete stored job", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft());
+  const synchronized = [];
+  const api = jobApi.createPullListJobHandlers(() => store, async (targetStore, id) => {
+    assert.equal(targetStore, store);
+    synchronized.push(id);
+    return { status: "updated" };
+  });
+  const before = await store.get(`${repository.PULL_LIST_JOB_KEY_PREFIX}${job.id}`);
+  const response = await api.POST(statusRequest({ id: job.id, target: "pricing", printedAt: "2026-09-07T08:05:00Z", job: { input: "must not replace" } }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.teamsSync, { status: "updated" });
+  assert.deepEqual(synchronized, [job.id]);
+  assert.deepEqual(body.job.pricingState, before.pricingState);
+  assert.deepEqual(body.job.teams, before.teams);
+  assert.deepEqual(body.job.emailDisplay, before.emailDisplay);
+  assert.equal(body.job.input, before.input);
+  assert.equal(body.job.printStatus.pricingPrintedAt, "2026-09-07T08:05:00.000Z");
+  for (const invalid of [{ id: job.id, target: "other", printedAt: "2026-09-07T08:05:00Z" }, { id: "../bad", target: "pricing", printedAt: "2026-09-07T08:05:00Z" }, { id: job.id, target: "pricing", printedAt: "bad" }]) {
+    assert.equal((await api.POST(statusRequest(invalid))).status, 400);
+  }
+  assert.equal((await api.POST(statusRequest({ id: "pl_missing", target: "pricing", printedAt: "2026-09-07T08:05:00Z" }))).status, 404);
+  assert.equal((await api.POST(statusRequest({ id: job.id, target: "pricing", printedAt: "2026-09-07T08:05:00Z" }, { origin: "https://elsewhere.example" }))).status, 403);
+  assert.equal((await api.POST(statusRequest({}, { "content-type": "text/plain" }))).status, 415);
+  assert.deepEqual(synchronized, [job.id]);
+});
+
+test("Teams sync failure cannot roll back a persisted print status", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft());
+  const api = jobApi.createPullListJobHandlers(() => store, async () => { throw new Error("sensitive internal detail"); });
+  const response = await api.POST(statusRequest({ id: job.id, target: "pull-list", printedAt: "2026-09-07T08:06:00Z" }));
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.equal(body.teamsSync.status, "failed");
+  assert.ok(!JSON.stringify(body).includes("sensitive internal detail"));
+  assert.equal((await repository.getPullListJob(store, job.id)).printStatus.pullListPrintedAt, "2026-09-07T08:06:00.000Z");
+});
+
+test("ordinary browser creation and autosave cannot impersonate email ingestion or Teams registration", async () => {
+  const store = new FakeRedis();
+  const api = jobApi.createPullListJobHandlers(() => store);
+  const create = await api.POST(new Request("https://pullsmith.example/api/pull-list-jobs", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ job: emailDraft() }) }));
+  assert.equal(create.status, 201);
+  const { job } = await create.json();
+  assert.equal(job.source, "manual");
+  assert.equal(job.teams, undefined);
+  assert.equal(job.emailDisplay, undefined);
+  const update = await api.PUT(new Request("https://pullsmith.example/api/pull-list-jobs", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: job.id, job: emailDraft() }) }));
+  assert.equal(update.status, 200);
+  const updated = (await update.json()).job;
+  assert.equal(updated.source, "manual");
+  assert.equal(updated.teams, undefined);
+  assert.equal(updated.emailDisplay, undefined);
+});
+
+test("simultaneous identical ingestion atomically creates one job and reuses its ID", async () => {
+  const store = new FakeRedis();
+  let winner;
+  store.beforeCreate = async () => {
+    winner = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  };
+  const raced = await repository.createPullListJob(store, emailDraft(), mutationNow);
+  assert.equal(winner.status, "created");
+  assert.equal(raced.status, "duplicate");
+  assert.equal(raced.existingJob.id, winner.job.id);
+  assert.equal([...store.values.keys()].filter((key) => key.startsWith(repository.PULL_LIST_JOB_KEY_PREFIX)).length, 1);
+  assert.deepEqual((await repository.searchPullListJobs(store, {}, mutationNow)).map((entry) => entry.id), [winner.job.id]);
+  const simultaneous = await Promise.all(Array.from({ length: 8 }, () => repository.createPullListJob(store, emailDraft(), mutationNow)));
+  assert.ok(simultaneous.every((result) => result.status === "duplicate" && result.existingJob.id === winner.job.id));
+});
+
+test("duplicate email attachment promotes a manual job once and retains its pricing, print status, and original email", async () => {
+  const store = new FakeRedis();
+  const created = await repository.createPullListJob(store, { ...draft({ price: "8.25" }), printStatus: { pullListPrintedAt: "2026-09-07T07:30:00Z" } }, mutationNow);
+  const before = await store.get(`${repository.PULL_LIST_JOB_KEY_PREFIX}${created.job.id}`);
+  const first = await repository.attachPullListJobEmail(store, before.id, emailDraft().emailDisplay, mutationNow + 60000);
+  assert.equal(first.changed, true);
+  assert.deepEqual(first.job, { ...before, source: "email", emailDisplay: emailDraft().emailDisplay, updatedAt: "2026-09-07T08:01:00.000Z", expiresAt: "2026-10-07T08:01:00.000Z" });
+  const second = await repository.attachPullListJobEmail(store, before.id, { ...emailDraft().emailDisplay, body: "later duplicate content" }, mutationNow + 120000);
+  assert.equal(second.changed, false);
+  assert.deepEqual(second.job.emailDisplay, first.job.emailDisplay);
+});
+
+test("initial Teams post claim is atomic, persists with autosave, and allows only one root post attempt", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, { ...emailDraft(), teams: undefined }, mutationNow);
+  const claims = await Promise.all(Array.from({ length: 5 }, () => repository.claimPullListJobTeamsPost(store, job.id, mutationNow + 60000)));
+  assert.equal(claims.filter((result) => result.shouldPost).length, 1);
+  assert.equal(claims[0].job.teams.initialPostClaimedAt, "2026-09-07T08:01:00.000Z");
+  const afterSave = await repository.updatePullListJob(store, job.id, draft({ price: "11.25" }), mutationNow + 120000);
+  assert.equal(afterSave.job.teams.initialPostClaimedAt, "2026-09-07T08:01:00.000Z");
+  const retry = await repository.claimPullListJobTeamsPost(store, job.id, mutationNow + 180000);
+  assert.equal(retry.shouldPost, false);
+  await repository.registerPullListJobTeams(store, job.id, emailDraft().teams, mutationNow + 240000);
+  const afterCallback = await repository.claimPullListJobTeamsPost(store, job.id, mutationNow + 300000);
+  assert.equal(afterCallback.shouldPost, false);
+  assert.equal(afterCallback.job.teams.messageId, emailDraft().teams.messageId);
+  assert.equal(afterCallback.job.teams.initialPostClaimedAt, "2026-09-07T08:01:00.000Z");
+});
+
+test("the original Check Email Now URL survives normalization and browser autosave exactly", async () => {
+  const store = new FakeRedis();
+  const checkEmailNowUrl = "https://pullsmith.example/api/check-email-now?secret=original%2BCapability&source=teams";
+  const original = { ...emailDraft(), emailDisplay: { ...emailDraft().emailDisplay, checkEmailNowUrl } };
+  const { job } = await repository.createPullListJob(store, original, mutationNow);
+  assert.equal(jobs.normalizePullListJob(job).emailDisplay.checkEmailNowUrl, checkEmailNowUrl);
+  const changed = await repository.updatePullListJob(store, job.id, { ...draft({ price: "14.00" }), emailDisplay: { ...original.emailDisplay, checkEmailNowUrl: "https://forged.example/action" } }, mutationNow + 60000);
+  assert.equal(changed.job.emailDisplay.checkEmailNowUrl, checkEmailNowUrl);
+  const omitted = await repository.updatePullListJob(store, job.id, draft({ price: "15.00" }), mutationNow + 120000);
+  assert.equal(omitted.job.emailDisplay.checkEmailNowUrl, checkEmailNowUrl);
+  assert.equal(jobs.normalizePullListJobDraft({ ...original, emailDisplay: { ...original.emailDisplay, checkEmailNowUrl: ` ${checkEmailNowUrl} ` } }).emailDisplay.checkEmailNowUrl, ` ${checkEmailNowUrl} `);
+});
+
+test("autosave only synchronizes Teams when a print timestamp increases and keeps pricing saves successful", async () => {
+  const store = new FakeRedis();
+  const { job } = await repository.createPullListJob(store, emailDraft());
+  const synchronized = [];
+  let storeGets = 0;
+  let failSync = false;
+  const api = jobApi.createPullListJobHandlers(() => { storeGets++; return store; }, async (targetStore, id) => {
+    assert.equal(targetStore, store);
+    synchronized.push(id);
+    if (failSync) throw new Error("private transport detail");
+    return { status: "updated" };
+  });
+  const put = (next) => api.PUT(new Request("https://pullsmith.example/api/pull-list-jobs", {
+    method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: job.id, job: next }),
+  }));
+  const pricingOnly = await put(draft({ price: "13.25" }));
+  assert.equal(pricingOnly.status, 200);
+  assert.equal((await pricingOnly.json()).teamsSync, undefined);
+  assert.deepEqual(synchronized, []);
+  assert.equal(storeGets, 1);
+
+  const printed = { ...draft({ price: "14.25" }), printStatus: { pullListPrintedAt: "2026-09-07T08:07:00Z", pricingPrintedAt: "" } };
+  const printResponse = await put(printed);
+  assert.equal(printResponse.status, 200);
+  const printBody = await printResponse.json();
+  assert.deepEqual(printBody.teamsSync, { status: "updated" });
+  assert.equal(printBody.job.pricingState.rows[0].priceOverride, "14.25");
+  assert.deepEqual(synchronized, [job.id]);
+  assert.equal(storeGets, 2);
+
+  const repeated = await put(printed);
+  assert.equal(repeated.status, 200);
+  assert.equal((await repeated.json()).teamsSync, undefined);
+  assert.deepEqual(synchronized, [job.id]);
+
+  failSync = true;
+  const pricingPrint = await put({ ...printed, printStatus: { ...printed.printStatus, pricingPrintedAt: "2026-09-07T08:08:00Z" } });
+  assert.equal(pricingPrint.status, 200);
+  const failedBody = await pricingPrint.json();
+  assert.deepEqual(failedBody.teamsSync, { status: "failed", reason: "Teams synchronization failed." });
+  assert.ok(!JSON.stringify(failedBody).includes("private transport detail"));
+  assert.deepEqual(synchronized, [job.id, job.id]);
+  assert.equal((await repository.getPullListJob(store, job.id)).printStatus.pricingPrintedAt, "2026-09-07T08:08:00.000Z");
+  assert.equal(failedBody.job.pricingState.rows[0].priceOverride, "14.25");
+  assert.deepEqual(failedBody.job.teams, job.teams);
 });

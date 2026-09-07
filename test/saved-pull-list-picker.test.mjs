@@ -62,6 +62,20 @@ test("picker open state closes for Escape, outside clicks, and successful Open",
   }
 });
 
+test("current-job badges show local print actions immediately without hiding newer server statuses", () => {
+  const serverStatus = {
+    pullListPrintedAt: "2026-09-07T06:00:00.000Z",
+    pricingPrintedAt: "2026-09-07T07:00:00.000Z",
+  };
+  const immediate = picker.savedPullListPrintStatusBadges({ printStatus: {} }, { pullListPrintedAt: serverStatus.pullListPrintedAt });
+  assert.deepEqual(immediate.map(({ kind }) => kind), ["pull-list"]);
+  assert.deepEqual(
+    picker.savedPullListPrintStatusBadges({ printStatus: serverStatus }, { pullListPrintedAt: "2026-09-07T05:00:00.000Z" }),
+    picker.savedPullListPrintStatusBadges({ printStatus: serverStatus }),
+  );
+  assert.match(pickerComponentSource, /savedPullListPrintStatusBadges\(job, job\.id === currentJobId \? currentJobPrintStatus : undefined\)/);
+});
+
 test("empty queries use Recent while text infers name, phone, or email search", () => {
   assert.deepEqual(picker.savedPullListSearchRequest(""), {
     mode: "recent",

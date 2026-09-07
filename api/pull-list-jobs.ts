@@ -3,11 +3,14 @@ import {
   createPullListJob,
   deletePullListJob,
   getPullListJob,
+  mutatePullListJobPrintStatus,
   searchPullListJobs,
   updatePullListJob,
+  validatedPrintStatusMutation,
   type PullListJobStore,
 } from "./_pull-list-job-repository.js";
 import { isGeneratedSamplePullListJobDraft, isPersistablePullListJobDraft } from "../src/pull-list-job.js";
+import { syncTeamsCard } from "./_teams-sync.js";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -24,7 +27,10 @@ function store() {
 }
 
 // TODO: Apply production Microsoft Entra ID authentication at this API boundary.
-export function createPullListJobHandlers(getStore: () => PullListJobStore = store) {
+export function createPullListJobHandlers(
+  getStore: () => PullListJobStore = store,
+  syncTeams: typeof syncTeamsCard = syncTeamsCard,
+) {
   return {
     async GET(request: Request) {
       const url = new URL(request.url);
@@ -51,6 +57,38 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
     },
 
     async POST(request: Request) {
+      const url = new URL(request.url);
+      if (url.searchParams.get("action") === "print-status") {
+        const origin = request.headers.get("origin");
+        if ((origin && origin !== url.origin) || request.headers.get("sec-fetch-site") === "cross-site") {
+          return jsonResponse({ error: "This request must originate from Pullsmith." }, 403);
+        }
+        if (!/^application\/json(?:\s*;|$)/i.test(request.headers.get("content-type") || "")) {
+          return jsonResponse({ error: "A JSON print-status request is required." }, 415);
+        }
+        let mutation: ReturnType<typeof validatedPrintStatusMutation>;
+        try {
+          const body = await request.json();
+          mutation = validatedPrintStatusMutation(body?.id, body?.target, body?.printedAt);
+        } catch {
+          return jsonResponse({ error: "Invalid Saved Pull List print-status request." }, 400);
+        }
+        try {
+          const jobStore = getStore();
+          const result = await mutatePullListJobPrintStatus(jobStore, mutation.id, mutation.target, mutation.printedAt);
+          if (result.status === "not-found") return jsonResponse({ error: "Saved Pull List not found." }, 404);
+          let teamsSync: Awaited<ReturnType<typeof syncTeamsCard>>;
+          try {
+            teamsSync = await syncTeams(jobStore, result.job.id);
+          } catch {
+            teamsSync = { status: "failed", reason: "Teams synchronization failed." };
+          }
+          return jsonResponse({ job: result.job, teamsSync });
+        } catch {
+          return jsonResponse({ error: "Saved Pull List print-status update failed." }, 500);
+        }
+      }
+      if (url.searchParams.has("action")) return jsonResponse({ error: "Invalid Saved Pull List action." }, 400);
       try {
         const body = await request.json();
         if (isGeneratedSamplePullListJobDraft(body?.job)) {
@@ -59,7 +97,9 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
         if (!isPersistablePullListJobDraft(body?.job)) {
           return jsonResponse({ error: "A successfully processed pull list is required." }, 400);
         }
-        const result = await createPullListJob(getStore(), body?.job);
+        const result = await createPullListJob(getStore(), {
+          ...body?.job, source: "manual", teams: undefined, emailDisplay: undefined,
+        });
         if (result.status === "duplicate") {
           return jsonResponse({ duplicate: true, existingJob: result.existingJob }, 409);
         }
@@ -83,12 +123,26 @@ export function createPullListJobHandlers(getStore: () => PullListJobStore = sto
         if (!isPersistablePullListJobDraft(body?.job)) {
           return jsonResponse({ error: "A coherent processed pull list is required." }, 400);
         }
-        const result = await updatePullListJob(getStore(), id, body?.job);
+        const jobStore = getStore();
+        const previous = await getPullListJob(jobStore, id);
+        const result = await updatePullListJob(jobStore, id, body?.job);
         if (result.status === "not-found") return jsonResponse({ error: "Saved Pull List not found." }, 404);
         if (result.status === "duplicate") {
           return jsonResponse({ duplicate: true, existingJob: result.existingJob }, 409);
         }
-        return jsonResponse({ job: result.job });
+        const printStatusChanged = previous && (
+          result.job.printStatus.pullListPrintedAt > previous.printStatus.pullListPrintedAt
+          || result.job.printStatus.pricingPrintedAt > previous.printStatus.pricingPrintedAt
+        );
+        let teamsSync: Awaited<ReturnType<typeof syncTeamsCard>> | undefined;
+        if (printStatusChanged) {
+          try {
+            teamsSync = await syncTeams(jobStore, result.job.id);
+          } catch {
+            teamsSync = { status: "failed", reason: "Teams synchronization failed." };
+          }
+        }
+        return jsonResponse({ job: result.job, ...(teamsSync ? { teamsSync } : {}) });
       } catch (error) {
         return jsonResponse({ error: error instanceof Error ? error.message : "Saved Pull List update failed." }, 500);
       }

@@ -45,3 +45,22 @@ export async function saveFormattedList(config, baseId, data) {
 
   return body;
 }
+
+export function emailIngestApiUrl(formatterBaseUrl) {
+  return new URL("/api/teams-actions?action=ingest", formatterBaseUrl).toString();
+}
+
+export async function saveEmailPullListJob(config, data, emailDisplay, fetchImpl = fetch) {
+  if (!config.formattedListWriteSecret) throw new Error("FORMATTED_LIST_WRITE_SECRET is not configured.");
+  const response = await fetchImpl(emailIngestApiUrl(config.formatterBaseUrl), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-formatted-list-secret": config.formattedListWriteSecret },
+    body: JSON.stringify({ data, emailDisplay, checkEmailNowUrl: config.checkEmailNowUrl }),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`Email job save failed (${response.status}).`);
+  if (!body.id || !body.url || !body.card || new URL(body.url).searchParams.get("job") !== body.id) {
+    throw new Error("Email ingestion did not return a complete saved job and Teams card.");
+  }
+  return body;
+}

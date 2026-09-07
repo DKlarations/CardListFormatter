@@ -1,7 +1,5 @@
-import LZString from "lz-string";
 import { compactFormatterItems, processPullListText } from "./server-formatter.mjs";
-
-const FALLBACK_HASH_PREFIX = "input=";
+import { initialTeamsCardPayload } from "../shared/pull-list-teams-card.mjs";
 
 function env(name: string, fallback = "") {
   return process.env[name] || fallback;
@@ -20,195 +18,68 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function randomSuffix(length = 6) {
-  const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-  return Array.from({ length }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join("");
-}
-
-function dateStamp(value = new Date()) {
-  return [
-    String(value.getMonth() + 1).padStart(2, "0"),
-    String(value.getDate()).padStart(2, "0"),
-    String(value.getFullYear()),
-  ].join("");
-}
-
-function fallbackHashForInput(text: string) {
-  return `${FALLBACK_HASH_PREFIX}${LZString.compressToEncodedURIComponent(text)}`;
-}
-
-function formattedListUrl(baseUrl: string, id: string, fallbackInput: string) {
-  const url = new URL(baseUrl);
-  url.searchParams.set("list", id);
-  url.hash = fallbackHashForInput(fallbackInput);
-  return url.toString();
-}
-
-function processedStats(processed: any) {
-  return {
-    resolvedCount: processed.items.filter((item: any) => item.status === "found").length,
-    needsReviewCount: processed.items.filter((item: any) => item.status !== "found").length,
-    printFallbackCount: processed.items.filter((item: any) => item.status === "found" && item.printLookupFailed).length,
-  };
-}
-
-function cardActions(formatterUrl: string, checkEmailNowUrl: string) {
-  const actions = [
-    {
-      type: "Action.OpenUrl",
-      title: "Open Formatted List",
-      url: formatterUrl,
-    },
-  ];
-
-  if (checkEmailNowUrl) {
-    actions.push({
-      type: "Action.OpenUrl",
-      title: "Check Email Now",
-      url: checkEmailNowUrl,
-    });
-  }
-
-  return actions;
-}
-
-function makeTeamsPayload(text: string, formatterUrl: string, checkEmailNowUrl: string) {
-  const cardText = text.length > 12000
-    ? `${text.slice(0, 12000)}\n\n[Message truncated for Teams card size.]`
-    : text;
-
-  return {
-    type: "message",
-    attachments: [
-      {
-        contentType: "application/vnd.microsoft.card.adaptive",
-        contentUrl: null,
-        content: {
-          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-          type: "AdaptiveCard",
-          version: "1.2",
-          body: [
-            {
-              type: "TextBlock",
-              text: "New Pull List Received:",
-              weight: "Bolder",
-              size: "Medium",
-            },
-            {
-              type: "TextBlock",
-              text: cardText,
-              wrap: true,
-            },
-          ],
-          actions: cardActions(formatterUrl, checkEmailNowUrl),
-        },
-      },
-    ],
-  };
-}
-
-async function saveFormattedList(request: Request, secret: string, data: unknown) {
-  const requestUrl = new URL(request.url);
-  const response = await fetch(new URL("/api/formatted-lists", requestUrl.origin), {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-formatted-list-secret": secret,
-    },
-    body: JSON.stringify({
-      baseId: `${dateStamp()}-${randomSuffix()}`,
-      data,
-    }),
-  });
-
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(body.error || `Formatted list save failed (${response.status}).`);
-  }
-
-  return body;
-}
-
-async function postToTeams(webhookUrl: string, payload: unknown) {
-  const response = await fetch(webhookUrl, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-
-  if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Teams post failed (${response.status}): ${body}`);
-  }
-}
-
 export async function OPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      "access-control-allow-origin": "*",
-      "access-control-allow-methods": "POST, OPTIONS",
-      "access-control-allow-headers": "content-type",
-    },
-  });
+  return new Response(null, { status: 204, headers: {
+    "access-control-allow-origin": "*",
+    "access-control-allow-methods": "POST, OPTIONS",
+    "access-control-allow-headers": "content-type",
+  } });
 }
 
-export async function POST(request: Request) {
-  const configuredSecret = env("FORMATTED_LIST_WRITE_SECRET");
-  const teamsWebhookUrl = env("TEAMS_WEBHOOK_URL");
-  const formatterBaseUrl = env("FORMATTER_BASE_URL", new URL(request.url).origin);
-  const checkEmailNowUrl = env("CHECK_EMAIL_NOW_URL");
-
-  if (!configuredSecret) {
-    return jsonResponse({ error: "FORMATTED_LIST_WRITE_SECRET is not configured in Vercel." }, 500);
-  }
-
-  if (!teamsWebhookUrl) {
-    return jsonResponse({ error: "TEAMS_WEBHOOK_URL is not configured in Vercel." }, 500);
-  }
-
-  try {
-    const body = await request.json();
+export function createSendTestTeamsHandler({
+  readEnv = env, fetchImpl = fetch, processText = processPullListText,
+  compactItems = compactFormatterItems, warn = console.warn,
+} = {}) {
+  return async (request: Request) => {
+    const secret = readEnv("FORMATTED_LIST_WRITE_SECRET");
+    const webhookUrl = readEnv("TEAMS_WEBHOOK_URL");
+    const checkEmailNowUrl = readEnv("CHECK_EMAIL_NOW_URL");
+    if (!secret) return jsonResponse({ error: "FORMATTED_LIST_WRITE_SECRET is not configured in Vercel." }, 500);
+    if (!webhookUrl) return jsonResponse({ error: "TEAMS_WEBHOOK_URL is not configured in Vercel." }, 500);
+    if (!checkEmailNowUrl) warn("CHECK_EMAIL_NOW_URL is not configured; Teams cards will omit Check Email Now.");
+    let body: any;
+    try { body = await request.json(); } catch { return jsonResponse({ error: "Invalid JSON." }, 400); }
     const rawText = typeof body?.text === "string" ? body.text.trim() : "";
-    if (!rawText) {
-      return jsonResponse({ error: "Test text is required." }, 400);
+    if (!rawText) return jsonResponse({ error: "Test text is required." }, 400);
+    try {
+      const emailDisplay = {
+        sender: "Teams Test Page", subject: "Manual Pull List Test", receivedAt: new Date().toISOString(), body: rawText,
+      };
+      const input = [
+        `From: ${emailDisplay.sender}`, `Subject: ${emailDisplay.subject}`, `Received: ${emailDisplay.receivedAt}`, "", rawText,
+      ].join("\n");
+      const processed = await processText(input, { useCheckboxes: true });
+      const savedResponse = await fetchImpl(new URL("/api/teams-actions?action=ingest", request.url), {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-formatted-list-secret": secret },
+        body: JSON.stringify({
+          data: {
+            input, output: processed.output, processedAt: processed.processedAt, customer: processed.customer,
+            formatterItems: compactItems(processed.items), formatterSettings: { useCheckboxes: true },
+            stats: {
+              resolvedCount: processed.items.filter((item: any) => item.status === "found").length,
+              needsReviewCount: processed.items.filter((item: any) => item.status !== "found").length,
+              printFallbackCount: processed.items.filter((item: any) => item.status === "found" && item.printLookupFailed).length,
+            },
+          }, emailDisplay, checkEmailNowUrl,
+        }),
+      });
+      const saved = await savedResponse.json().catch(() => ({}));
+      if (!savedResponse.ok || !saved.id || !saved.url || !saved.card) {
+        return jsonResponse({ error: "Test pull list could not be saved. No Teams card was posted." }, 502);
+      }
+      if (!saved.alreadyPosted) {
+        const posted = await fetchImpl(webhookUrl, {
+          method: "POST", headers: { "content-type": "application/json" },
+          body: JSON.stringify(initialTeamsCardPayload(saved.id, saved.card)),
+        });
+        if (!posted.ok) return jsonResponse({ error: `Teams post failed (${posted.status}). The saved pull list is available.`, formatterUrl: saved.url }, 502);
+      }
+      return jsonResponse({ ok: true, id: saved.id, formatterUrl: saved.url, alreadyPosted: Boolean(saved.alreadyPosted) });
+    } catch {
+      return jsonResponse({ error: "Teams test failed. Check server and workflow configuration." }, 500);
     }
-
-    const receivedAt = new Date().toLocaleString();
-    const cardText = [
-      "From: Teams Test Page",
-      "Subject: Manual Pull List Test",
-      `Received: ${receivedAt}`,
-      "",
-      rawText,
-    ].join("\n");
-
-    const processed = await processPullListText(cardText, {
-      useCheckboxes: true,
-    });
-    const formattedState = {
-      input: cardText,
-      output: processed.output,
-      processedAt: processed.processedAt,
-      reliabilityNote: processed.reliabilityNote,
-      customer: processed.customer,
-      stats: processedStats(processed),
-      formatterItems: compactFormatterItems(processed.items),
-    };
-    const saved = await saveFormattedList(request, configuredSecret, formattedState);
-    const formatterUrl = formattedListUrl(formatterBaseUrl, saved.id, cardText);
-    await postToTeams(teamsWebhookUrl, makeTeamsPayload(cardText, formatterUrl, checkEmailNowUrl));
-
-    return jsonResponse({
-      ok: true,
-      id: saved.id,
-      formatterUrl,
-      expiresInSeconds: saved.expiresInSeconds,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected error.";
-    return jsonResponse({ error: message }, 500);
-  }
+  };
 }
+
+export const POST = createSendTestTeamsHandler();

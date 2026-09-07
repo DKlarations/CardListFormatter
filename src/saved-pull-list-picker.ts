@@ -5,6 +5,7 @@ import {
 } from "./customer";
 import {
   normalizePullListJobPrintStatus,
+  type PullListJobPrintStatus,
   type SavedJobSummary,
 } from "./pull-list-job";
 import { shouldConfirmNewList, type SavedJobSaveState } from "./saved-session-state";
@@ -102,8 +103,13 @@ export type SavedPullListPrintBadge = {
   label: string;
 };
 
-export function savedPullListPrintStatusBadges(job: Pick<SavedJobSummary, "printStatus">) {
+export function savedPullListPrintStatusBadges(job: Pick<SavedJobSummary, "printStatus">, localStatus?: PullListJobPrintStatus) {
   const status = normalizePullListJobPrintStatus(job.printStatus);
+  const local = normalizePullListJobPrintStatus(localStatus);
+  // Show a print action immediately while retaining newer status returned by the server.
+  for (const key of ["pullListPrintedAt", "pricingPrintedAt"] as const) {
+    if (local[key] && (!status[key] || local[key] > status[key])) status[key] = local[key];
+  }
   const badges: SavedPullListPrintBadge[] = [];
   if (status.pullListPrintedAt) {
     badges.push({

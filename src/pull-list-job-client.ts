@@ -3,6 +3,7 @@ import {
   normalizeSavedJobSummary,
   type PullListJob,
   type PullListJobDraft,
+  type PullListJobPrintTarget,
   type SavedJobSummary,
 } from "./pull-list-job";
 import {
@@ -22,6 +23,16 @@ export type SavedPullListSummaryQuery = {
 export type ClientSaveJobResult =
   | { status: "saved"; job: PullListJob }
   | { status: "duplicate"; existingJob: SavedJobSummary };
+
+export type PullListJobTeamsSyncResult = {
+  status: "updated" | "skipped" | "failed";
+  reason?: string;
+};
+
+export type ClientPrintStatusResult = {
+  job: PullListJob;
+  teamsSync: PullListJobTeamsSyncResult;
+};
 
 type SavedPullListRequestOptions = {
   onDiagnostic?: SavedPullListDiagnosticReporter;
@@ -211,6 +222,49 @@ export async function loadPullListJob(id: string, { onDiagnostic }: SavedPullLis
     requestId: responseRequestId,
   });
   return job;
+}
+
+/** Persist one print action without sending formatter or pricing state. */
+export async function persistPullListJobPrintStatus(
+  id: string,
+  target: PullListJobPrintTarget,
+  printedAt: string,
+  { onDiagnostic }: SavedPullListRequestOptions = {},
+): Promise<ClientPrintStatusResult> {
+  const { response, body, endpoint, requestId: responseRequestId } = await savedPullListRequest(
+    "print-status", "POST", `${jobApiUrl()}?action=print-status`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "content-type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ id, target, printedAt }),
+    }, onDiagnostic,
+  );
+  if (!response.ok || !body.job) {
+    throw failedRequest("print-status", "POST", endpoint, response, body, responseRequestId,
+      `Print status could not be saved (${response.status}).`, onDiagnostic);
+  }
+  const job = normalizePullListJob(body.job);
+  if (job.id !== id) {
+    throw failedRequest("print-status", "POST", endpoint, response, {}, responseRequestId,
+      "The print status response did not identify the requested Saved Pull List.", onDiagnostic);
+  }
+  const rawSync = body.teamsSync as Partial<PullListJobTeamsSyncResult> | undefined;
+  const teamsSync: PullListJobTeamsSyncResult = rawSync && ["updated", "skipped", "failed"].includes(rawSync.status || "")
+    ? { status: rawSync.status as PullListJobTeamsSyncResult["status"], ...(typeof rawSync.reason === "string" ? { reason: rawSync.reason } : {}) }
+    : { status: "failed", reason: "invalid-teams-sync-response" };
+  const teamsFailed = teamsSync.status === "failed"
+    || (teamsSync.status === "skipped" && teamsSync.reason !== "not-email-job");
+  report(onDiagnostic, {
+    operation: "print-status",
+    method: "POST",
+    endpoint,
+    outcome: teamsFailed ? "failed" : "success",
+    status: response.status,
+    message: teamsFailed ? "Print status saved; the original Teams card could not be updated." : "Print status saved.",
+    jobId: job.id,
+    requestId: responseRequestId,
+  });
+  return { job, teamsSync };
 }
 
 export async function deletePullListJob(id: string, { onDiagnostic }: SavedPullListRequestOptions = {}) {

@@ -1,3 +1,5 @@
+import { buildPullListTeamsCard, initialTeamsCardPayload } from "../../../../shared/pull-list-teams-card.mjs";
+
 // Keep genuine plain text MIME parts, but let our fallback preserve HTML table cells.
 export const emailParserOptions = { skipHtmlToText: true };
 
@@ -52,32 +54,10 @@ function trimQuotedReply(text) {
   return text.slice(0, Math.min(...markerIndexes)).trim();
 }
 
-function cardActions(formatted) {
-  const actions = [];
-
-  if (formatted.formatterUrl) {
-    actions.push({
-      type: "Action.OpenUrl",
-      title: formatted.formatterActionTitle || "Open Formatted List",
-      url: formatted.formatterUrl,
-    });
-  }
-
-  if (formatted.checkEmailNowUrl) {
-    actions.push({
-      type: "Action.OpenUrl",
-      title: "Check Email Now",
-      url: formatted.checkEmailNowUrl,
-    });
-  }
-
-  return actions;
-}
-
 export function formatEmailForTeams(parsed) {
   const subject = parsed.subject || "(no subject)";
   const from = parsed.from?.text || "unknown sender";
-  const receivedAt = parsed.date ? parsed.date.toLocaleString() : new Date().toLocaleString();
+  const receivedAt = (parsed.date || new Date()).toISOString();
   const body = emailBodyText(parsed);
   const text = [
     `From: ${from}`,
@@ -102,36 +82,18 @@ export function emailBodyText(parsed) {
 }
 
 export function makeTeamsPayload(formatted) {
-  const cardText = formatted.text.length > 12000
-    ? `${formatted.text.slice(0, 12000)}\n\n[Message truncated for Teams card size.]`
-    : formatted.text;
-
-  return {
-    type: "message",
-    attachments: [
-      {
-        contentType: "application/vnd.microsoft.card.adaptive",
-        contentUrl: null,
-        content: {
-          $schema: "http://adaptivecards.io/schemas/adaptive-card.json",
-          type: "AdaptiveCard",
-          version: "1.2",
-          body: [
-            {
-              type: "TextBlock",
-              text: "New Pull List Received:",
-              weight: "Bolder",
-              size: "Medium",
-            },
-            {
-              type: "TextBlock",
-              text: cardText,
-              wrap: true,
-            },
-          ],
-          actions: cardActions(formatted),
-        },
-      },
-    ],
-  };
+  const card = formatted.card || buildPullListTeamsCard({
+    jobId: formatted.jobId,
+    emailDisplay: {
+      sender: formatted.from,
+      subject: formatted.subject,
+      receivedAt: formatted.receivedAt,
+      body: formatted.body || formatted.text,
+    },
+    formatterUrl: formatted.formatterUrl,
+    checkEmailNowUrl: formatted.checkEmailNowUrl,
+    statusUrls: formatted.statusUrls,
+    printStatus: formatted.printStatus,
+  });
+  return initialTeamsCardPayload(formatted.jobId || "", card);
 }

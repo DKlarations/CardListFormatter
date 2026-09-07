@@ -1,6 +1,6 @@
 export const SAVED_PULL_LIST_DIAGNOSTIC_LIMIT = 5;
 
-export type SavedPullListDiagnosticOperation = "create" | "autosave" | "load" | "search" | "recent" | "delete";
+export type SavedPullListDiagnosticOperation = "create" | "autosave" | "load" | "search" | "recent" | "delete" | "print-status";
 export type SavedPullListDiagnosticMethod = "GET" | "POST" | "PUT" | "DELETE";
 export type SavedPullListDiagnosticOutcome = "success" | "failed" | "duplicate";
 

@@ -49,8 +49,10 @@ import {
   formatterShareUrlWithoutJob,
   loadPullListJob,
   persistPullListJob,
+  persistPullListJobPrintStatus,
   pullListJobUrl,
 } from "./pull-list-job-client";
+import { PullListPrintStatusSynchronizer } from "./pull-list-print-status-sync";
 import {
   addSavedPullListDiagnostic,
   formatSavedPullListDiagnosticReport,
@@ -557,6 +559,7 @@ function App() {
   const [autosaveRestartRevision, setAutosaveRestartRevision] = useState(0);
   const [pricingState, setPricingState] = useState<SavedPricingState>(() => emptySavedPricingState());
   const [printStatus, setPrintStatus] = useState<PullListJobPrintStatus>(() => emptyPullListJobPrintStatus());
+  const [printStatusWarnings, setPrintStatusWarnings] = useState<Partial<Record<PullListJobPrintTarget, string>>>({});
   const [initialPricingState, setInitialPricingState] = useState<SavedPricingState | null>(() => (
     pricingStateForWorkspaceLoad("copy-link", null)
   ));
@@ -620,17 +623,30 @@ function App() {
     }
   }, []);
 
-  const recordPrintStatus = useCallback((target: PullListJobPrintTarget, printedAt: string) => {
-    setPrintStatus((current) => updatePullListJobPrintStatus(current, target, printedAt));
+  const recordSavedPullListDiagnostic = useCallback<SavedPullListDiagnosticReporter>((event) => {
+    setSavedPullListDiagnostics((current) => addSavedPullListDiagnostic(current, event));
   }, []);
+
+  const printStatusSynchronizer = useMemo(() => new PullListPrintStatusSynchronizer({
+    currentWorkspace: () => ({ jobId: currentJobIdRef.current, generation: workspaceGenerationRef.current }),
+    updateLocalStatus: (target, printedAt) => {
+      setPrintStatus((current) => updatePullListJobPrintStatus(current, target, printedAt));
+    },
+    onWarning: (target, warning) => setPrintStatusWarnings((current) => ({ ...current, [target]: warning })),
+    persistStatus: (id, target, printedAt) => persistPullListJobPrintStatus(id, target, printedAt, {
+      onDiagnostic: recordSavedPullListDiagnostic,
+    }),
+  }), [recordSavedPullListDiagnostic]);
+  const printWorkspaceGeneration = workspaceGenerationRef.current;
+  const recordPrintStatus = useCallback((target: PullListJobPrintTarget, printedAt: string) => {
+    // The print timer retains the workspace whose document was opened, even after switching jobs.
+    const jobId = currentJobId || (printWorkspaceGeneration === workspaceGenerationRef.current ? currentJobIdRef.current : "");
+    void printStatusSynchronizer.record({ jobId, generation: printWorkspaceGeneration }, target, printedAt);
+  }, [currentJobId, printWorkspaceGeneration, printStatusSynchronizer]);
 
   const recordPricingPrinted = useCallback((printedAt: string) => {
     recordPrintStatus("pricing", printedAt);
   }, [recordPrintStatus]);
-
-  const recordSavedPullListDiagnostic = useCallback<SavedPullListDiagnosticReporter>((event) => {
-    setSavedPullListDiagnostics((current) => addSavedPullListDiagnostic(current, event));
-  }, []);
 
   const recordPricingDataDiagnostic = useCallback<PricingDataDiagnosticReporter>((event) => {
     setPricingDataDiagnostics((current) => addPricingDataDiagnostic(current, event));
@@ -713,6 +729,7 @@ function App() {
     setPricingState(restoredPricing);
     setInitialPricingState(restoredPricing);
     setPrintStatus(job.printStatus);
+    setPrintStatusWarnings({});
     setPricingSessionKey(`job:${job.id}:${job.updatedAt}`);
     setDuplicateJob(null);
     setSavedPickerOpen(false);
@@ -1227,6 +1244,7 @@ function App() {
       acceptNextJobDraftAsSavedRef.current = false;
       lastSavedSignatureRef.current = "";
       setCurrentJobId(nextSession.currentJobId);
+      setPrintStatusWarnings({});
       setSaveState(nextSession.saveState);
       setDuplicateJob((current) => current?.id === jobId ? null : current);
       setMessage("Saved Pull List deleted. Your local workspace is intact and is now not saved.");
@@ -1270,6 +1288,7 @@ function App() {
     setPricingState(emptySavedPricingState());
     setInitialPricingState(null);
     setPrintStatus(emptyPullListJobPrintStatus());
+    setPrintStatusWarnings({});
     setPricingSessionKey((current) => `fresh:${current}:${Date.now()}`);
     setSaveState("idle");
     setSavedPickerOpen(false);
@@ -1330,6 +1349,7 @@ function App() {
                   onDeleteJob={deleteSavedPullListFromWorkspace}
                   onDiagnostic={recordSavedPullListDiagnostic}
                   currentJobId={currentJobId}
+                  currentJobPrintStatus={printStatus}
                   currentJobSaveInFlight={saveRequestInFlightRef.current}
                 />
                 <input
@@ -1383,6 +1403,14 @@ function App() {
             <button type="button" onClick={() => void openSavedPullListFromWorkspace(duplicateJob.id)}>Open saved job</button>
           </aside>
         )}
+
+        {Object.entries(printStatusWarnings).filter(([, warning]) => warning).map(([target, warning]) => (
+          <aside className="duplicate-warning" role="status" key={target}>
+            <CircleAlert size={19} aria-hidden="true" />
+            <strong>{warning}</strong>
+            <button type="button" onClick={() => setPrintStatusWarnings((current) => ({ ...current, [target]: "" }))}>Dismiss</button>
+          </aside>
+        ))}
 
         <div className="formatter-workspace">
         <section className="input-section">

@@ -5,6 +5,11 @@ on:
   schedule:
     - cron: "*/15 * * * *"
 
+# A manual check waits for any active poll so one mailbox run posts at a time.
+concurrency:
+  group: email-to-teams-mailbox
+  cancel-in-progress: false
+
 jobs:
   email-to-teams:
     runs-on: ubuntu-latest
@@ -43,6 +48,6 @@ jobs:
           MAX_EMAIL_AGE_DAYS: ${{ vars.MAX_EMAIL_AGE_DAYS || '7' }}
           DRY_RUN: "false"
           MARK_PROCESSED_SEEN: "true"
-          FORMATTER_BASE_URL: "https://card-list-formatter.vercel.app/"
+          FORMATTER_BASE_URL: ${{ vars.FORMATTER_BASE_URL || 'https://card-list-formatter.vercel.app/' }}
           CHECK_EMAIL_NOW_URL: ${{ secrets.CHECK_EMAIL_NOW_URL }}
           FORMATTED_LIST_WRITE_SECRET: ${{ secrets.FORMATTED_LIST_WRITE_SECRET }}

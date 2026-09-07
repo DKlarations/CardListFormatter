@@ -36,10 +36,22 @@ export type PullListJobFormatterSettings = {
 };
 
 export type PullListJobTeamsMetadata = {
+  initialPostClaimedAt?: string;
   teamId?: string;
   channelId?: string;
+  conversationId?: string;
   messageId?: string;
+  messageLink?: string;
   postedAt?: string;
+};
+
+/** Original email display content, retained by trusted server ingestion. */
+export type PullListJobEmailDisplay = {
+  sender: string;
+  subject: string;
+  receivedAt: string;
+  body: string;
+  checkEmailNowUrl?: string;
 };
 
 export type PullListJobSearchFields = {
@@ -71,6 +83,7 @@ export type PullListJob = {
   source: "manual" | "email" | "microsoft-graph" | string;
   status?: string;
   teams?: PullListJobTeamsMetadata;
+  emailDisplay?: PullListJobEmailDisplay;
   stats: PullListJobStats;
   formatterSettings: PullListJobFormatterSettings;
   fingerprint: string;
@@ -84,6 +97,7 @@ export type PullListJobDraft = Pick<
 > & {
   status?: string;
   teams?: PullListJobTeamsMetadata;
+  emailDisplay?: PullListJobEmailDisplay;
 };
 
 export type SavedJobSummary = {
@@ -186,6 +200,8 @@ export function normalizePullListJobDraft(value: unknown): PullListJobDraft {
   const raw = value && typeof value === "object" ? value as Record<string, unknown> : {};
   const rawStats = raw.stats && typeof raw.stats === "object" ? raw.stats as Record<string, unknown> : {};
   const teams = raw.teams && typeof raw.teams === "object" ? raw.teams as Record<string, unknown> : null;
+  const emailDisplay = raw.emailDisplay && typeof raw.emailDisplay === "object"
+    ? raw.emailDisplay as Record<string, unknown> : null;
   return {
     customer: normalizeCustomer(raw.customer),
     input: cleanDocument(raw.input),
@@ -208,10 +224,22 @@ export function normalizePullListJobDraft(value: unknown): PullListJobDraft {
     ...(cleanText(raw.status) ? { status: cleanText(raw.status) } : {}),
     ...(teams ? {
       teams: {
+        ...(safeOptionalDate(teams.initialPostClaimedAt) ? { initialPostClaimedAt: safeOptionalDate(teams.initialPostClaimedAt) } : {}),
         ...(cleanText(teams.teamId) ? { teamId: cleanText(teams.teamId) } : {}),
         ...(cleanText(teams.channelId) ? { channelId: cleanText(teams.channelId) } : {}),
+        ...(cleanText(teams.conversationId) ? { conversationId: cleanText(teams.conversationId) } : {}),
         ...(cleanText(teams.messageId) ? { messageId: cleanText(teams.messageId) } : {}),
+        ...(cleanText(teams.messageLink) ? { messageLink: cleanText(teams.messageLink) } : {}),
         ...(cleanText(teams.postedAt) ? { postedAt: safeDate(teams.postedAt) } : {}),
+      },
+    } : {}),
+    ...(emailDisplay ? {
+      emailDisplay: {
+        sender: cleanDocument(emailDisplay.sender),
+        subject: cleanDocument(emailDisplay.subject),
+        receivedAt: safeDate(emailDisplay.receivedAt),
+        body: cleanDocument(emailDisplay.body),
+        ...(typeof emailDisplay.checkEmailNowUrl === "string" ? { checkEmailNowUrl: emailDisplay.checkEmailNowUrl } : {}),
       },
     } : {}),
   };

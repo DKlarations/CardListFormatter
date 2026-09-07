@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const vercelServerGraph = [
+  "api/graph-mail-smoke.ts",
+  "api/_microsoft-graph.ts",
   "api/refresh-mtgjson-pricing-index.ts",
   "api/pull-list-jobs.ts",
   "api/_redis.ts",

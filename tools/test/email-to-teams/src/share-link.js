@@ -13,6 +13,14 @@ export function formatterLinkForSavedList(baseUrl, id, fallbackInput) {
   return url.toString();
 }
 
+export function formatterLinkForSavedJob(baseUrl, id) {
+  const url = new URL(baseUrl);
+  url.search = "";
+  url.hash = "";
+  url.searchParams.set("job", id);
+  return url.toString();
+}
+
 export function formatterLinkForFormattedOutput(baseUrl, state) {
   const url = new URL(baseUrl);
   url.hash = `formatted=${LZString.compressToEncodedURIComponent(JSON.stringify({

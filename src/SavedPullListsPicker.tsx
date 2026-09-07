@@ -2,7 +2,7 @@ import { useEffect, useId, useRef, useState } from "react";
 import { ChevronDown, DollarSign, Loader2, Printer, RefreshCw, Search, Trash2 } from "lucide-react";
 import DeleteSavedPullListDialog from "./DeleteSavedPullListDialog";
 import { listPullListJobs } from "./pull-list-job-client";
-import type { SavedJobSummary } from "./pull-list-job";
+import type { PullListJobPrintStatus, SavedJobSummary } from "./pull-list-job";
 import type { SavedPullListDiagnosticReporter } from "./saved-pull-list-diagnostics";
 import {
   formatSavedPullListDate,
@@ -21,6 +21,7 @@ type SavedPullListsPickerProps = {
   onDeleteJob: (jobId: string) => Promise<void>;
   onDiagnostic: SavedPullListDiagnosticReporter;
   currentJobId: string;
+  currentJobPrintStatus?: PullListJobPrintStatus;
   currentJobSaveInFlight: boolean;
 };
 
@@ -39,6 +40,7 @@ export default function SavedPullListsPicker({
   onDeleteJob,
   onDiagnostic,
   currentJobId,
+  currentJobPrintStatus,
   currentJobSaveInFlight,
 }: SavedPullListsPickerProps) {
   const panelId = useId();
@@ -252,7 +254,7 @@ export default function SavedPullListsPicker({
                   const isDeleting = deletingJobId === job.id;
                   const waitForCurrentSave = job.id === currentJobId && currentJobSaveInFlight;
                   const actionsDisabled = Boolean(openingJobId || deletingJobId || deleteConfirmationJob);
-                  const printBadges = savedPullListPrintStatusBadges(job);
+                  const printBadges = savedPullListPrintStatusBadges(job, job.id === currentJobId ? currentJobPrintStatus : undefined);
                   return (
                     <article className="saved-pull-list-result" role="listitem" key={job.id}>
                       <button

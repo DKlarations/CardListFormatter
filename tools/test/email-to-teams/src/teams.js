@@ -8,7 +8,6 @@ export async function postToTeams(webhookUrl, payload) {
   });
 
   if (!response.ok) {
-    const body = await response.text().catch(() => "");
-    throw new Error(`Teams post failed (${response.status}): ${body}`);
+    throw new Error(`Teams post failed (${response.status}).`);
   }
 }

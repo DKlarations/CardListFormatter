@@ -1,3 +1,5 @@
+import { timingSafeEqual } from "node:crypto";
+
 const DEFAULT_REPOSITORY = "DKlarations/CardListFormatter";
 const DEFAULT_WORKFLOW_ID = "email-to-teams.yml";
 const DEFAULT_REF = "main";
@@ -12,6 +14,7 @@ function htmlResponse(body: string, status = 200) {
     headers: {
       "content-type": "text/html; charset=utf-8",
       "cache-control": "no-store",
+      "referrer-policy": "no-referrer",
     },
   });
 }
@@ -105,11 +108,11 @@ function page(title: string, message: string, autoClose = false) {
 </html>`;
 }
 
-async function dispatchWorkflow() {
-  const token = env("GITHUB_WORKFLOW_TOKEN");
-  const repository = env("GITHUB_WORKFLOW_REPOSITORY", DEFAULT_REPOSITORY);
-  const workflowId = env("GITHUB_WORKFLOW_ID", DEFAULT_WORKFLOW_ID);
-  const ref = env("GITHUB_WORKFLOW_REF", DEFAULT_REF);
+async function dispatchWorkflow(readEnv: typeof env, fetchImpl: typeof fetch) {
+  const token = readEnv("GITHUB_WORKFLOW_TOKEN");
+  const repository = readEnv("GITHUB_WORKFLOW_REPOSITORY", DEFAULT_REPOSITORY);
+  const workflowId = readEnv("GITHUB_WORKFLOW_ID", DEFAULT_WORKFLOW_ID);
+  const ref = readEnv("GITHUB_WORKFLOW_REF", DEFAULT_REF);
 
   if (!token) {
     return {
@@ -119,7 +122,7 @@ async function dispatchWorkflow() {
     };
   }
 
-  const response = await fetch(
+  const response = await fetchImpl(
     `https://api.github.com/repos/${repository}/actions/workflows/${workflowId}/dispatches`,
     {
       method: "POST",
@@ -142,32 +145,32 @@ async function dispatchWorkflow() {
     };
   }
 
-  const details = await response.text();
   return {
     ok: false,
-    status: response.status,
-    message: details || `GitHub returned ${response.status}.`,
+    status: 502,
+    message: `GitHub could not start the email check (${response.status}).`,
   };
 }
 
-export async function GET(request: Request) {
-  const configuredSecret = env("CHECK_EMAIL_NOW_SECRET");
-  const requestUrl = new URL(request.url);
-  const providedSecret = requestUrl.searchParams.get("secret") || "";
-
-  if (!configuredSecret || providedSecret !== configuredSecret) {
-    return htmlResponse(page("Not Found", "This link is not available."), 404);
-  }
-
-  try {
-    const result = await dispatchWorkflow();
-    if (result.ok) {
-      return htmlResponse(page("Email Check Started", "Email check started. This tab will try to close automatically in 15 seconds.", true));
+export function createCheckEmailNowHandler({ readEnv = env, fetchImpl = fetch } = {}) {
+  return async (request: Request) => {
+    const configuredSecret = readEnv("CHECK_EMAIL_NOW_SECRET");
+    const providedSecret = new URL(request.url).searchParams.get("secret") || "";
+    const expected = Buffer.from(configuredSecret);
+    const supplied = Buffer.from(providedSecret);
+    if (!configuredSecret || expected.length !== supplied.length || !timingSafeEqual(expected, supplied)) {
+      return htmlResponse(page("Not Found", "This link is not available."), 404);
     }
-
-    return htmlResponse(page("Email Check Failed", result.message), result.status);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unexpected error.";
-    return htmlResponse(page("Email Check Failed", message), 500);
-  }
+    try {
+      const result = await dispatchWorkflow(readEnv, fetchImpl);
+      if (result.ok) {
+        return htmlResponse(page("Email Check Started", "Email check started. This tab will try to close automatically in 15 seconds.", true));
+      }
+      return htmlResponse(page("Email Check Failed", result.message), result.status);
+    } catch {
+      return htmlResponse(page("Email Check Failed", "The email check could not be started. Please try again later."), 502);
+    }
+  };
 }
+
+export const GET = createCheckEmailNowHandler();

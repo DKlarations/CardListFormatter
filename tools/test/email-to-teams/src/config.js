@@ -47,8 +47,12 @@ export function validateConfig(config) {
   if (!config.imap.user) missing.push("IMAP_USER");
   if (!config.imap.password) missing.push("IMAP_PASSWORD");
   if (!config.dryRun && !config.teamsWebhookUrl) missing.push("TEAMS_WEBHOOK_URL");
+  if (!config.dryRun && !config.formattedListWriteSecret) missing.push("FORMATTED_LIST_WRITE_SECRET");
 
   if (missing.length) {
     throw new Error(`Missing required environment values: ${missing.join(", ")}`);
+  }
+  if (!config.checkEmailNowUrl) {
+    console.warn("CHECK_EMAIL_NOW_URL is not configured; Teams cards will omit Check Email Now.");
   }
 }
