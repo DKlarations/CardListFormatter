@@ -315,7 +315,7 @@ function canonicalPricingNameForItem(item: any) {
   return item.card?.name || item.mtgjsonCard?.name || outputDisplayName(item);
 }
 
-async function fallbackCatalogWithPrintHistories(
+export async function fallbackCatalogWithPrintHistories(
   items: any[],
   currentCatalog: PricingCatalog,
   targetCardNames: string[],
@@ -323,7 +323,9 @@ async function fallbackCatalogWithPrintHistories(
 ): Promise<PrintHistoryRecoveryResult> {
   // Formatter/Scryfall fallback records intentionally have no MTGJSON prices.
   // Never let them replace an already hydrated exact-printing catalog entry.
-  const targetNamesByKey = new Map(targetCardNames.map((cardName) => [pricingNameKey(cardName), cardName]));
+  const targetNamesByKey = new Map(targetCardNames
+    .filter((cardName) => !editionOptions(cardFromCatalog(currentCatalog, cardName)).length)
+    .map((cardName) => [pricingNameKey(cardName), cardName]));
   const sourceItemsByKey = new Map<string, any>();
   items.forEach((item) => {
     if (item.status !== "found") return;
@@ -342,6 +344,7 @@ async function fallbackCatalogWithPrintHistories(
   const enriched = await enrichPrintHistories(
     recoveryEntries.map(({ item }) => ({
       ...item,
+      card: item.card?.name ? item.card : { ...item.card, name: canonicalPricingNameForItem(item) },
       // Compact shared items retain canonical identity but not Scryfall's URI.
       // This asks the existing protected enrichment path to recover it exactly.
       ...(!item.card?.prints_search_uri ? { lookupSource: "mtgjson" } : {}),
@@ -350,7 +353,7 @@ async function fallbackCatalogWithPrintHistories(
     [],
     setMessage,
     false,
-    { useMtgjson: true, useScryfall: true, pricingMode: true },
+    { useMtgjson: true, useScryfall: true, enrichmentPurpose: "pricing-recovery", signal: null },
   );
   if (!Array.isArray(enriched) || enriched.length !== recoveryEntries.length) {
     throw new Error("Printing-history recovery returned an incomplete response.");
@@ -1198,9 +1201,14 @@ export default function PricingPanel({
         specialRequests: [],
         lookupKey: pricingNameKey(inputName),
       };
-      const providerOptions = { useMtgjson: true, useScryfall: true, pricingMode: true };
-      const resolved = await resolveCardNames([candidate], setLoadMessage, false, providerOptions);
-      const enriched = await enrichPrintHistories(resolved, false, [], setLoadMessage, false, providerOptions);
+      const providerOptions = { useMtgjson: true, useScryfall: true, enrichmentPurpose: "pricing-recovery" as const, signal: null };
+      const resolved = await resolveCardNames([candidate], setLoadMessage, false, { ...providerOptions, enrichmentPurpose: "formatter" });
+      const existingCanonicalName = resolved[0] ? canonicalPricingNameForItem(resolved[0]) : "";
+      const alreadyCataloged = resolved[0]?.status === "found"
+        && editionOptions(cardFromCatalog(catalogRef.current, existingCanonicalName)).length > 0;
+      const enriched = alreadyCataloged
+        ? resolved
+        : await enrichPrintHistories(resolved, false, [], setLoadMessage, false, providerOptions);
       const item = enriched[0];
       const canonicalName = item?.card?.name || item?.mtgjsonCard?.name || "";
       if (!item || item.status !== "found" || !canonicalName) {
@@ -1218,7 +1226,7 @@ export default function PricingPanel({
       const nextCatalog = { ...catalogRef.current, ...manualCatalog };
       catalogRef.current = nextCatalog;
       setCatalog(nextCatalog);
-      usingLiveFallbackRef.current = true;
+      usingLiveFallbackRef.current ||= !alreadyCataloged;
       const manualCoverage = completedPricingCatalogCoverage([canonicalName], nextCatalog, {
         completedShardKeys: [pricingShardKey(canonicalName)],
       });

@@ -1,7 +1,7 @@
 {
   "name": "rrg-pull-list-formatter",
   "private": true,
-  "version": "0.5.3",
+  "version": "0.5.4",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1",
@@ -10,6 +10,7 @@
     "build:server-pricing": "esbuild src/pricing.ts --bundle --platform=node --format=esm --outfile=server/generated/server-pricing.mjs",
     "build": "npm run build:server-formatter && npm run build:server-pricing && vite build",
     "test": "npm run build:server-formatter && npm run build:server-pricing && node --test test/*.test.mjs",
+    "benchmark:formatter": "node tools/benchmark/formatter.mjs",
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {

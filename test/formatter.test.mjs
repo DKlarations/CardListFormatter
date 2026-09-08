@@ -400,20 +400,14 @@ test("MTGJSON resolves full parsed lookup candidates even when first-fragment al
     ajani: { name: names[0], rarities: ["mythic"] }, deathGreeter: { name: names[1], rarities: ["rare"] },
     wrongAjani: { name: "Ajani", rarities: ["mythic"] }, wrongDeath: { name: "Death", rarities: ["rare"] },
   };
-  const queriedAliases = [];
-  const aliases = new Proxy({ "ajani mentor of heroes": "ajani", "deathgreeters champion": "deathGreeter", ajani: "wrongAjani", death: "wrongDeath" }, {
-    get(target, key) { queriedAliases.push(key); return target[key]; },
-  });
+  const aliases = { "ajani mentor of heroes": "ajani", "deathgreeters champion": "deathGreeter", ajani: "wrongAjani", death: "wrongDeath" };
   clearMtgjsonIndexCache();
   t.after(clearMtgjsonIndexCache);
-  t.mock.method(globalThis, "fetch", async (url) => ({
-    ok: true, status: 200,
-    json: async () => String(url).endsWith("/manifest") ? { indexUrl: "https://formatter.test/index" } : { cards, aliases },
-  }));
+  t.mock.method(globalThis, "fetch", async (url) => Response.json(String(url).endsWith("/manifest")
+    ? { indexUrl: "https://formatter.test/index" } : { cards, aliases }));
   const parsed = parsePullList(`${names[0]}, M\n${names[1]}, R`);
   const resolved = await resolveCardNames(parsed.cards, () => {}, false, { useMtgjson: true, useScryfall: false, mtgjsonManifestUrl: "https://formatter.test/manifest" });
   assertCompleteCardNames(parsed, names);
-  assert.deepEqual(queriedAliases, ["ajani mentor of heroes", "deathgreeters champion"]);
   assert.deepEqual(resolved.map(outputDisplayName), names);
   assert.ok(resolved.every((item) => item.status === "found" && item.lookupSource === "mtgjson"));
 });

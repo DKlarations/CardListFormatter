@@ -107,6 +107,383 @@ var GENERATED_SAMPLE_CUSTOMER_NAME_KEYS = new Set(
   GENERATED_SAMPLE_CUSTOMER_NAMES.map(sampleCustomerNameKey)
 );
 
+// src/processing-performance.ts
+function processingNow() {
+  return typeof performance !== "undefined" ? performance.now() : Date.now();
+}
+function createProcessingPerformance() {
+  return {
+    startedAt: processingNow(),
+    totalMs: 0,
+    stages: { parse: 0, manifest: 0, indexLoad: 0, indexParseValidation: 0, mtgjsonLookup: 0, scryfallExactBatch: 0, scryfallFuzzy: 0, printHistory: 0 },
+    counts: { manifestRequests: 0, indexRequests: 0, indexCacheHits: 0, mtgjsonMatches: 0, mtgjsonMisses: 0, ambiguousMatches: 0, scryfallCollection: 0, scryfallExact: 0, scryfallFuzzy: 0, scryfallSearch: 0, scryfallPrintPages: 0, scryfallSets: 0, scryfallCacheHits: 0, retries: 0, remoteCards: 0, skippedCards: 0 },
+    reasons: {},
+    indexSource: "unused",
+    stage: "parse",
+    outcome: "running"
+  };
+}
+function countPerformance(report, name, amount = 1) {
+  if (report) report.counts[name] = (report.counts[name] || 0) + amount;
+}
+function finishProcessingPerformance(report, outcome = "complete") {
+  report.totalMs = processingNow() - report.startedAt;
+  report.outcome = outcome;
+  return { ...report, stages: { ...report.stages }, counts: { ...report.counts }, reasons: { ...report.reasons } };
+}
+
+// src/mtgjson-resolution-index.ts
+var MTGJSON_RESOLUTION_INDEX_VERSION = 3;
+var RARITIES = /* @__PURE__ */ new Set(["common", "uncommon", "rare", "mythic"]);
+var STRING_FIELDS = ["asciiName", "layout", "scryfallOracleId", "type"];
+var ARRAY_FIELDS = ["colorIdentity", "printings", "subtypes", "supertypes", "rarities", "nonSecretRarities", "types"];
+function isRecord(value) {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+function stringArray(value) {
+  return Array.isArray(value) && value.every((entry) => typeof entry === "string");
+}
+function validateMtgjsonCardIndex(value) {
+  if (!isRecord(value) || !isRecord(value.cards)) return false;
+  if (value.version !== void 0 && ![1, 2, MTGJSON_RESOLUTION_INDEX_VERSION].includes(value.version)) return false;
+  if (value.generatedAt !== void 0 && typeof value.generatedAt !== "string") return false;
+  const currentSchema = value.version === MTGJSON_RESOLUTION_INDEX_VERSION;
+  if (currentSchema && typeof value.rarityHistoryComplete !== "boolean") return false;
+  for (const [key, card] of Object.entries(value.cards)) {
+    if (!key || !isRecord(card) || typeof card.name !== "string" || !card.name.trim()) return false;
+    if (STRING_FIELDS.some((field) => card[field] !== void 0 && typeof card[field] !== "string")) return false;
+    if (ARRAY_FIELDS.some((field) => card[field] !== void 0 && !stringArray(card[field]))) return false;
+    if (currentSchema) {
+      if (typeof card.hasPlayablePaperPrinting !== "boolean" || !stringArray(card.paperRarities)) return false;
+      if (card.paperRarities.some((rarity) => !RARITIES.has(rarity))) return false;
+      if (!card.hasPlayablePaperPrinting && card.paperRarities.length) return false;
+    }
+  }
+  if (value.aliases !== void 0) {
+    if (!isRecord(value.aliases)) return false;
+    for (const target of Object.values(value.aliases)) {
+      if (typeof target !== "string" || !Object.hasOwn(value.cards, target)) return false;
+    }
+  }
+  if (value.ambiguousAliases !== void 0) {
+    if (!isRecord(value.ambiguousAliases)) return false;
+    for (const [alias, targets] of Object.entries(value.ambiguousAliases)) {
+      if (!stringArray(targets) || new Set(targets).size < 2 || targets.some((key) => !Object.hasOwn(value.cards, key))) return false;
+      if (value.aliases && Object.hasOwn(value.aliases, alias)) return false;
+    }
+  }
+  return true;
+}
+function hasSufficientLocalPaperEvidence(card, index) {
+  return index.version === MTGJSON_RESOLUTION_INDEX_VERSION && index.rarityHistoryComplete === true && card.hasPlayablePaperPrinting === true && Array.isArray(card.paperRarities) && card.paperRarities.length > 0 && card.paperRarities.every((rarity) => RARITIES.has(rarity));
+}
+
+// src/mtgjson-index-cache.ts
+var MTGJSON_RESOLUTION_CACHE_NAME = "pullsmith-resolution-index-v1";
+var VERSIONED_MAX_AGE_MS = 60 * 60 * 1e3;
+var MUTABLE_MAX_AGE_MS = 5 * 60 * 1e3;
+var STALE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1e3;
+var REQUEST_TIMEOUT_MS = 2e4;
+function clockNow() {
+  return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+}
+function browserCacheStorage() {
+  try {
+    return typeof window !== "undefined" && typeof caches !== "undefined" ? caches : null;
+  } catch {
+    return null;
+  }
+}
+function abortError() {
+  const error = new Error("Card-name index wait canceled.");
+  error.name = "AbortError";
+  return error;
+}
+function waitForShared(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then((value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    }, (error) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    });
+  });
+}
+function safeIndexUrl(value, manifestUrl) {
+  if (typeof value !== "string" || !value.trim()) return "";
+  try {
+    const url = new URL(value, manifestUrl);
+    return ["https:", "http:"].includes(url.protocol) && !url.username && !url.password ? url.href : "";
+  } catch {
+    return "";
+  }
+}
+function parseManifest(value, manifestUrl) {
+  const data = value && typeof value === "object" ? value : {};
+  const versionedUrl = safeIndexUrl(data.versionedUrl, manifestUrl);
+  const indexUrl = versionedUrl || safeIndexUrl(data.indexUrl, manifestUrl);
+  if (!indexUrl || data.version !== void 0 && (!Number.isInteger(data.version) || Number(data.version) < 1)) {
+    throw new Error("Card-name index manifest is invalid.");
+  }
+  return { version: Number(data.version) || 0, indexUrl, versioned: Boolean(versionedUrl) };
+}
+function emptyDiagnostics(source = "network") {
+  return { source, manifestMs: 0, indexLoadMs: 0, indexParseValidationMs: 0, manifestRequests: 0, indexRequests: 0, cacheHits: 0 };
+}
+var MtgjsonIndexLoadError = class extends Error {
+  diagnostics;
+  constructor(stage, diagnostics) {
+    super(stage === "manifest" ? "Card-name index manifest is unavailable." : "Card-name index is unavailable.");
+    this.name = "MtgjsonIndexLoadError";
+    this.diagnostics = { ...diagnostics, failureStage: stage };
+  }
+};
+function createMtgjsonIndexLoader(dependencies = {}) {
+  const now = dependencies.now || clockNow;
+  const wallNow = dependencies.wallNow || (() => Date.now());
+  const fetcher = dependencies.fetch || ((input, init) => fetch(input, init));
+  const maxVersions = Math.max(1, Math.min(2, dependencies.maxVersions || 2));
+  const timeoutMs = Math.max(1, dependencies.timeoutMs || REQUEST_TIMEOUT_MS);
+  const setTimer = dependencies.setTimer || ((callback, delay) => setTimeout(callback, delay));
+  const clearTimer = dependencies.clearTimer || ((timer) => clearTimeout(timer));
+  const yieldToUi = dependencies.yieldToUi || (() => typeof window === "undefined" ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, 0)));
+  const memory = /* @__PURE__ */ new Map();
+  const inFlight = /* @__PURE__ */ new Map();
+  let generation = 0;
+  async function openCache() {
+    try {
+      const storage = dependencies.cacheStorage === void 0 ? browserCacheStorage() : dependencies.cacheStorage;
+      return storage ? await storage.open(MTGJSON_RESOLUTION_CACHE_NAME) : null;
+    } catch {
+      return null;
+    }
+  }
+  async function fetchText(url) {
+    const controller = new AbortController();
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimer(() => {
+        controller.abort();
+        reject(new Error("Card-name index request timed out."));
+      }, timeoutMs);
+    });
+    try {
+      return await Promise.race([
+        (async () => {
+          const response = await fetcher(url, { headers: { Accept: "application/json;q=0.9,*/*;q=0.8" }, signal: controller.signal });
+          if (!response.ok) throw new Error("Card-name index request failed.");
+          return response.text();
+        })(),
+        timeout
+      ]);
+    } finally {
+      clearTimer(timer);
+    }
+  }
+  async function parseIndex(text, diagnostics) {
+    await yieldToUi();
+    const start = now();
+    try {
+      const index = JSON.parse(text);
+      if (!validateMtgjsonCardIndex(index)) throw new Error("Card-name index payload is invalid.");
+      return index;
+    } finally {
+      diagnostics.indexParseValidationMs += Math.max(0, now() - start);
+      await yieldToUi();
+    }
+  }
+  async function evict(cache, request) {
+    try {
+      await cache.delete(request);
+    } catch {
+    }
+  }
+  async function cacheEntries(cache) {
+    try {
+      const entries = [];
+      for (const request of await cache.keys()) {
+        const response = await cache.match(request);
+        if (!response) continue;
+        const savedAt = Number(response.headers.get("x-pullsmith-saved-at"));
+        const manifestUrl = response.headers.get("x-pullsmith-manifest-url") || "";
+        const indexUrl = response.headers.get("x-pullsmith-index-url") || "";
+        const manifestVersion = Number(response.headers.get("x-pullsmith-manifest-version"));
+        const indexVersion = Number(response.headers.get("x-pullsmith-index-version"));
+        const age = wallNow() - savedAt;
+        if (!Number.isFinite(savedAt) || savedAt <= 0 || age < 0 || age > STALE_MAX_AGE_MS || !manifestUrl || !indexUrl || !Number.isInteger(manifestVersion) || !Number.isInteger(indexVersion)) {
+          await evict(cache, request);
+          continue;
+        }
+        entries.push({ request, response, savedAt, manifestUrl, indexUrl, manifestVersion, indexVersion });
+      }
+      entries.sort((left, right) => right.savedAt - left.savedAt);
+      for (const entry of entries.slice(maxVersions)) await evict(cache, entry.request);
+      return entries.slice(0, maxVersions);
+    } catch {
+      return [];
+    }
+  }
+  async function readEntry(cache, entry, diagnostics) {
+    try {
+      const start = now();
+      const text = await entry.response.text();
+      diagnostics.indexLoadMs += Math.max(0, now() - start);
+      const index = await parseIndex(text, diagnostics);
+      if ((index.version || 0) !== entry.indexVersion) throw new Error("Cached index schema does not match.");
+      return index;
+    } catch {
+      await evict(cache, entry.request);
+      return null;
+    }
+  }
+  async function persist(cache, manifestUrl, manifest, text, index) {
+    try {
+      const indexVersion = index.version || 0;
+      const key = `https://pullsmith-index-cache.invalid/v1/${manifest.version}/${indexVersion}/${encodeURIComponent(manifest.indexUrl)}`;
+      await cache.put(key, new Response(text, { headers: {
+        "content-type": "application/json",
+        "x-pullsmith-saved-at": String(wallNow()),
+        "x-pullsmith-manifest-url": manifestUrl,
+        "x-pullsmith-index-url": manifest.indexUrl,
+        "x-pullsmith-manifest-version": String(manifest.version),
+        "x-pullsmith-index-version": String(indexVersion)
+      } }));
+      await cacheEntries(cache);
+    } catch {
+    }
+  }
+  async function performLoad(manifestUrl, onProgress) {
+    const diagnostics = emptyDiagnostics();
+    const cache = await openCache();
+    const entries = cache ? (await cacheEntries(cache)).filter((entry) => entry.manifestUrl === manifestUrl) : [];
+    const staleFallback = async (stage) => {
+      if (cache) {
+        for (const entry of entries) {
+          const index2 = await readEntry(cache, entry, diagnostics);
+          if (index2) {
+            diagnostics.source = "stale-fallback";
+            diagnostics.failureStage = stage;
+            diagnostics.cacheHits += 1;
+            onProgress?.("Using the last available card-name index from browser cache...");
+            return { result: { index: index2, diagnostics }, savedAt: entry.savedAt, maxAge: 0 };
+          }
+        }
+      }
+      const remembered = memory.get(manifestUrl);
+      if (remembered && wallNow() - remembered.savedAt >= 0 && wallNow() - remembered.savedAt <= STALE_MAX_AGE_MS) {
+        diagnostics.source = "stale-fallback";
+        diagnostics.failureStage = stage;
+        diagnostics.cacheHits += 1;
+        onProgress?.("Using the last available card-name index...");
+        return { result: { index: remembered.result.index, diagnostics }, savedAt: remembered.savedAt, maxAge: 0 };
+      }
+      throw new MtgjsonIndexLoadError(stage, diagnostics);
+    };
+    let manifest;
+    const manifestStart = now();
+    diagnostics.manifestRequests += 1;
+    try {
+      manifest = parseManifest(JSON.parse(await fetchText(manifestUrl)), manifestUrl);
+    } catch {
+      diagnostics.manifestMs = Math.max(0, now() - manifestStart);
+      return staleFallback("manifest");
+    }
+    diagnostics.manifestMs = Math.max(0, now() - manifestStart);
+    const maxAge = manifest.versioned ? VERSIONED_MAX_AGE_MS : MUTABLE_MAX_AGE_MS;
+    if (cache) {
+      for (const entry of entries) {
+        if (entry.indexUrl !== manifest.indexUrl || entry.manifestVersion !== manifest.version || wallNow() - entry.savedAt > maxAge) continue;
+        onProgress?.("Loading card-name index from browser cache...");
+        const index2 = await readEntry(cache, entry, diagnostics);
+        if (index2) {
+          diagnostics.source = "persistent-cache";
+          diagnostics.cacheHits += 1;
+          return { result: { index: index2, diagnostics }, savedAt: entry.savedAt, maxAge };
+        }
+      }
+    }
+    onProgress?.("Loading card-name index...");
+    let text;
+    const indexStart = now();
+    diagnostics.indexRequests += 1;
+    try {
+      text = await fetchText(manifest.indexUrl);
+    } catch {
+      diagnostics.indexLoadMs += Math.max(0, now() - indexStart);
+      return staleFallback("index");
+    }
+    diagnostics.indexLoadMs += Math.max(0, now() - indexStart);
+    let index;
+    try {
+      index = await parseIndex(text, diagnostics);
+      if (manifest.version && index.version !== manifest.version) throw new Error("Index and manifest schemas differ.");
+    } catch {
+      return staleFallback("index");
+    }
+    if (cache) await persist(cache, manifestUrl, manifest, text, index);
+    return { result: { index, diagnostics }, savedAt: wallNow(), maxAge };
+  }
+  function load(manifestUrl, options = {}) {
+    if (options.signal?.aborted) return Promise.reject(abortError());
+    const remembered = memory.get(manifestUrl);
+    if (remembered && remembered.maxAge > 0 && wallNow() - remembered.savedAt >= 0 && wallNow() - remembered.savedAt <= remembered.maxAge) {
+      return Promise.resolve({ index: remembered.result.index, diagnostics: { ...emptyDiagnostics("memory"), cacheHits: 1 } });
+    }
+    let flight = inFlight.get(manifestUrl);
+    if (!flight) {
+      const loadGeneration = generation;
+      const listeners = /* @__PURE__ */ new Set();
+      const shared = performLoad(manifestUrl, (message) => {
+        if (generation !== loadGeneration) return;
+        for (const listener2 of listeners) {
+          try {
+            listener2(message);
+          } catch {
+          }
+        }
+      }).then(({ result, savedAt, maxAge }) => {
+        if (generation === loadGeneration) {
+          memory.delete(manifestUrl);
+          memory.set(manifestUrl, { result, savedAt, maxAge });
+          while (memory.size > maxVersions) memory.delete(memory.keys().next().value);
+        }
+        return result;
+      }).finally(() => {
+        if (inFlight.get(manifestUrl)?.promise === shared) inFlight.delete(manifestUrl);
+      });
+      flight = { promise: shared, listeners };
+      inFlight.set(manifestUrl, flight);
+    }
+    const listener = (message) => {
+      if (!options.signal?.aborted) options.onProgress?.(message);
+    };
+    flight.listeners.add(listener);
+    return waitForShared(flight.promise, options.signal).then((result) => ({ index: result.index, diagnostics: { ...result.diagnostics } })).finally(() => flight.listeners.delete(listener));
+  }
+  return {
+    load,
+    // Optional prefetch failures remain silent, and rejected requests are removed before the next attempt.
+    prefetch: (manifestUrl) => load(manifestUrl).then(() => void 0, () => void 0),
+    clearMemory() {
+      generation += 1;
+      memory.clear();
+      inFlight.clear();
+    }
+  };
+}
+var sharedResolutionIndexLoader = createMtgjsonIndexLoader();
+var loadMtgjsonResolutionIndex = sharedResolutionIndexLoader.load;
+var prefetchMtgjsonResolutionIndex = sharedResolutionIndexLoader.prefetch;
+var clearMtgjsonResolutionIndexMemory = sharedResolutionIndexLoader.clearMemory;
+
 // src/formatter.ts
 var SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 var SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -127,11 +504,11 @@ var scryfallRequestGate = Promise.resolve();
 var lastScryfallRequestAt = 0;
 var activeScryfallSignal = null;
 var activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
-var mtgjsonIndexPromise = null;
-var mtgjsonIndexUrl = "";
 function clearMtgjsonIndexCache() {
-  mtgjsonIndexPromise = null;
-  mtgjsonIndexUrl = "";
+  clearMtgjsonResolutionIndexMemory();
+}
+function prefetchMtgjsonIndex() {
+  return prefetchMtgjsonResolutionIndex(defaultMtgjsonManifestUrl());
 }
 var sampleCardList = `1 Chub Toad - G unc
 Storm crow
@@ -316,22 +693,45 @@ function normalizeName(value) {
 function compactName(value) {
   return normalizeName(value).replace(/\s+/g, "");
 }
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms, signal) {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const cancel = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", cancel);
+      reject(new DOMException("Processing canceled.", "AbortError"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", cancel);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
 }
-async function waitForScryfallSlot() {
+function providerContext(options, carefulMode = false) {
+  return {
+    ...options,
+    signal: options.signal === void 0 ? activeScryfallSignal : options.signal,
+    minIntervalMs: carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : Math.max(SCRYFALL_MIN_INTERVAL_MS, options.minIntervalMs || (options.signal === void 0 ? activeScryfallMinIntervalMs : SCRYFALL_MIN_INTERVAL_MS))
+  };
+}
+async function waitForScryfallSlot(context) {
   const previousGate = scryfallRequestGate;
   let releaseGate;
   scryfallRequestGate = new Promise((resolve) => {
     releaseGate = resolve;
   });
-  await previousGate;
-  const elapsed = Date.now() - lastScryfallRequestAt;
-  if (elapsed < activeScryfallMinIntervalMs) {
-    await sleep(activeScryfallMinIntervalMs - elapsed);
+  try {
+    await previousGate;
+    throwIfAborted(context.signal);
+    const elapsed = Date.now() - lastScryfallRequestAt;
+    const interval = context.minIntervalMs || SCRYFALL_MIN_INTERVAL_MS;
+    if (elapsed < interval) await sleep(interval - elapsed, context.signal);
+    throwIfAborted(context.signal);
+    lastScryfallRequestAt = Date.now();
+  } finally {
+    releaseGate();
   }
-  lastScryfallRequestAt = Date.now();
-  releaseGate();
 }
 function cacheKeyForRequest(url, options = {}) {
   const method = (options.method || "GET").toUpperCase();
@@ -363,8 +763,8 @@ function writeCachedResponse(url, options = {}, result) {
   } catch {
   }
 }
-function throwIfAborted() {
-  if (activeScryfallSignal?.aborted) {
+function throwIfAborted(signal = activeScryfallSignal) {
+  if (signal?.aborted) {
     throw new DOMException("Processing canceled.", "AbortError");
   }
 }
@@ -755,9 +1155,26 @@ function mergeRequestedPrinting(a, b) {
   return Object.keys(shared).length ? shared : void 0;
 }
 function hasSpecialPrintRequest(item) {
-  return (item.specialRequests || []).some((request) => request !== "NONFOIL");
+  return Boolean(item.requestedPrinting?.setCode) || (item.specialRequests || []).some((request) => request !== "NONFOIL");
+}
+function requiresScryfallEnrichment(item, options = {}) {
+  const decision = (required, reason) => ({ required, reason });
+  if (item.isToken) return decision(false, "token");
+  if ((item.isBasicLand || BASIC_LAND_NAMES.has(item.inputName)) && !hasSpecialPrintRequest(item)) return decision(false, "basic-land");
+  if (item.status === "review") return decision(false, "already-complete");
+  if (item.status !== "found") return decision(true, item.enrichmentReason || "fuzzy-name-required");
+  if (item.prints?.length && item.eligibleRarityChecked && !item.printLookupFailed) return decision(false, "already-complete");
+  if (options.enrichmentPurpose === "pricing-recovery") return decision(true, "pricing-recovery");
+  if (options.enrichmentPurpose === "case-check") return decision(true, "case-check");
+  if (item.requestedFlavor) return decision(true, "requested-flavor-name");
+  if (hasSpecialPrintRequest(item)) return decision(true, "special-printing-request");
+  if (!item.localPaperVerified && !isPlayablePaperCard(item.card)) return decision(true, "insufficient-paper-confidence");
+  if (!item.localRarityVerified) return decision(true, "insufficient-local-rarity");
+  return decision(false, "already-complete");
 }
 function printMatchesSpecialRequests(print, item) {
+  if (!isPlayablePaperCard(print)) return false;
+  if (item.requestedPrinting?.setCode && String(print.set || "").toUpperCase() !== item.requestedPrinting.setCode.toUpperCase()) return false;
   const requests = item.specialRequests || [];
   if (!requests.length) return true;
   return requests.every((request) => {
@@ -780,7 +1197,7 @@ function specialRequestNote(item) {
 }
 function specialRequestReviewNote(item) {
   const requests = item.specialRequests || [];
-  if (!requests.length) return "";
+  if (!requests.length) return item.requestedPrinting?.setCode ? "Requested set not found" : "";
   if (requests.length === 1) return `${requests[0]} version not found`;
   return `${requests.join(" / ")} version not found`;
 }
@@ -969,32 +1386,6 @@ function scryfallRequestHeaders(headersInit) {
   }
   return headers;
 }
-async function fetchJsonDirect(url) {
-  throwIfAborted();
-  const response = await fetch(url, {
-    headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
-    signal: activeScryfallSignal || void 0
-  });
-  if (!response.ok) {
-    throw new Error(`MTGJSON index request failed (${response.status}).`);
-  }
-  return response.json();
-}
-async function loadMtgjsonIndex(manifestUrl = "") {
-  const resolvedManifestUrl = manifestUrl || defaultMtgjsonManifestUrl();
-  if (mtgjsonIndexPromise && mtgjsonIndexUrl === resolvedManifestUrl) return mtgjsonIndexPromise;
-  mtgjsonIndexUrl = resolvedManifestUrl;
-  mtgjsonIndexPromise = (async () => {
-    const manifest = await fetchJsonDirect(resolvedManifestUrl);
-    const indexUrl = manifest?.indexUrl || manifest?.versionedUrl || "";
-    if (!indexUrl) throw new Error("MTGJSON index manifest did not include an index URL.");
-    return fetchJsonDirect(indexUrl);
-  })().catch((error) => {
-    mtgjsonIndexPromise = null;
-    throw error;
-  });
-  return mtgjsonIndexPromise;
-}
 function mtgjsonAliasKey(value) {
   const normalized = normalizeName(value);
   const compact = compactName(value);
@@ -1019,30 +1410,33 @@ function findMtgjsonCard(index, inputName) {
   }
   return null;
 }
-function mtgjsonCardRarities(card) {
+function mtgjsonCardRarities(card, safePaper = false) {
+  if (safePaper) return Array.from(new Set((card.paperRarities || []).map(parseRarity).filter(Boolean)));
   const sourceRarities = card.nonSecretRarities?.length ? card.nonSecretRarities : card.rarities || [];
   return Array.from(new Set(sourceRarities.map((rarity) => parseRarity(rarity)).filter(Boolean)));
 }
-function mtgjsonCardShape(card, item) {
+function mtgjsonCardShape(card, item, paperVerified) {
   const rarity = item.statedRarities?.[0] || mtgjsonCardRarities(card)[0] || "";
   return {
     name: card.name,
     rarity,
     type_line: card.type || card.types?.join(" ") || "",
-    games: ["paper"],
-    digital: false,
+    games: paperVerified ? ["paper"] : [],
+    digital: !paperVerified,
     set_type: "mtgjson",
     scryfall_oracle_id: card.scryfallOracleId || "",
     mtgjson: card
   };
 }
-function resolveItemWithMtgjsonCard(item, card) {
+function resolveItemWithMtgjsonCard(item, card, index) {
+  const paperVerified = index.version === 3 && card.hasPlayablePaperPrinting === true;
+  const localRarityVerified = hasSufficientLocalPaperEvidence(card, index);
   const inputRarities = item.statedRarities?.length ? item.statedRarities : [];
-  const providerRarities = mtgjsonCardRarities(card);
+  const providerRarities = mtgjsonCardRarities(card, localRarityVerified);
   const rarities = providerRarities.length ? providerRarities : inputRarities;
   return {
     ...item,
-    card: mtgjsonCardShape(card, item),
+    card: mtgjsonCardShape(card, item, paperVerified),
     status: "found",
     lookupSource: "mtgjson",
     raritySource: inputRarities.length ? "input" : providerRarities.length ? "mtgjson" : "",
@@ -1052,77 +1446,166 @@ function resolveItemWithMtgjsonCard(item, card) {
     nonSecretRarities: rarities,
     eligibleRarityChecked: Boolean(rarities.length),
     mtgjsonCard: card,
-    skipScryfallEnrichment: Boolean(rarities.length && !hasSpecialPrintRequest(item))
+    localPaperVerified: paperVerified,
+    localRarityVerified,
+    requestedFlavor: ![card.name, card.asciiName].filter(Boolean).some((name) => compactName(name) === compactName(item.inputName))
   };
 }
 async function resolveExactWithMtgjson(items, setMessage, options) {
   if (!items.length) return { resolved: [], missing: items };
-  setMessage("Loading MTGJSON card index...");
-  const index = await loadMtgjsonIndex(options.mtgjsonManifestUrl);
+  if (options.performance) options.performance.stage = "index";
+  const recordDiagnostics = (diagnostics2) => {
+    if (!options.performance) return;
+    options.performance.indexSource = diagnostics2.source;
+    options.performance.indexFailureStage = diagnostics2.failureStage;
+    options.performance.stages.manifest += diagnostics2.manifestMs;
+    options.performance.stages.indexLoad += diagnostics2.indexLoadMs;
+    options.performance.stages.indexParseValidation += diagnostics2.indexParseValidationMs;
+    countPerformance(options.performance, "manifestRequests", diagnostics2.manifestRequests);
+    countPerformance(options.performance, "indexRequests", diagnostics2.indexRequests);
+    countPerformance(options.performance, "indexCacheHits", diagnostics2.cacheHits);
+    options.performance.stage = "mtgjsonLookup";
+  };
+  let loaded;
+  try {
+    loaded = await loadMtgjsonResolutionIndex(options.mtgjsonManifestUrl || defaultMtgjsonManifestUrl(), { signal: options.signal, onProgress: setMessage });
+  } catch (error) {
+    if (error?.diagnostics) recordDiagnostics(error.diagnostics);
+    throw error;
+  }
+  const { index, diagnostics } = loaded;
+  recordDiagnostics(diagnostics);
+  const lookupStarted = processingNow();
   const resolved = [];
   const missing = [];
   for (const item of items) {
     const result = findMtgjsonCard(index, item.inputName);
     if (result?.ambiguous) {
-      missing.push({ ...item, note: "Ambiguous MTGJSON exact match" });
+      countPerformance(options.performance, "ambiguousMatches");
+      missing.push({ ...item, enrichmentReason: "mtgjson-ambiguous", note: "Ambiguous MTGJSON exact match" });
       continue;
     }
     if (!result?.card) {
-      missing.push(item);
+      countPerformance(options.performance, "mtgjsonMisses");
+      missing.push({ ...item, enrichmentReason: "mtgjson-miss" });
       continue;
     }
-    if (!item.statedRarities?.length && !mtgjsonCardRarities(result.card).length && options.useScryfall !== false) {
-      missing.push({
-        ...item,
-        mtgjsonCard: result.card,
-        mtgjsonExactName: result.card.name
-      });
-      continue;
-    }
-    resolved.push(resolveItemWithMtgjsonCard(item, result.card));
+    countPerformance(options.performance, "mtgjsonMatches");
+    const local = resolveItemWithMtgjsonCard(item, result.card, index);
+    const decision = requiresScryfallEnrichment(local, options);
+    if (decision.required && options.useScryfall !== false) {
+      missing.push({ ...local, status: "missing", mtgjsonExactName: result.card.name, enrichmentReason: decision.reason });
+    } else resolved.push(local);
   }
-  setMessage(`MTGJSON matched ${resolved.length} card${resolved.length === 1 ? "" : "s"} exactly.`);
+  if (options.performance) options.performance.stages.mtgjsonLookup += processingNow() - lookupStarted;
+  setMessage(`MTGJSON matched ${resolved.length} cards ready locally; ${missing.length} need further verification.`);
   return { resolved, missing };
 }
-async function fetchJsonWithRetry(url, options = {}, attempts = 4) {
-  throwIfAborted();
+var scryfallFlights = /* @__PURE__ */ new Map();
+function evictScryfallResponse(url, options = {}) {
+  try {
+    if (typeof localStorage !== "undefined") localStorage.removeItem(cacheKeyForRequest(url, options));
+  } catch {
+  }
+}
+function validScryfallResponse(url, data, context) {
+  const type = context.requestType || scryfallRequestCounter(url);
+  if (type === "scryfallExact" || type === "scryfallFuzzy") return validScryfallCard(data);
+  if (type === "scryfallCollection" || type === "scryfallPrintPages") {
+    return Array.isArray(data?.data) && data.data.every(validScryfallCard) && (!data.has_more || typeof data.next_page === "string" && data.next_page !== url && data.next_page.length > 0);
+  }
+  if (type === "scryfallSets") return Array.isArray(data?.data) && data.data.every((set) => set && typeof set.code === "string");
+  return Number.isFinite(data?.total_cards);
+}
+function scryfallRequestCounter(url) {
+  const parsed = new URL(url);
+  if (parsed.pathname.endsWith("/collection")) return "scryfallCollection";
+  if (parsed.pathname.endsWith("/named")) return parsed.searchParams.has("exact") ? "scryfallExact" : "scryfallFuzzy";
+  if (parsed.pathname.endsWith("/sets")) return "scryfallSets";
+  if (parsed.searchParams.get("unique") === "prints" || parsed.searchParams.has("order") || /oracleid|oracle_id|!"/.test(parsed.searchParams.get("q") || "")) return "scryfallPrintPages";
+  return "scryfallSearch";
+}
+async function fetchJsonWithRetry(url, options = {}, attempts = 4, context = {}) {
+  throwIfAborted(context.signal);
   const cached = readCachedResponse(url, options);
-  if (cached) return cached;
+  if (cached && validScryfallResponse(url, cached.data, context)) {
+    countPerformance(context.performance, "scryfallCacheHits");
+    return cached;
+  }
+  if (cached) evictScryfallResponse(url, options);
+  const key = cacheKeyForRequest(url, options);
+  const existing = scryfallFlights.get(key)?.find((entry2) => entry2.signal === context.signal);
+  if (existing) {
+    countPerformance(context.performance, "scryfallCacheHits");
+    return existing.promise;
+  }
+  const entry = { signal: context.signal, promise: fetchJsonAttempts(url, options, attempts, context) };
+  scryfallFlights.set(key, [...scryfallFlights.get(key) || [], entry]);
+  try {
+    return await entry.promise;
+  } finally {
+    const remaining = (scryfallFlights.get(key) || []).filter((item) => item !== entry);
+    if (remaining.length) scryfallFlights.set(key, remaining);
+    else scryfallFlights.delete(key);
+  }
+}
+async function fetchJsonAttempts(url, options, attempts, context) {
   let lastError;
   let lastStatus = 0;
   const retryableStatuses = /* @__PURE__ */ new Set([408, 409, 425, 429, 500, 502, 503, 504]);
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    let timeout;
     try {
-      throwIfAborted();
-      await waitForScryfallSlot();
-      throwIfAborted();
-      const response = await fetch(url, {
+      throwIfAborted(context.signal);
+      await waitForScryfallSlot(context);
+      throwIfAborted(context.signal);
+      context.signal?.addEventListener("abort", abort, { once: true });
+      countPerformance(context.performance, context.requestType || scryfallRequestCounter(url));
+      if (attempt > 1) countPerformance(context.performance, "retries");
+      const deadline = new Promise((_, reject) => {
+        const cancel = () => reject(new DOMException("Request interrupted.", "AbortError"));
+        controller.signal.addEventListener("abort", cancel, { once: true });
+        timeout = setTimeout(() => controller.abort(), 15e3);
+      });
+      const response = await Promise.race([fetch(url, {
         ...options,
         headers: scryfallRequestHeaders(options.headers),
-        signal: options.signal || activeScryfallSignal || void 0
-      });
+        signal: controller.signal
+      }).then(async (response2) => ({
+        ok: response2.ok,
+        status: response2.status,
+        headers: response2.headers,
+        data: response2.ok ? await response2.json() : null
+      })), deadline]);
+      clearTimeout(timeout);
       lastStatus = response.status;
       if (retryableStatuses.has(response.status) && attempt < attempts) {
         const retryAfter = Number(response.headers.get("Retry-After")) || 1;
-        await sleep(Math.max(retryAfter * 1e3, 900 * attempt));
+        await sleep(Math.min(1e4, Math.max(retryAfter * 1e3, 900 * attempt)), context.signal);
         continue;
       }
       if (!response.ok) {
         return { ok: false, status: response.status, data: null };
       }
-      const result = { ok: true, status: response.status, data: await response.json() };
+      if (!validScryfallResponse(url, response.data, context)) return { ok: false, status: 502, data: null };
+      const result = { ok: true, status: response.status, data: response.data };
       writeCachedResponse(url, options, result);
       return result;
     } catch (error) {
-      if (error?.name === "AbortError") throw error;
+      throwIfAborted(context.signal);
       lastError = error;
-      if (attempt < attempts) await sleep(900 * attempt);
+      if (attempt < attempts) await sleep(900 * attempt, context.signal);
+    } finally {
+      clearTimeout(timeout);
+      context.signal?.removeEventListener("abort", abort);
     }
   }
   return { ok: false, status: lastStatus, data: null, error: lastError };
 }
-async function fetchCollection(items) {
-  return fetchJsonWithRetry(SCRYFALL_COLLECTION_URL, {
+async function fetchCollection(items, context) {
+  const result = await fetchJsonWithRetry(SCRYFALL_COLLECTION_URL, {
     method: "POST",
     headers: {
       Accept: "application/json;q=0.9,*/*;q=0.8",
@@ -1131,15 +1614,23 @@ async function fetchCollection(items) {
     body: JSON.stringify({
       identifiers: items.map((item) => ({ name: item.mtgjsonExactName || item.inputName }))
     })
-  });
+  }, 4, context);
+  return result.ok && (!Array.isArray(result.data?.data) || !result.data.data.every(validScryfallCard)) ? { ok: false, status: 502, data: null } : result;
 }
-async function fetchNamedCardResult(name, mode = "fuzzy") {
+function validScryfallCard(card) {
+  if (!card || typeof card !== "object" || typeof card.name !== "string" || !card.name) return false;
+  if (["rarity", "type_line", "set", "set_name", "set_type", "flavor_name", "prints_search_uri"].some((key) => card[key] !== void 0 && typeof card[key] !== "string")) return false;
+  if (["games", "finishes", "frame_effects", "promo_types"].some((key) => card[key] !== void 0 && (!Array.isArray(card[key]) || card[key].some((value) => typeof value !== "string")))) return false;
+  return card.card_faces === void 0 || Array.isArray(card.card_faces) && card.card_faces.every((face) => face && (face.flavor_name === void 0 || typeof face.flavor_name === "string"));
+}
+async function fetchNamedCardResult(name, mode = "fuzzy", context = {}) {
   const params = new URLSearchParams({ [mode]: name });
-  return fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
+  const result = await fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" }
-  });
+  }, 4, context);
+  return result.ok && !validScryfallCard(result.data) ? { ok: false, status: 502, data: null } : result;
 }
-async function hasAmbiguousPlayableName(inputName) {
+async function hasAmbiguousPlayableName(inputName, context = {}) {
   const normalized = normalizeName(inputName);
   const words = normalized.split(" ").filter(Boolean);
   if (words.length !== 1 || normalized.length < 4) return false;
@@ -1149,18 +1640,19 @@ async function hasAmbiguousPlayableName(inputName) {
   });
   const result = await fetchJsonWithRetry(`${SCRYFALL_SEARCH_URL}?${params.toString()}`, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" }
-  }, 2);
-  if (!result.ok) return false;
-  return Number(result.data?.total_cards || 0) > 1;
+  }, 2, context);
+  if (!result.ok) return result.status !== 404;
+  const totalCards = result.data?.total_cards;
+  return !Number.isFinite(totalCards) || totalCards > 1;
 }
-async function isAmbiguousFuzzyMatch(inputName, card) {
+async function isAmbiguousFuzzyMatch(inputName, card, context = {}) {
   if (!card) return false;
   if (compactName(inputName) === compactName(card.name)) return false;
-  return hasAmbiguousPlayableName(inputName);
+  return hasAmbiguousPlayableName(inputName, context);
 }
 function isPlayablePaperCard(card) {
   if (!card || card.digital) return false;
-  if (!card.games?.includes("paper")) return false;
+  if (!Array.isArray(card.games) || !card.games.includes("paper")) return false;
   if (card.set_type === "memorabilia" || card.set_type === "token") return false;
   if (/\b(Card|Emblem|Token)\b/i.test(card.type_line || "")) return false;
   return true;
@@ -1172,7 +1664,7 @@ function isPlayerRewardPrint(print) {
   return /\bplayer\s+rewards?\b/i.test(print?.set_name || "") || /^mpr$/i.test(print?.set || "");
 }
 function isEligibleRarityPrint(print) {
-  if (!print || print.digital) return false;
+  if (!isPlayablePaperCard(print)) return false;
   if (isSecretLairPrint(print) || isPlayerRewardPrint(print)) return false;
   if (print.booster) return true;
   return print.set_type === "commander";
@@ -1189,14 +1681,14 @@ function isCasePricePrint(print) {
 function isLandCard(cardOrPrint) {
   return /\bLand\b/i.test(cardOrPrint?.type_line || "");
 }
-async function fetchRecentCaseSets() {
+async function fetchRecentCaseSets(options = {}) {
   const result = await fetchJsonWithRetry(SCRYFALL_SETS_URL, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" }
-  });
-  if (!result.ok) return [];
+  }, 4, providerContext(options));
+  if (!result.ok || !Array.isArray(result.data?.data)) return Object.assign([], { lookupFailed: true });
   const today = /* @__PURE__ */ new Date();
   today.setHours(23, 59, 59, 999);
-  return (result.data.data || []).filter((set) => !set.digital).filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type)).filter((set) => set.released_at && /* @__PURE__ */ new Date(`${set.released_at}T00:00:00`) <= today).sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime()).slice(0, RECENT_CASE_SET_COUNT).map((set, index) => ({ code: set.code, index, name: set.name }));
+  return (result.data.data || []).filter((set) => set && !set.digital).filter((set) => CASE_RELEVANT_SET_TYPES.has(set.set_type)).filter((set) => set.released_at && /* @__PURE__ */ new Date(`${set.released_at}T00:00:00`) <= today).sort((a, b) => new Date(b.released_at).getTime() - new Date(a.released_at).getTime()).slice(0, RECENT_CASE_SET_COUNT).map((set, index) => ({ code: set.code, index, name: set.name }));
 }
 function isCaseStapleCard(item) {
   return [item.card?.name, item.mtgjsonCard?.name, item.inputName].filter(Boolean).some((name) => CASE_STAPLE_CARD_NAMES.has(normalizeName(name)));
@@ -1224,40 +1716,38 @@ function caseNoteForItem(item, recentSets) {
 function hasPlayablePaperPrint(prints) {
   return (prints || []).some((print) => isPlayablePaperCard(print));
 }
-async function fetchPrintFacts(card) {
+async function fetchPrintFacts(card, context) {
+  const failedFacts = () => ({
+    rarities: [card?.rarity].filter(Boolean),
+    nonSecretRarities: [card?.rarity].filter(Boolean),
+    hasFullArt: Boolean(card?.full_art),
+    prints: [card].filter(Boolean),
+    eligibleRarityChecked: false,
+    printLookupFailed: true
+  });
   if (!card?.prints_search_uri) {
-    return {
-      rarities: [card?.rarity].filter(Boolean),
-      nonSecretRarities: [card?.rarity].filter(Boolean),
-      hasFullArt: Boolean(card?.full_art),
-      prints: [card].filter(Boolean),
-      eligibleRarityChecked: false
-    };
+    return failedFacts();
   }
   let nextUrl = card.prints_search_uri;
   const prints = [];
+  const visited = /* @__PURE__ */ new Set();
   while (nextUrl) {
+    if (typeof nextUrl !== "string" || visited.has(nextUrl) || visited.size >= 100) {
+      for (const url of visited) evictScryfallResponse(url);
+      return failedFacts();
+    }
+    visited.add(nextUrl);
     const result = await fetchJsonWithRetry(nextUrl, {
       headers: { Accept: "application/json;q=0.9,*/*;q=0.8" }
-    });
-    if (!result.ok) {
-      return {
-        rarities: [card.rarity].filter(Boolean),
-        nonSecretRarities: [card.rarity].filter(Boolean),
-        hasFullArt: Boolean(card.full_art),
-        prints: [card].filter(Boolean),
-        eligibleRarityChecked: false,
-        printLookupFailed: true
-      };
-    }
+    }, 4, { ...context, requestType: "scryfallPrintPages" });
+    if (!result.ok || !Array.isArray(result.data?.data) || !result.data.data.every(validScryfallCard) || result.data.has_more && !result.data.next_page) return failedFacts();
     const data = result.data;
     prints.push(...data.data || []);
     nextUrl = data.has_more ? data.next_page : "";
-    if (nextUrl) await sleep(75);
   }
   const usablePrints = prints.length ? prints : [card];
   const eligibleRarityPrints = usablePrints.filter(isEligibleRarityPrint);
-  const rarityPrints = eligibleRarityPrints.length ? eligibleRarityPrints : usablePrints.filter((print) => !isSecretLairPrint(print) && !isPlayerRewardPrint(print) && print.set_type !== "promo");
+  const rarityPrints = eligibleRarityPrints.length ? eligibleRarityPrints : usablePrints.filter((print) => isPlayablePaperCard(print) && !isSecretLairPrint(print) && !isPlayerRewardPrint(print) && print.set_type !== "promo");
   return {
     rarities: Array.from(new Set(usablePrints.map((print) => print.rarity).filter(Boolean))),
     nonSecretRarities: Array.from(new Set(rarityPrints.map((print) => print.rarity).filter(Boolean))),
@@ -1297,19 +1787,20 @@ function resolveItemWithCard(item, card) {
     correction: normalizeName(card.name) !== normalizeName(item.inputName)
   };
 }
-async function resolveExactBatch(batch, batchNumber, setMessage) {
+async function resolveExactBatch(batch, batchNumber, setMessage, context) {
   let lastResult = null;
   for (let attempt = 1; attempt <= 2; attempt += 1) {
+    if (attempt > 1) countPerformance(context.performance, "retries");
     setMessage(attempt === 1 ? `Exact lookup batch ${batchNumber}...` : `Exact lookup batch ${batchNumber} retry ${attempt}...`);
-    lastResult = await fetchCollection(batch);
+    lastResult = await fetchCollection(batch, context);
     if (lastResult.ok) return mergeResolvedCards(batch, lastResult.data);
-    await sleep(500 * attempt);
+    if (attempt < 2) await sleep(500 * attempt, context.signal);
   }
   setMessage(`Exact lookup batch ${batchNumber} failed; trying exact names one at a time...`);
   const resolved = [];
   for (const [index, item] of batch.entries()) {
     setMessage(`Exact retry ${index + 1} of ${batch.length}: "${item.inputName}"...`);
-    const result = await fetchNamedCardResult(item.mtgjsonExactName || item.inputName, "exact");
+    const result = await fetchNamedCardResult(item.mtgjsonExactName || item.inputName, "exact", context);
     if (result.ok) {
       resolved.push(resolveItemWithCard(item, result.data));
     } else {
@@ -1319,7 +1810,6 @@ async function resolveExactBatch(batch, batchNumber, setMessage) {
         note: result.status && result.status !== 404 ? `Exact lookup failed (${result.status})` : ""
       });
     }
-    await sleep(250);
   }
   return resolved;
 }
@@ -1519,7 +2009,7 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
       printLookupFailed: false
     };
   }
-  if (item.isBasicLand) {
+  if (item.isBasicLand && !hasSpecialPrintRequest(item)) {
     return {
       ...item,
       rarities: ["common"],
@@ -1530,22 +2020,18 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
       alternateTitle: ""
     };
   }
-  if (providerOptions.useScryfall === false) {
-    if (!item.nonSecretRarities?.length && !item.rarities?.length) {
+  const decision = requiresScryfallEnrichment(item, providerOptions);
+  if (!decision.required && !item.prints?.length) {
+    return { ...item, caseNote: caseCheck ? caseNoteForItem(item, recentCaseSets) : "" };
+  }
+  if (decision.required && providerOptions.useScryfall === false) {
+    if (!item.localRarityVerified || hasSpecialPrintRequest(item) || caseCheck) {
       return {
         ...item,
         status: "review",
-        note: item.note || "Scryfall disabled; rarity not verified"
+        note: item.note || "Scryfall disabled; paper rarity or requested printing not verified"
       };
     }
-    return {
-      ...item,
-      caseNote: "",
-      alternateTitle: "",
-      lessVerified: true
-    };
-  }
-  if (item.skipScryfallEnrichment && !caseCheck && !providerOptions.pricingMode) {
     return {
       ...item,
       caseNote: "",
@@ -1554,28 +2040,26 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
     };
   }
   let itemForFacts = item;
-  if (item.lookupSource === "mtgjson" && !item.card?.prints_search_uri) {
-    const exactResult = await fetchNamedCardResult(item.card?.name || item.inputName, "exact");
+  if (decision.required && !item.card?.prints_search_uri) {
+    const exactResult = await fetchNamedCardResult(item.card?.name || item.inputName, "exact", providerOptions);
     if (exactResult.ok) {
       itemForFacts = {
         ...resolveItemWithCard(item, exactResult.data),
         lookupSource: "mtgjson+scryfall",
         mtgjsonCard: item.mtgjsonCard
       };
-    } else if (hasSpecialPrintRequest(item) || caseCheck) {
+    } else {
       return {
         ...item,
-        status: hasSpecialPrintRequest(item) ? "review" : item.status,
-        note: hasSpecialPrintRequest(item) ? "Special version not verified" : item.note,
         printLookupFailed: true
       };
     }
   }
-  const facts = await fetchPrintFacts(itemForFacts.card);
+  const facts = decision.required ? await fetchPrintFacts(itemForFacts.card, providerOptions) : itemForFacts;
   const enrichedItem = { ...itemForFacts, ...facts };
   const notPlayablePaper = !facts.printLookupFailed && !hasPlayablePaperPrint(facts.prints);
   const specialRequestMissing = hasSpecialPrintRequest(item) && !facts.printLookupFailed && !facts.prints?.some((print) => printMatchesSpecialRequests(print, item));
-  const ambiguousNonPlayable = notPlayablePaper && await hasAmbiguousPlayableName(item.inputName);
+  const ambiguousNonPlayable = notPlayablePaper && providerOptions.useScryfall !== false && await hasAmbiguousPlayableName(item.inputName, providerOptions);
   return {
     ...enrichedItem,
     status: specialRequestMissing || notPlayablePaper ? "review" : item.status,
@@ -1584,14 +2068,24 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
     note: specialRequestMissing ? specialRequestReviewNote(item) : notPlayablePaper ? ambiguousNonPlayable ? "Ambiguous card name" : "Not a playable paper card" : itemForFacts.note
   };
 }
+async function safelyEnrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions) {
+  try {
+    return await enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions);
+  } catch (error) {
+    throwIfAborted(providerOptions.signal);
+    if (error?.name === "AbortError") throw error;
+    return { ...item, printLookupFailed: true, enrichmentFailed: true };
+  }
+}
 async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage, providerOptions = {}) {
   const retriedItems = [...items];
   const failedIndexes = retriedItems.map((item, index) => ({ item, index })).filter(({ item }) => item.status === "found" && item.printLookupFailed);
   for (const [retryIndex, { item, index }] of failedIndexes.entries()) {
     setMessage(`${passLabel}: Scryfall threw an error, retrying print history ${retryIndex + 1} of ${failedIndexes.length}...`);
-    if (retryIndex > 0) await sleep(delayMs);
-    const retriedItem = await enrichResolvedItem(
-      { ...item, printLookupFailed: false },
+    if (retryIndex > 0) await sleep(delayMs, providerOptions.signal);
+    countPerformance(providerOptions.performance, "retries");
+    const retriedItem = await safelyEnrichResolvedItem(
+      item,
       caseCheck,
       recentCaseSets,
       providerOptions
@@ -1601,11 +2095,17 @@ async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delay
   return retriedItems;
 }
 async function resolveCardNames(items, setMessage, carefulMode, providerOptions = {}) {
+  providerOptions = providerContext(providerOptions, carefulMode);
+  throwIfAborted(providerOptions.signal);
+  const report = providerOptions.performance;
   const useMtgjson = providerOptions.useMtgjson !== false;
   const useScryfall = providerOptions.useScryfall !== false;
+  items = items.map((item) => BASIC_LAND_NAMES.has(item.inputName) && !hasSpecialPrintRequest(item) ? { ...item, status: "found", isBasicLand: true, card: { name: item.inputName, rarity: "common" } } : item);
   const firstPass = items.filter((item) => item.status === "found" || item.status === "review");
   let lookupItems = items.filter((item) => item.status !== "found" && item.status !== "review");
-  if (useMtgjson) {
+  const order = new Map(items.map((item, index) => [item.index, index]));
+  const ordered = (values) => values.sort((a, b) => Number(order.get(a.index)) - Number(order.get(b.index)));
+  if (useMtgjson && lookupItems.length) {
     try {
       const mtgjsonResolved = await resolveExactWithMtgjson(lookupItems, setMessage, {
         ...providerOptions,
@@ -1614,6 +2114,8 @@ async function resolveCardNames(items, setMessage, carefulMode, providerOptions 
       firstPass.push(...mtgjsonResolved.resolved);
       lookupItems = mtgjsonResolved.missing;
     } catch (error) {
+      throwIfAborted(providerOptions.signal);
+      if (error?.name === "AbortError") throw error;
       setMessage(`MTGJSON index unavailable; ${useScryfall ? "falling back to Scryfall" : "unable to verify exact names"}.`);
       if (!useScryfall) {
         firstPass.push(...lookupItems.map((item) => ({
@@ -1625,29 +2127,38 @@ async function resolveCardNames(items, setMessage, carefulMode, providerOptions 
       }
     }
   }
+  for (const item of [...firstPass, ...lookupItems]) {
+    const decision = requiresScryfallEnrichment(item, providerOptions);
+    countPerformance(report, decision.required && useScryfall ? "remoteCards" : "skippedCards");
+    if (report) report.reasons[decision.reason] = (report.reasons[decision.reason] || 0) + 1;
+  }
   if (!useScryfall) {
     firstPass.push(...lookupItems.map((item) => ({
       ...item,
       status: "review",
       note: item.note || "No MTGJSON exact match; Scryfall disabled"
     })));
-    return firstPass;
+    return ordered(firstPass);
   }
   const exactBatches = chunk(lookupItems, carefulMode ? 1 : BATCH_SIZE);
+  const exactStarted = processingNow();
+  if (report && exactBatches.length) report.stage = "scryfall-exact";
   for (const [batchIndex, batch] of exactBatches.entries()) {
-    firstPass.push(...await resolveExactBatch(batch, batchIndex + 1, setMessage));
-    await sleep(carefulMode ? 500 : 150);
+    firstPass.push(...await resolveExactBatch(batch, batchIndex + 1, setMessage, providerOptions));
   }
+  if (report) report.stages.scryfallExactBatch += processingNow() - exactStarted;
   const fuzzyResolved = [];
+  const fuzzyStarted = processingNow();
   for (const item of firstPass) {
     if (item.status === "found" || item.status === "review") {
       fuzzyResolved.push(item);
       continue;
     }
     setMessage(`Trying fuzzy match for "${item.inputName}"...`);
-    const fuzzyResult = await fetchNamedCardResult(item.inputName, "fuzzy");
+    if (report) report.stage = "scryfall-fuzzy";
+    const fuzzyResult = await fetchNamedCardResult(item.inputName, "fuzzy", providerOptions);
     const card = fuzzyResult.ok ? fuzzyResult.data : null;
-    const ambiguous = card && await isAmbiguousFuzzyMatch(item.inputName, card);
+    const ambiguous = card && await isAmbiguousFuzzyMatch(item.inputName, card, providerOptions);
     fuzzyResolved.push(
       card && !ambiguous ? resolveItemWithCard(item, card) : {
         ...item,
@@ -1655,23 +2166,34 @@ async function resolveCardNames(items, setMessage, carefulMode, providerOptions 
         note: ambiguous ? "Ambiguous card name" : item.note ? item.note.includes("not a playable paper card") ? "Not a playable paper card" : fuzzyResult.status && fuzzyResult.status !== 404 ? `${item.note}; fuzzy lookup failed (${fuzzyResult.status})` : `${item.note}; no fuzzy Scryfall match` : fuzzyResult.status && fuzzyResult.status !== 404 ? `Fuzzy lookup failed (${fuzzyResult.status})` : "No Scryfall match"
       }
     );
-    await sleep(carefulMode ? 500 : 250);
   }
-  return fuzzyResolved;
+  if (report) report.stages.scryfallFuzzy += processingNow() - fuzzyStarted;
+  return ordered(fuzzyResolved);
 }
 async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode, providerOptions = {}) {
-  let withRarities = [];
+  providerOptions = providerContext({ ...providerOptions, enrichmentPurpose: caseCheck ? "case-check" : providerOptions.enrichmentPurpose || "formatter" }, carefulMode);
+  throwIfAborted(providerOptions.signal);
+  const started = processingNow();
+  const report = providerOptions.performance;
+  if (report) report.stage = "print-history";
+  let withRarities = [...items];
   const concurrency = carefulMode ? 1 : PRINT_FACT_CONCURRENCY;
-  const printGroups = chunk(items, concurrency);
+  const remote = [];
+  for (const [index, item] of items.entries()) {
+    if (providerOptions.useScryfall !== false && requiresScryfallEnrichment(item, providerOptions).required) {
+      remote.push({ item, index });
+    } else {
+      withRarities[index] = await safelyEnrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions);
+    }
+  }
+  const printGroups = chunk(remote, concurrency);
   for (const [groupIndex, group] of printGroups.entries()) {
     const starting = groupIndex * concurrency + 1;
-    const ending = Math.min(starting + group.length - 1, items.length);
-    setMessage(providerOptions.useScryfall === false ? `Preparing MTGJSON-only output ${starting}-${ending} of ${items.length}...` : `Working through Scryfall print history ${starting}-${ending} of ${items.length}...`);
-    const enrichedGroup = await Promise.all(
-      group.map((item) => enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions))
-    );
-    withRarities.push(...enrichedGroup);
-    await sleep(carefulMode ? 500 : 250);
+    const ending = starting + group.length - 1;
+    setMessage(`Verifying Scryfall exceptions ${starting}-${ending} of ${remote.length}...`);
+    await Promise.all(group.map(async ({ item, index }) => {
+      withRarities[index] = await safelyEnrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions);
+    }));
   }
   withRarities = await retryFailedPrintHistories(
     withRarities,
@@ -1691,7 +2213,8 @@ async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage
     setMessage,
     providerOptions
   );
-  return withRarities;
+  if (report) report.stages.printHistory += processingNow() - started;
+  return withRarities.map((item) => item.printLookupFailed && (!item.localRarityVerified || hasSpecialPrintRequest(item) || item.requestedFlavor || item.enrichmentFailed || caseCheck) || caseCheck && recentCaseSets.lookupFailed && !item.isBasicLand && !item.isToken ? { ...item, status: "review", note: item.note || "Paper rarity or requested printing not verified; retry needed" } : item);
 }
 function reliabilityMessage(items, options = {}) {
   const notes = [];
@@ -1737,28 +2260,37 @@ async function processPullListText(text, options = {}) {
     setMessage = () => {
     }
   } = options;
+  const performance2 = createProcessingPerformance();
+  const parseStarted = processingNow();
   const parsed = parsePullList(text);
-  beginScryfallRun(null, carefulMode);
+  performance2.stages.parse = processingNow() - parseStarted;
+  const providerOptions = { useMtgjson, useScryfall, mtgjsonManifestUrl, enrichmentPurpose: caseCheck ? "case-check" : "formatter", signal: options.signal || null, performance: performance2, minIntervalMs: carefulMode ? 500 : 120 };
   try {
     let recentCaseSets = [];
     if (caseCheck && useScryfall) {
       setMessage("Checking recent set list for case rules...");
-      recentCaseSets = await fetchRecentCaseSets();
+      performance2.stage = "case-sets";
+      const setsStarted = processingNow();
+      recentCaseSets = await fetchRecentCaseSets(providerOptions);
+      performance2.stages.caseSets = processingNow() - setsStarted;
     }
-    const providerOptions = { useMtgjson, useScryfall, mtgjsonManifestUrl };
     const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
     const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
     const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
+    const output = formatOutput(inferred.customer, inferred.items, useCheckboxes, processedAt);
+    performance2.stage = "ready";
     return {
       parsed,
       customer: inferred.customer,
       items: inferred.items,
       processedAt,
-      output: formatOutput(inferred.customer, inferred.items, useCheckboxes, processedAt),
+      output,
+      performance: finishProcessingPerformance(performance2),
       reliabilityNote: reliabilityMessage(inferred.items, providerOptions)
     };
-  } finally {
-    endScryfallRun();
+  } catch (error) {
+    finishProcessingPerformance(performance2, error?.name === "AbortError" ? "canceled" : "failed");
+    throw error;
   }
 }
 export {
@@ -1773,8 +2305,10 @@ export {
   inferBoundaryCustomer,
   outputDisplayName,
   parsePullList,
+  prefetchMtgjsonIndex,
   processPullListText,
   reliabilityMessage,
+  requiresScryfallEnrichment,
   resolveCardNames,
   safeFileName,
   sortItemsForOutput

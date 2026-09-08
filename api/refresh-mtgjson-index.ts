@@ -1,25 +1,17 @@
 import { put } from "@vercel/blob";
 import { strFromU8, unzipSync } from "fflate";
+import { MTGJSON_RESOLUTION_INDEX_VERSION } from "../src/mtgjson-resolution-index.js";
 
 const DEFAULT_SET_LIST_URL = "https://mtgjson.com/api/v5/SetList.json.zip";
 const DEFAULT_SET_FILE_BASE_URL = "https://mtgjson.com/api/v5";
 const INDEX_PATHNAME = "mtgjson/card-index-latest.json";
 const MANIFEST_PATHNAME = "mtgjson/card-index-manifest.json";
-const INDEX_VERSION = 2;
+const INDEX_VERSION = MTGJSON_RESOLUTION_INDEX_VERSION;
 const CORS_HEADERS = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,OPTIONS",
   "access-control-allow-headers": "authorization,content-type",
 };
-const REGULAR_RARITY_SET_TYPES = new Set([
-  "core",
-  "commander",
-  "draft_innovation",
-  "expansion",
-  "funny",
-  "masters",
-  "starter",
-]);
 
 type MtgjsonRecord = Record<string, any>;
 
@@ -39,6 +31,13 @@ type IndexedCard = {
   supertypes: string[];
   rarities: string[];
   nonSecretRarities: string[];
+  hasPlayablePaperPrinting: boolean;
+  paperRarities: string[];
+  // Construction-only pools must stay separate until every set has been merged.
+  _eligiblePaperRarities?: string[];
+  _fallbackPaperRarities?: string[];
+  _hasEligiblePaperPrinting?: boolean;
+  _hasUnknownEligibleRarity?: boolean;
   type: string;
   types: string[];
 };
@@ -46,6 +45,7 @@ type IndexedCard = {
 type CardIndex = {
   version: number;
   generatedAt: string;
+  rarityHistoryComplete: boolean;
   source: {
     name: string;
     url: string;
@@ -121,26 +121,53 @@ function normalizeMtgjsonRarity(value: unknown) {
   return ["common", "uncommon", "rare", "mythic"].includes(rarity) ? rarity : "";
 }
 
-function isRegularRarityPrint(record: MtgjsonRecord) {
-  if (!normalizeMtgjsonRarity(record.rarity)) return false;
-
-  const setCode = String(record.setCode || "").toUpperCase();
-  const setType = String(record.setType || "").toLowerCase();
+function isPlayablePaperPrinting(record: MtgjsonRecord) {
   const availability = Array.isArray(record.availability) ? record.availability.map((value) => String(value).toLowerCase()) : [];
-  const promoTypes = Array.isArray(record.promoTypes) ? record.promoTypes.map((value) => String(value).toLowerCase()) : [];
-
-  return !record.isOnlineOnly
-    && (!availability.length || availability.includes("paper"))
-    && !record.isPromo
-    && setCode !== "SLD"
-    && setType !== "promo"
-    && REGULAR_RARITY_SET_TYPES.has(setType)
-    && !promoTypes.some((value) => value.includes("secret lair") || value.includes("player rewards"));
+  const setType = String(record.setType || "").toLowerCase();
+  const type = firstString(record.type, Array.isArray(record.types) ? record.types.join(" ") : "");
+  return availability.includes("paper")
+    && !record.isOnlineOnly
+    && !record.setIsOnlineOnly
+    && !record.isRebalanced
+    && Boolean(setType && type)
+    && setType !== "memorabilia"
+    && setType !== "token"
+    && !/\b(Card|Emblem|Token)\b/i.test(type)
+    && !/^(token|double_faced_token|emblem|art_series)$/i.test(String(record.layout || ""));
 }
 
-function rarityValues(records: MtgjsonRecord[], regularOnly: boolean) {
-  const sourceRecords = regularOnly ? records.filter(isRegularRarityPrint) : records;
-  return uniqueStrings(sourceRecords.map((record) => normalizeMtgjsonRarity(record.rarity)).filter(Boolean));
+function isExcludedRarityPrinting(record: MtgjsonRecord) {
+  const setCode = String(record.setCode || "").toUpperCase();
+  const setName = String(record.setName || "");
+  const promoTypes = Array.isArray(record.promoTypes) ? record.promoTypes.map((value) => String(value).toLowerCase()) : [];
+  return /^SL[DUPC]?$/.test(setCode)
+    || setCode === "MPR"
+    || /\b(secret\s+lair|player\s+rewards?)\b/i.test(setName)
+    || promoTypes.some((value) => /secret\s*lair|player\s*rewards/.test(value));
+}
+
+function isRegularRarityPrint(record: MtgjsonRecord) {
+  return isPlayablePaperPrinting(record)
+    && !isExcludedRarityPrinting(record)
+    && (String(record.setType || "").toLowerCase() === "commander"
+      || (Array.isArray(record.boosterTypes) && record.boosterTypes.length > 0));
+}
+
+function isFallbackRarityPrint(record: MtgjsonRecord) {
+  return isPlayablePaperPrinting(record)
+    && !isExcludedRarityPrinting(record)
+    && String(record.setType || "").toLowerCase() !== "promo";
+}
+
+function rarityValues(records: MtgjsonRecord[]) {
+  return uniqueStrings(records.map((record) => normalizeMtgjsonRarity(record.rarity)).filter(Boolean));
+}
+
+function supportsBoosterEvidence(meta: Record<string, any> = {}) {
+  const version = /^v?(\d+)\.(\d+)\.(\d+)/.exec(String(meta.version || ""));
+  return Boolean(version && (Number(version[1]) > 5
+    || (Number(version[1]) === 5 && (Number(version[2]) > 2
+      || (Number(version[2]) === 2 && Number(version[3]) >= 1)))));
 }
 
 function cardFromMtgjsonRecords(dataName: string, records: MtgjsonRecord[]): IndexedCard {
@@ -148,8 +175,11 @@ function cardFromMtgjsonRecords(dataName: string, records: MtgjsonRecord[]): Ind
   const primary = usableRecords.find((record) => normalizeName(record.name || "") === normalizeName(dataName))
     || usableRecords[0]
     || {};
-  const rarities = rarityValues(usableRecords, false);
-  const regularRarities = rarityValues(usableRecords, true);
+  const rarities = rarityValues(usableRecords);
+  const eligiblePaperPrints = usableRecords.filter(isRegularRarityPrint);
+  const regularRarities = rarityValues(eligiblePaperPrints);
+  const fallbackRarities = rarityValues(usableRecords.filter(isFallbackRarityPrint));
+  const paperRarities = regularRarities.length ? regularRarities : fallbackRarities;
 
   return {
     name: firstString(primary.name, dataName),
@@ -161,7 +191,13 @@ function cardFromMtgjsonRecords(dataName: string, records: MtgjsonRecord[]): Ind
     subtypes: uniqueStrings(usableRecords.map((record) => record.subtypes || [])),
     supertypes: uniqueStrings(usableRecords.map((record) => record.supertypes || [])),
     rarities,
-    nonSecretRarities: regularRarities,
+    nonSecretRarities: paperRarities,
+    hasPlayablePaperPrinting: usableRecords.some(isPlayablePaperPrinting),
+    paperRarities,
+    _eligiblePaperRarities: regularRarities,
+    _fallbackPaperRarities: fallbackRarities,
+    _hasEligiblePaperPrinting: eligiblePaperPrints.length > 0,
+    _hasUnknownEligibleRarity: eligiblePaperPrints.some((record) => !normalizeMtgjsonRarity(record.rarity)),
     type: firstString(primary.type),
     types: uniqueStrings(usableRecords.map((record) => record.types || [])),
   };
@@ -179,6 +215,11 @@ function addAlias(
   [normalizedAlias, compactAlias].forEach((key) => {
     if (!key) return;
 
+    if (ambiguousAliases[key]) {
+      delete aliases[key];
+      ambiguousAliases[key] = uniqueStrings([...ambiguousAliases[key], cardKey]);
+      return;
+    }
     const existing = aliases[key];
     if (!existing) {
       if (!ambiguousAliases[key]?.includes(cardKey)) {
@@ -221,6 +262,8 @@ function groupedRecordsFromPayload(payload: MtgjsonPayload) {
         ...record,
         setCode: firstString(record.setCode, setCode),
         setType: firstString(record.setType, setType),
+        setName: firstString(set.name, record.setName),
+        setIsOnlineOnly: Boolean(set.isOnlineOnly || record.setIsOnlineOnly),
       });
       grouped.set(cardKey, existing);
     });
@@ -247,7 +290,7 @@ function groupedRecordsFromPayload(payload: MtgjsonPayload) {
   return grouped;
 }
 
-export function buildCardIndexFromMtgjsonPayload(payload: MtgjsonPayload, sourceUrl = DEFAULT_SET_LIST_URL): CardIndex {
+export function buildCardIndexFromMtgjsonPayload(payload: MtgjsonPayload, sourceUrl = DEFAULT_SET_LIST_URL, deferFinalization = false): CardIndex {
   const generatedAt = new Date().toISOString();
   const cards: Record<string, IndexedCard> = {};
   const aliases: Record<string, string> = {};
@@ -273,9 +316,11 @@ export function buildCardIndexFromMtgjsonPayload(payload: MtgjsonPayload, source
     });
   });
 
-  return {
+  const index: CardIndex = {
     version: INDEX_VERSION,
     generatedAt,
+    // A lone set and AtomicCards cannot establish a complete rarity history.
+    rarityHistoryComplete: /allprintings/i.test(sourceUrl) && supportsBoosterEvidence(payload.meta),
     source: {
       name: sourceName(sourceUrl),
       url: sourceUrl,
@@ -291,6 +336,7 @@ export function buildCardIndexFromMtgjsonPayload(payload: MtgjsonPayload, source
     aliases,
     ambiguousAliases,
   };
+  return deferFinalization ? index : finalizeCardIndex(index);
 }
 
 function emptyCardIndex(sourceUrl: string, meta: Record<string, any> = {}): CardIndex {
@@ -298,6 +344,7 @@ function emptyCardIndex(sourceUrl: string, meta: Record<string, any> = {}): Card
   return {
     version: INDEX_VERSION,
     generatedAt,
+    rarityHistoryComplete: false,
     source: {
       name: sourceName(sourceUrl),
       url: sourceUrl,
@@ -327,6 +374,12 @@ function mergeIndexedCard(existing: IndexedCard, incoming: IndexedCard): Indexed
     supertypes: uniqueStrings([existing.supertypes, incoming.supertypes]),
     rarities: uniqueStrings([existing.rarities, incoming.rarities]),
     nonSecretRarities: uniqueStrings([existing.nonSecretRarities, incoming.nonSecretRarities]),
+    hasPlayablePaperPrinting: existing.hasPlayablePaperPrinting || incoming.hasPlayablePaperPrinting,
+    paperRarities: uniqueStrings([existing.paperRarities, incoming.paperRarities]),
+    _eligiblePaperRarities: uniqueStrings([existing._eligiblePaperRarities || [], incoming._eligiblePaperRarities || []]),
+    _fallbackPaperRarities: uniqueStrings([existing._fallbackPaperRarities || [], incoming._fallbackPaperRarities || []]),
+    _hasEligiblePaperPrinting: Boolean(existing._hasEligiblePaperPrinting || incoming._hasEligiblePaperPrinting),
+    _hasUnknownEligibleRarity: Boolean(existing._hasUnknownEligibleRarity || incoming._hasUnknownEligibleRarity),
     type: firstString(existing.type, incoming.type),
     types: uniqueStrings([existing.types, incoming.types]),
   };
@@ -365,9 +418,14 @@ function mergeCardIndex(target: CardIndex, incoming: CardIndex) {
 
 function finalizeCardIndex(index: CardIndex) {
   Object.values(index.cards).forEach((card) => {
-    if (!card.nonSecretRarities.length && card.rarities.length) {
-      card.nonSecretRarities = card.rarities;
-    }
+    card.paperRarities = card._hasUnknownEligibleRarity ? []
+      : card._hasEligiblePaperPrinting ? card._eligiblePaperRarities || []
+        : card._fallbackPaperRarities || [];
+    card.nonSecretRarities = card.paperRarities;
+    delete card._eligiblePaperRarities;
+    delete card._fallbackPaperRarities;
+    delete card._hasEligiblePaperPrinting;
+    delete card._hasUnknownEligibleRarity;
   });
 
   index.counts = {
@@ -448,6 +506,7 @@ export async function buildCardIndexFromSetFiles(setListUrl: string, setFileBase
   const fetchConcurrency = Math.max(1, Number(env("MTGJSON_SET_FETCH_CONCURRENCY", "8")) || 8);
   const setBatches = chunk(selectedSets, fetchConcurrency);
   const failures: { code: string; error: string }[] = [];
+  let completeSourceEvidence = supportsBoosterEvidence(setListPayload.meta);
   const index = emptyCardIndex(setListUrl, {
     ...(setListPayload.meta || {}),
     setFileBaseUrl,
@@ -473,7 +532,8 @@ export async function buildCardIndexFromSetFiles(setListUrl: string, setFileBase
     }));
 
     payloads.filter(Boolean).forEach((entry) => {
-      const setIndex = buildCardIndexFromMtgjsonPayload(entry!.payload, entry!.sourceUrl);
+      completeSourceEvidence &&= supportsBoosterEvidence(entry!.payload.meta);
+      const setIndex = buildCardIndexFromMtgjsonPayload(entry!.payload, entry!.sourceUrl, true);
       mergeCardIndex(index, setIndex);
     });
   }
@@ -483,6 +543,10 @@ export async function buildCardIndexFromSetFiles(setListUrl: string, setFileBase
     failedSetCount: failures.length,
     failedSets: failures.slice(0, 25),
   };
+  index.rarityHistoryComplete = completeSourceEvidence
+    && failures.length === 0
+    && selectedSets.length > 0
+    && selectedSets.length === sets.length;
 
   return finalizeCardIndex(index);
 }

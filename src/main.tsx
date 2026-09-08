@@ -21,20 +21,27 @@ import {
 } from "lucide-react";
 import SavedPullListsPicker from "./SavedPullListsPicker";
 import {
-  beginScryfallRun,
   clearMtgjsonIndexCache,
   compactFormatterItems,
   createSampleList,
-  endScryfallRun,
   enrichPrintHistories,
   fetchRecentCaseSets,
   formatOutput,
   inferBoundaryCustomer,
   parsePullList,
+  prefetchMtgjsonIndex,
   reliabilityMessage,
   resolveCardNames,
   safeFileName,
+  type ProviderOptions,
 } from "./formatter";
+import {
+  createProcessingPerformance,
+  finishProcessingPerformance,
+  formatProcessingPerformance,
+  processingNow,
+  type ProcessingPerformance,
+} from "./processing-performance";
 import { decodeFormatterHash, encodeFormattedHash } from "./share-link";
 import { documentTitle } from "./document-title";
 import {
@@ -388,6 +395,51 @@ function PricingDataReport({ events }: { events: PricingDataDiagnostic[] }) {
   );
 }
 
+function ProcessingPerformanceReport({ report }: { report: ProcessingPerformance | null }) {
+  const [copyLabel, setCopyLabel] = useState("Copy Performance");
+  const copyResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (copyResetRef.current) clearTimeout(copyResetRef.current); }, []);
+
+  async function copyReport() {
+    if (!report) return;
+    try {
+      await navigator.clipboard.writeText(formatProcessingPerformance(report));
+      setCopyLabel("Copied");
+    } catch {
+      setCopyLabel("Copy failed");
+    }
+    if (copyResetRef.current) clearTimeout(copyResetRef.current);
+    copyResetRef.current = setTimeout(() => setCopyLabel("Copy Performance"), 1500);
+  }
+
+  return (
+    <section className="saved-pull-list-report" aria-label="Processing Performance">
+      <div className="saved-pull-list-report-heading">
+        <h3>Processing Performance</h3>
+        <IconButton onClick={copyReport} title={copyLabel} ariaLabel="Copy Processing Performance" className="saved-pull-list-report-copy" disabled={!report}>
+          <Clipboard size={14} aria-hidden="true" /><span>{copyLabel}</span>
+        </IconButton>
+      </div>
+      {report ? (
+        <div className="diagnostics-table-wrap">
+          <table className="diagnostics-table">
+            <tbody>
+              {formatProcessingPerformance(report).split("\n").slice(1).map((line, index) => {
+                const separator = line.indexOf(":");
+                return <tr key={index}><th scope="row">{line.slice(0, separator)}</th><td>{line.slice(separator + 1).trim()}</td></tr>;
+              })}
+            </tbody>
+          </table>
+        </div>
+      ) : <p className="saved-pull-list-report-empty">Process a list to record timing and provider request counts.</p>}
+    </section>
+  );
+}
+
+function snapshotProcessingPerformance(report: ProcessingPerformance): ProcessingPerformance {
+  return { ...report, stages: { ...report.stages }, counts: { ...report.counts }, reasons: { ...report.reasons } };
+}
+
 function formatMtgjsonManifestLabel(manifest) {
   const generatedAt = manifest?.generatedAt || manifest?.source?.downloadedAt || "";
   const date = generatedAt ? new Date(generatedAt) : null;
@@ -554,6 +606,7 @@ function App() {
   const [saveState, setSaveState] = useState<SavedJobSaveState>("idle");
   const [savedPullListDiagnostics, setSavedPullListDiagnostics] = useState<SavedPullListDiagnostic[]>([]);
   const [pricingDataDiagnostics, setPricingDataDiagnostics] = useState<PricingDataDiagnostic[]>([]);
+  const [processingPerformance, setProcessingPerformance] = useState<ProcessingPerformance | null>(null);
   const [duplicateJob, setDuplicateJob] = useState<SavedJobSummary | null>(null);
   const [savedPickerOpen, setSavedPickerOpen] = useState(false);
   const [autosaveRestartRevision, setAutosaveRestartRevision] = useState(0);
@@ -566,7 +619,8 @@ function App() {
   const [pricingSessionKey, setPricingSessionKey] = useState(() => (
     sharedFormatterState.output ? `shared:${sharedFormatterState.processedAt || Date.now()}` : "fresh:0"
   ));
-  const abortControllerRef = useRef(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const processingPerformanceRef = useRef<ProcessingPerformance | null>(null);
   const copyLinkResetRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const autosaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSavedSignatureRef = useRef("");
@@ -582,7 +636,23 @@ function App() {
   const queuedPersistenceRef = useRef<{ id: string; draft: PullListJobDraft } | null>(null);
   const persistJobDraftRef = useRef<(draft: PullListJobDraft, id?: string) => Promise<unknown>>(async () => null);
 
-  const parsed = useMemo(() => parsePullList(input), [input]);
+  const { parsed, parseDurationMs } = useMemo(() => {
+    const startedAt = processingNow();
+    const parsed = parsePullList(input);
+    return { parsed, parseDurationMs: processingNow() - startedAt };
+  }, [input]);
+  const prefetchIndex = useCallback(() => {
+    if (useMtgjson) void prefetchMtgjsonIndex();
+  }, [useMtgjson]);
+  useEffect(() => {
+    if (!useMtgjson) return;
+    if (typeof window.requestIdleCallback === "function") {
+      const idle = window.requestIdleCallback(prefetchIndex, { timeout: 1500 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(prefetchIndex, 250);
+    return () => window.clearTimeout(timer);
+  }, [prefetchIndex, useMtgjson]);
   const outputCustomer = customer;
   const output = useMemo(
     () => (resolvedItems.length ? formatOutput(outputCustomer, resolvedItems, useCheckboxes, processedAt) : preloadedOutput),
@@ -670,6 +740,8 @@ function App() {
     }
     saveRequestInFlightRef.current = true;
     const generation = ++persistenceGenerationRef.current;
+    const report = processingPerformanceRef.current?.outcome === "complete" ? processingPerformanceRef.current : null;
+    const persistenceStartedAt = processingNow();
     setSaveState((current) => nextSavedJobSaveState(current, "save-start"));
     try {
       const result = await persistPullListJob(draft, id, { onDiagnostic: recordSavedPullListDiagnostic });
@@ -693,6 +765,10 @@ function App() {
       setMessage("Saved Pull List save failed. Your local work is still here. Enable Diagnostics for details.");
       return null;
     } finally {
+      if (report && processingPerformanceRef.current === report && generation === persistenceGenerationRef.current) {
+        report.stages.savedPersistence = processingNow() - persistenceStartedAt;
+        setProcessingPerformance(snapshotProcessingPerformance(report));
+      }
       saveRequestInFlightRef.current = false;
       const queued = queuedPersistenceRef.current;
       queuedPersistenceRef.current = null;
@@ -709,6 +785,10 @@ function App() {
 
   const restoreSavedJob = useCallback((job) => {
     abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsProcessing(false);
+    processingPerformanceRef.current = null;
+    setProcessingPerformance(null);
     workspaceGenerationRef.current += 1;
     persistenceGenerationRef.current += 1;
     autosaveRevisionRef.current += 1;
@@ -781,6 +861,10 @@ function App() {
   }, [saveState]);
 
   useEffect(() => () => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    processingPerformanceRef.current = null;
+    workspaceGenerationRef.current += 1;
     if (copyLinkResetRef.current) clearTimeout(copyLinkResetRef.current);
     if (autosaveTimerRef.current) clearTimeout(autosaveTimerRef.current);
     persistenceGenerationRef.current += 1;
@@ -897,6 +981,7 @@ function App() {
 
   // Runs the full formatter pipeline from raw paste to sorted, printable output.
   async function processList() {
+    if (abortControllerRef.current) return;
     if (!parsed.cards.length) {
       setMessage("No card lines found yet.");
       return;
@@ -907,29 +992,48 @@ function App() {
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const report = createProcessingPerformance();
+    report.stages.parse = parseDurationMs;
+    processingPerformanceRef.current = report;
+    setProcessingPerformance(snapshotProcessingPerformance(report));
     const workspaceGeneration = workspaceGenerationRef.current;
+    const isCurrentRun = () => workspaceGeneration === workspaceGenerationRef.current && abortControllerRef.current === controller;
     const setProcessingMessage = (nextMessage: string) => {
-      if (workspaceGeneration === workspaceGenerationRef.current) setMessage(nextMessage);
+      if (isCurrentRun() && !controller.signal.aborted) setMessage(nextMessage);
     };
     setIsProcessing(true);
     setReliabilityNote("");
     setMessage(`Checking ${parsed.cards.length} unique card names...`);
-    abortControllerRef.current = new AbortController();
-    beginScryfallRun(abortControllerRef.current.signal, carefulMode);
+    const providerOptions: ProviderOptions = {
+      useMtgjson, useScryfall,
+      enrichmentPurpose: caseCheck && useScryfall ? "case-check" : "formatter",
+      signal: controller.signal,
+      performance: report,
+      minIntervalMs: carefulMode ? 500 : 120,
+    };
 
     try {
       let recentCaseSets = [];
       if (caseCheck && useScryfall) {
+        report.stage = "caseSets";
         setProcessingMessage("Checking recent set list for case rules...");
-        recentCaseSets = await fetchRecentCaseSets();
+        const caseSetsStartedAt = processingNow();
+        try {
+          recentCaseSets = await fetchRecentCaseSets(providerOptions);
+        } finally {
+          report.stages.caseSets = processingNow() - caseSetsStartedAt;
+        }
       }
 
-      const providerOptions = { useMtgjson, useScryfall, pricingMode: true };
       const fuzzyResolved = await resolveCardNames(parsed.cards, setProcessingMessage, carefulMode, providerOptions);
       const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setProcessingMessage, carefulMode, providerOptions);
 
-      if (workspaceGeneration !== workspaceGenerationRef.current) return;
+      if (!isCurrentRun()) return;
+      if (controller.signal.aborted) throw new DOMException("Processing canceled.", "AbortError");
 
+      report.stage = "format";
       const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
       const mergedCustomer = mergeCustomerPreservingExisting(customer, inferred.customer);
       const nextProcessedAt = new Date().toISOString();
@@ -946,7 +1050,11 @@ function App() {
       const reviewCount = inferred.items.filter((item) => item.status !== "found").length;
       const nextReliabilityNote = reliabilityMessage(inferred.items, providerOptions);
       setReliabilityNote(nextReliabilityNote);
-      setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : "List formatted.");
+      report.stage = "ready";
+      const completedReport = finishProcessingPerformance(report);
+      setProcessingPerformance(completedReport);
+      const readyMessage = `List formatted in ${(completedReport.totalMs / 1000).toFixed(1)} seconds.${reviewCount ? ` ${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : ""}`;
+      setMessage(readyMessage);
       const resolvedNextCount = inferred.items.length - reviewCount;
       const nextFallbackCount = inferred.items.filter((item) => item.status === "found" && item.printLookupFailed).length;
       const draft = normalizePullListJobDraft({
@@ -966,20 +1074,21 @@ function App() {
         },
       });
       if (isGeneratedSamplePullListJobDraft(draft)) {
-        setMessage(reviewCount
-          ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} need review. Generated sample pull lists are not saved.`
-          : "List formatted. Generated sample pull lists are not saved.");
+        setMessage(`${readyMessage} Generated sample pull lists are not saved.`);
       } else {
         void persistJobDraft(draft, currentJobId);
       }
     } catch (error) {
-      if (workspaceGeneration === workspaceGenerationRef.current) {
-        setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while processing.");
+      if (isCurrentRun()) {
+        const canceled = controller.signal.aborted || error?.name === "AbortError";
+        setProcessingPerformance(finishProcessingPerformance(report, canceled ? "canceled" : "failed"));
+        setMessage(canceled ? "Processing canceled." : "Something went wrong while processing. Enable Diagnostics for the processing stage.");
       }
     } finally {
-      endScryfallRun();
-      abortControllerRef.current = null;
-      setIsProcessing(false);
+      if (isCurrentRun()) {
+        abortControllerRef.current = null;
+        setIsProcessing(false);
+      }
     }
   }
 
@@ -989,31 +1098,47 @@ function App() {
       .map((item, index) => ({ item, index }))
       .filter(({ item }) => item.status !== "found");
 
-    if (!reviewEntries.length || isProcessing) return;
+    if (!reviewEntries.length || isProcessing || abortControllerRef.current) return;
 
     if (!useMtgjson && !useScryfall) {
       setMessage("Turn on MTGJSON or Scryfall before retrying.");
       return;
     }
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
+    const report = createProcessingPerformance();
+    processingPerformanceRef.current = report;
+    setProcessingPerformance(snapshotProcessingPerformance(report));
     const workspaceGeneration = workspaceGenerationRef.current;
+    const isCurrentRun = () => workspaceGeneration === workspaceGenerationRef.current && abortControllerRef.current === controller;
     const setProcessingMessage = (nextMessage: string) => {
-      if (workspaceGeneration === workspaceGenerationRef.current) setMessage(nextMessage);
+      if (isCurrentRun() && !controller.signal.aborted) setMessage(nextMessage);
     };
     setIsProcessing(true);
     setReliabilityNote("");
     setMessage(`Retrying ${reviewEntries.length} review item${reviewEntries.length === 1 ? "" : "s"}...`);
-    abortControllerRef.current = new AbortController();
-    beginScryfallRun(abortControllerRef.current.signal, carefulMode);
+    const providerOptions: ProviderOptions = {
+      useMtgjson, useScryfall,
+      enrichmentPurpose: caseCheck && useScryfall ? "case-check" : "formatter",
+      signal: controller.signal,
+      performance: report,
+      minIntervalMs: carefulMode ? 500 : 120,
+    };
 
     try {
       let recentCaseSets = [];
       if (caseCheck && useScryfall) {
+        report.stage = "caseSets";
         setProcessingMessage("Checking recent set list for case rules...");
-        recentCaseSets = await fetchRecentCaseSets();
+        const caseSetsStartedAt = processingNow();
+        try {
+          recentCaseSets = await fetchRecentCaseSets(providerOptions);
+        } finally {
+          report.stages.caseSets = processingNow() - caseSetsStartedAt;
+        }
       }
 
-      const providerOptions = { useMtgjson, useScryfall, pricingMode: true };
       const namesResolved = await resolveCardNames(
         reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
         setProcessingMessage,
@@ -1021,7 +1146,8 @@ function App() {
         providerOptions,
       );
       const retried = await enrichPrintHistories(namesResolved, caseCheck && useScryfall, recentCaseSets, setProcessingMessage, carefulMode, providerOptions);
-      if (workspaceGeneration !== workspaceGenerationRef.current) return;
+      if (!isCurrentRun()) return;
+      if (controller.signal.aborted) throw new DOMException("Processing canceled.", "AbortError");
       const nextItems = [...resolvedItems];
       reviewEntries.forEach(({ index }, retryIndex) => {
         nextItems[index] = retried[retryIndex] || nextItems[index];
@@ -1032,22 +1158,28 @@ function App() {
       setPrintStatus(emptyPullListJobPrintStatus());
       const reviewCount = nextItems.filter((item) => item.status !== "found").length;
       setReliabilityNote(reliabilityMessage(nextItems, providerOptions));
-      setMessage(reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved.");
+      report.stage = "ready";
+      const completedReport = finishProcessingPerformance(report);
+      setProcessingPerformance(completedReport);
+      setMessage(`Review finished in ${(completedReport.totalMs / 1000).toFixed(1)} seconds. ${reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved."}`);
     } catch (error) {
-      if (workspaceGeneration === workspaceGenerationRef.current) {
-        setMessage(error?.name === "AbortError" ? "Processing canceled." : error.message || "Something went wrong while retrying.");
+      if (isCurrentRun()) {
+        const canceled = controller.signal.aborted || error?.name === "AbortError";
+        setProcessingPerformance(finishProcessingPerformance(report, canceled ? "canceled" : "failed"));
+        setMessage(canceled ? "Processing canceled." : "Something went wrong while retrying. Enable Diagnostics for the processing stage.");
       }
     } finally {
-      endScryfallRun();
-      abortControllerRef.current = null;
-      setIsProcessing(false);
+      if (isCurrentRun()) {
+        abortControllerRef.current = null;
+        setIsProcessing(false);
+      }
     }
   }
 
-  // Cancels the current Scryfall run when the user wants off the ride.
+  // Cancels this run's provider waits while allowing a shared index prefetch to finish.
   function abortProcessing() {
     abortControllerRef.current?.abort();
-    setMessage("Canceling current Scryfall work...");
+    setMessage("Canceling processing...");
   }
 
   function sharedFormatterItems() {
@@ -1138,10 +1270,15 @@ function App() {
 
   // Resets processed results whenever the paste changes, so stale output does not cosplay as current.
   function handleInputChange(value) {
-    if (isProcessing) {
+    if (abortControllerRef.current) {
       abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      setIsProcessing(false);
       workspaceGenerationRef.current += 1;
     }
+    processingPerformanceRef.current = null;
+    setProcessingPerformance(null);
+    if (value.trim()) prefetchIndex();
     setInput(value);
     setResolvedItems([]);
     setProcessedAt(null);
@@ -1268,7 +1405,11 @@ function App() {
       const confirmed = window.confirm("This workspace has work that may not be saved. Start a new list anyway?");
       if (!confirmed) return;
     }
-    if (isProcessing) abortControllerRef.current?.abort();
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+    setIsProcessing(false);
+    processingPerformanceRef.current = null;
+    setProcessingPerformance(null);
     workspaceGenerationRef.current += 1;
     persistenceGenerationRef.current += 1;
     autosaveRevisionRef.current += 1;
@@ -1499,6 +1640,8 @@ function App() {
           <textarea
             className="input-box"
             value={input}
+            onFocus={prefetchIndex}
+            onPaste={prefetchIndex}
             onChange={(event) => handleInputChange(event.target.value)}
             spellCheck="false"
             aria-label="Raw pull list text"
@@ -1637,6 +1780,7 @@ function App() {
                 </tbody>
               </table>
             </div>
+            <ProcessingPerformanceReport report={processingPerformance} />
             <PricingDataReport events={pricingDataDiagnostics} />
             <SavedPullListReport events={savedPullListDiagnostics} />
           </section>
@@ -1654,7 +1798,7 @@ function App() {
               <Bug size={12} />
             </label>
           </div>
-          <p className="work-note">Updated 8.23.2026, Now we cookin' - Derek</p>
+              <p className="work-note">Updated 9.8.2026, Now we cookin' - Derek</p>
         </div>
       </section>
     </main>
