@@ -1,5 +1,10 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+
+const packageVersion = (JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8"),
+) as { version: string }).version;
 
 const tcgplayerProxy = {
   "/api/pull-list-jobs": {
@@ -19,6 +24,9 @@ const tcgplayerProxy = {
 };
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(packageVersion),
+  },
   plugins: [react()],
   server: { proxy: tcgplayerProxy },
   preview: { proxy: tcgplayerProxy },

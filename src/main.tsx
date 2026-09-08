@@ -134,6 +134,10 @@ const requestedSavedJobId = new URLSearchParams(window.location.search).get("job
 const isTeamsTestPage = window.location.pathname === "/teams-test";
 const PRODUCTION_ORIGIN = "https://card-list-formatter.vercel.app";
 
+function AppVersionLabel() {
+  return <span>v{__APP_VERSION__}</span>;
+}
+
 function IconButton({ children, onClick, title, ariaLabel, className = "", disabled = false, variant = "secondary" }: IconButtonProps) {
   return (
     <button type="button" className={`icon-button ${variant} ${className}`} onClick={onClick} title={title} aria-label={ariaLabel} disabled={disabled}>
@@ -518,7 +522,7 @@ function TeamsTestPage() {
           <div>
             <div className="title-row">
               <h1>Teams Test Post</h1>
-              <span>v0.5.2</span>
+              <AppVersionLabel />
             </div>
           </div>
           <div className="logo-slot logo-slot-right" aria-hidden="true">
@@ -1471,7 +1475,7 @@ function App() {
           <div>
             <div className="title-row">
               <h1>MIKE PULLSMITH</h1>
-              <span>v0.5.2</span>
+              <AppVersionLabel />
             </div>
           </div>
           <div className="logo-slot logo-slot-right">
