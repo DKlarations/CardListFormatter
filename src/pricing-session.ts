@@ -30,6 +30,8 @@ export function normalizePricingAssistantRow(row: Partial<PricingAssistantRowSta
     manuallyCreated: Boolean(row.manuallyCreated),
     requestedFlavorName: row.requestedFlavorName || "",
     requestedSetCode: row.requestedSetCode || "",
+    requestedCollectorNumber: typeof row.requestedCollectorNumber === "string" ? row.requestedCollectorNumber : "",
+    requestedSourceFormat: row.requestedSourceFormat === "set-collector-export" ? row.requestedSourceFormat : undefined,
     requestedFinish: row.requestedFinish,
     requestedFoilTreatment: row.requestedFoilTreatment,
     requestedTreatment: row.requestedTreatment || "",

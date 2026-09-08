@@ -1,0 +1,43 @@
+name: Resolution index readiness
+
+on:
+  deployment_status:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: resolution-index-readiness
+  cancel-in-progress: false
+
+jobs:
+  check-manifest:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check out the deployed code
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.deployment.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify the deployed commit belongs to main
+        env:
+          DEPLOYMENT_SHA: ${{ github.event.deployment.sha || github.sha }}
+        run: git merge-base --is-ancestor "$DEPLOYMENT_SHA" origin/main
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check the live manifest without refreshing data
+        run: node tools/check-resolution-index-readiness.mjs
+        env:
+          FORMATTER_BASE_URL: ${{ vars.FORMATTER_BASE_URL }}
+          RESOLUTION_INDEX_READINESS_BYPASS_SECRET: ${{ secrets.RESOLUTION_INDEX_READINESS_BYPASS_SECRET }}

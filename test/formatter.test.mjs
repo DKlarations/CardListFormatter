@@ -127,6 +127,10 @@ test("compacts resolved formatter items without losing pricing identity or inten
     caseNote: "",
     note: "",
     printLookupFailed: false,
+    rarityEvidence: undefined,
+    legacyIndexCompatibility: false,
+    paperIdentityVerified: false,
+    lessVerified: false,
     card: undefined,
     mtgjsonCard: { name: "Umezawa's Jitte" },
   }]);
@@ -409,7 +413,8 @@ test("MTGJSON resolves full parsed lookup candidates even when first-fragment al
   const resolved = await resolveCardNames(parsed.cards, () => {}, false, { useMtgjson: true, useScryfall: false, mtgjsonManifestUrl: "https://formatter.test/manifest" });
   assertCompleteCardNames(parsed, names);
   assert.deepEqual(resolved.map(outputDisplayName), names);
-  assert.ok(resolved.every((item) => item.status === "found" && item.lookupSource === "mtgjson"));
+  assert.ok(resolved.every((item) => item.status === "review" && item.lookupSource === "mtgjson"));
+  assert.ok(resolved.every((item) => item.legacyIndexCompatibility && item.rarityEvidence === "legacy-index"));
 });
 
 test("Scryfall receives full exact candidates before any fuzzy lookup and keeps unknown suffixes", async (t) => {

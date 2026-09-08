@@ -8,6 +8,7 @@ type FingerprintEntry = {
   foilTreatment: string;
   treatment: string;
   flavor: string;
+  collectorNumber?: string;
 };
 
 function normalizedIdentity(value: unknown) {
@@ -43,6 +44,7 @@ function itemEntry(item: Record<string, any>): FingerprintEntry {
   const flavor = normalizedIdentity(requestedFlavor) === normalizedIdentity(canonical)
     ? ""
     : normalizedIdentity(requestedFlavor);
+  const collectorNumber = requestedPrinting.collectorNumber ?? item.requestedCollectorNumber;
 
   return {
     card: normalizedIdentity(canonical),
@@ -52,6 +54,7 @@ function itemEntry(item: Record<string, any>): FingerprintEntry {
     foilTreatment: normalizedIntent(requestedPrinting.foilTreatment || item.requestedFoilTreatment),
     treatment: normalizedIntent(requestedPrinting.treatment || item.requestedTreatment),
     flavor,
+    ...(typeof collectorNumber === "string" && collectorNumber ? { collectorNumber: collectorNumber.toLowerCase() } : {}),
   };
 }
 
@@ -63,6 +66,7 @@ function entryKey(entry: FingerprintEntry) {
     entry.foilTreatment,
     entry.treatment,
     entry.flavor,
+    ...(entry.collectorNumber ? [entry.collectorNumber] : []),
   ].join("|");
 }
 

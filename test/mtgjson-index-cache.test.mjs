@@ -3,6 +3,7 @@ import test from "node:test";
 import { importBundledModule } from "./test-module-bundle.mjs";
 
 const { createMtgjsonIndexLoader, MTGJSON_RESOLUTION_CACHE_NAME } = await importBundledModule("src/mtgjson-index-cache.ts", "mtgjson-index-cache");
+const { hasSufficientLocalPaperEvidence, resolutionIndexReadiness } = await importBundledModule("src/mtgjson-resolution-index.ts", "cache-resolution-readiness");
 const manifestUrl = "https://formatter.test/manifest";
 const indexUrl = "https://index.test/card-index-2026-09-07.json";
 const latestUrl = "https://index.test/card-index-latest.json";
@@ -164,7 +165,7 @@ test("structurally corrupt cached evidence is evicted even when its JSON parses"
   await env.loader().load(manifestUrl);
   const [key, cached] = [...env.storage.entries.entries()][0];
   // Preserve the cache metadata so this exercises payload validation, not header cleanup.
-  env.storage.entries.set(key, new Response(JSON.stringify({ version: 3, cards: fixture().cards }), { headers: cached.headers }));
+  env.storage.entries.set(key, new Response(JSON.stringify({ version: 3, rarityHistoryComplete: "true", cards: fixture().cards }), { headers: cached.headers }));
   assert.equal((await env.loader().load(manifestUrl)).diagnostics.source, "network");
   assert.ok(env.storage.deleted.includes(key));
 });
@@ -281,11 +282,45 @@ test("canceling a run suppresses its late progress without poisoning later proce
   assert.deepEqual(progress, []);
 });
 
-test("mismatched manifest/index schemas and unknown schemas never become cache successes", async () => {
-  for (const payload of [{ ...fixture(), version: 2 }, { ...fixture(), version: 99 }]) {
-    const env = environment({ fetch: async (url) => jsonResponse(String(url) === manifestUrl ? manifest() : payload) });
-    await assert.rejects(env.loader().load(manifestUrl), (error) => error.diagnostics.failureStage === "index");
-    assert.equal(env.storage.entries.size, 0);
+test("mismatched manifest/index schemas remain canonical compatibility evidence through every cache path", async () => {
+  for (const payload of [{ ...fixture(), version: 2 }, { ...fixture(), version: 99 }, fixture()]) {
+    const manifestVersion = payload.version === 3 ? 2 : 3;
+    let offline = false;
+    const env = environment({ fetch: async (url) => { if (offline) throw new Error("Offline"); return jsonResponse(String(url) === manifestUrl ? manifest({ version: manifestVersion }) : payload); } });
+    const loader = env.loader();
+    const network = await loader.load(manifestUrl);
+    const memory = await loader.load(manifestUrl);
+    const persisted = await env.loader().load(manifestUrl);
+    offline = true;
+    const stale = await env.loader().load(manifestUrl);
+    for (const result of [network, memory, persisted, stale]) {
+      assert.equal(result.index.cards["test card"].name, "Test Card");
+      assert.equal(result.index.manifestSchemaMismatch, true);
+      assert.equal(result.index.manifestSchemaVersion, manifestVersion);
+      assert.equal(hasSufficientLocalPaperEvidence(result.index.cards["test card"], result.index), false);
+      assert.equal(resolutionIndexReadiness(result.index).compatibilityMode, true);
+    }
+    assert.equal(network.diagnostics.source, "network");
+    assert.equal(memory.diagnostics.source, "memory");
+    assert.equal(persisted.diagnostics.source, "persistent-cache");
+    assert.equal(stale.diagnostics.source, "stale-fallback");
+    assert.equal(env.storage.entries.size, 1);
+  }
+});
+
+test("explicit incomplete manifest metadata never grants complete-index trust through caches or fallback", async () => {
+  for (const metadata of [{ rarityHistoryComplete: false }, { failedSetCount: 1 }]) {
+    let offline = false;
+    const env = environment({ fetch: async (url) => { if (offline) throw new Error("Offline"); return jsonResponse(String(url) === manifestUrl ? manifest(metadata) : fixture()); } });
+    const loader = env.loader();
+    for (const result of [await loader.load(manifestUrl), await loader.load(manifestUrl), await env.loader().load(manifestUrl)]) {
+      assert.equal(result.index.requiresCompatibilityVerification, true);
+      assert.equal(hasSufficientLocalPaperEvidence(result.index.cards["test card"], result.index), false);
+    }
+    offline = true;
+    const stale = await env.loader().load(manifestUrl);
+    assert.equal(stale.diagnostics.source, "stale-fallback");
+    assert.equal(stale.index.requiresCompatibilityVerification, true);
   }
 });
 

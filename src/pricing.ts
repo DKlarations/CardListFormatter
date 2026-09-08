@@ -3,6 +3,8 @@ import {
   normalizePricingAssistantRow,
 } from "./pricing-session.js";
 export { normalizePricingAssistantRow } from "./pricing-session.js";
+import type { RequestedPrintingPreference } from "./requested-printing.js";
+export type { RequestedPrintingPreference } from "./requested-printing.js";
 
 export type PricingFinish = "normal" | "foil" | "etched";
 export type FoilTreatment = "standard" | "surge";
@@ -73,6 +75,8 @@ export type PricingAssistantRowState = {
   manuallyCreated?: boolean;
   requestedFlavorName?: string;
   requestedSetCode?: string;
+  requestedCollectorNumber?: string;
+  requestedSourceFormat?: RequestedPrintingPreference["sourceFormat"];
   requestedFinish?: PricingFinish;
   requestedFoilTreatment?: FoilTreatment;
   requestedTreatment?: string;
@@ -97,15 +101,6 @@ export type FormatterPricingItem = {
   requestedPrinting?: RequestedPrintingPreference;
   card?: { name?: string };
   mtgjsonCard?: { name?: string };
-};
-
-export type RequestedPrintingPreference = {
-  setCode?: string;
-  treatment?: string;
-  finish?: PricingFinish;
-  foilTreatment?: FoilTreatment;
-  /** A customer-facing reskin/flavor title that can identify an exact printing. */
-  flavorName?: string;
 };
 
 export type PricingFinishChoice = {
@@ -471,20 +466,58 @@ export function finishChoiceKey(finish: PricingFinish, foilTreatment: FoilTreatm
   return finish === "normal" ? "nonfoil" : "etched";
 }
 
+/** Compare source identifiers as text, retaining zeroes, suffixes and punctuation. */
+export function collectorNumberMatches(left: unknown, right: unknown) {
+  return typeof left === "string" && typeof right === "string" && left.length > 0
+    && left.toLowerCase() === right.toLowerCase();
+}
+
+function exactImportedPrintingSelection(card: PricingCard | null, requested: RequestedPrintingPreference) {
+  if (!card || !requested.setCode || !requested.collectorNumber) return null;
+  const candidates = card.printings.filter((printing) => (
+    printing.setCode.toLowerCase() === requested.setCode!.toLowerCase()
+      && collectorNumberMatches(printing.number, requested.collectorNumber)
+      && printing.finishes.length > 0 && visualTreatmentsForPrinting(printing).length > 0
+  )).sort((left, right) => left.uuid.localeCompare(right.uuid));
+  if (!candidates.length) return null;
+  const exactCard = { ...card, printings: candidates };
+  const setCode = candidates[0].setCode;
+  const choices = finishChoices(exactCard, setCode);
+  const finishChoice = choices.find((choice) => choice.finish === requested.finish
+    && choice.foilTreatment === (requested.foilTreatment || "standard"))
+    || choices.find((choice) => choice.finish === requested.finish)
+    || choices.find((choice) => choice.finish === "normal") || choices[0];
+  if (!finishChoice) return null;
+  const compatible = candidates.filter((printing) => printingMatchesFinishChoice(printing, finishChoice.finish, finishChoice.foilTreatment));
+  const chosen = compatible.find((printing) => requested.treatment && visualTreatmentsForPrinting(printing).includes(requested.treatment))
+    || compatible.find((printing) => visualTreatmentsForPrinting(printing).includes("standard")) || compatible[0];
+  if (!chosen) return null;
+  const treatments = visualTreatmentsForPrinting(chosen);
+  return {
+    setCode, selectedPrintingUuid: chosen.uuid,
+    finish: finishChoice.finish, foilTreatment: finishChoice.foilTreatment,
+    treatment: requested.treatment && treatments.includes(requested.treatment)
+      ? requested.treatment : treatments.includes("standard") ? "standard" : treatments[0],
+  };
+}
+
 /** Chooses only valid catalog values, preserving an explicit customer preference first. */
 export function preferredPrintingSelection(
   card: PricingCard | null,
   requested: RequestedPrintingPreference = {},
   referenceDate: Date | string = new Date(),
 ) {
+  const importedSelection = exactImportedPrintingSelection(card, requested);
+  if (importedSelection) return importedSelection;
   const editions = editionOptions(card);
   const flavorPrinting = requested.flavorName
     ? card?.printings.find((printing) => (
       pricingNameKey(printing.flavorName || "") === pricingNameKey(requested.flavorName || "")
     ))
     : undefined;
-  const setCode = editions.some((edition) => edition.setCode === requested.setCode)
-    ? requested.setCode || ""
+  const requestedEdition = editions.find((edition) => edition.setCode.toLowerCase() === requested.setCode?.toLowerCase());
+  const setCode = requestedEdition
+    ? requestedEdition.setCode
     : flavorPrinting?.setCode || preferredDefaultEdition(card, referenceDate)?.setCode || "";
   if (!setCode) return null;
   const choices = finishChoices(card, setCode);
@@ -775,6 +808,8 @@ export function createPricingRowsFromFormatterItems(items: FormatterPricingItem[
       canonicalName,
       requestedFlavorName: item.alternateTitle || item.requestedDisplayName || "",
       requestedSetCode: item.requestedPrinting?.setCode || "",
+      requestedCollectorNumber: item.requestedPrinting?.collectorNumber || "",
+      requestedSourceFormat: item.requestedPrinting?.sourceFormat,
       requestedFinish: item.requestedPrinting?.finish,
       requestedFoilTreatment: item.requestedPrinting?.foilTreatment,
       requestedTreatment: item.requestedPrinting?.treatment || "",
@@ -809,6 +844,8 @@ export function reconcilePricingRowsWithFormatterItems(
     canonicalName: fresh.canonicalName,
     requestedFlavorName: fresh.requestedFlavorName,
     requestedSetCode: fresh.requestedSetCode,
+    requestedCollectorNumber: fresh.requestedCollectorNumber,
+    requestedSourceFormat: fresh.requestedSourceFormat,
     requestedFinish: fresh.requestedFinish,
     requestedFoilTreatment: fresh.requestedFoilTreatment,
     requestedTreatment: fresh.requestedTreatment,
@@ -931,6 +968,12 @@ export function initializePricingRowSelection(
   const hasSet = (setCode = "") => editions.some((edition) => edition.setCode === setCode.toUpperCase());
   const hasManualSetSelection = row.setSelectionSource === "manual" && hasSet(row.setCode);
   const useInitialPreferences = !hasManualSetSelection;
+  const importedSelection = useInitialPreferences ? exactImportedPrintingSelection(card, {
+    setCode: row.requestedSetCode, collectorNumber: row.requestedCollectorNumber,
+    finish: row.requestedFinish, foilTreatment: row.requestedFoilTreatment,
+    treatment: row.requestedTreatment,
+  }) : null;
+  if (importedSelection) return { ...row, ...normalizePricingPhysicalSelection(card, importedSelection) };
   const requestedSetCode = row.requestedSetCode.toUpperCase();
   const flavorPrinting = useInitialPreferences && row.requestedFlavorName
     ? card.printings.find((printing) => (
@@ -1041,6 +1084,25 @@ export function initializeFoundPricingSelection(
     ...initializePricingRowSelection(row, card, referenceDate),
     found: true,
   };
+}
+
+/** A catalog fallback is visible until staff deliberately choose a printing. */
+export function importedPrintingSelectionWarning(row: PricingAssistantRowState, card: PricingCard | null) {
+  if (!card?.printings.length || row.setSelectionSource === "manual" || !row.requestedCollectorNumber || !row.requestedSetCode) return "";
+  const label = `${row.requestedSetCode} #${row.requestedCollectorNumber}`;
+  const exact = exactImportedPrintingSelection(card, {
+    setCode: row.requestedSetCode, collectorNumber: row.requestedCollectorNumber,
+    finish: row.requestedFinish, foilTreatment: row.requestedFoilTreatment, treatment: row.requestedTreatment,
+  });
+  if (exact) {
+    if (row.requestedFinish && (exact.finish !== row.requestedFinish
+      || exact.foilTreatment !== (row.requestedFoilTreatment || "standard"))) {
+      return `Imported printing ${label} has no requested finish. Using an available finish for that collector number; verify the selection.`;
+    }
+    return "";
+  }
+  const sameSet = card.printings.some((printing) => printing.setCode.toLowerCase() === row.requestedSetCode!.toLowerCase());
+  return `Imported printing ${label} was not found. ${sameSet ? "Using another collector number in the requested set" : "Using the available default set"}; verify the selection.`;
 }
 
 /** Keeps catalog hydration/loading distinct from a genuinely unresolved price. */

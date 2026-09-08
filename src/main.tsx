@@ -40,8 +40,12 @@ import {
   finishProcessingPerformance,
   formatProcessingPerformance,
   processingNow,
+  recordParsingPerformance,
+  processingReliabilityStatus,
+  snapshotProcessingPerformance,
   type ProcessingPerformance,
 } from "./processing-performance";
+import { resolutionIndexReadiness, type ResolutionIndexReadiness } from "./mtgjson-resolution-index";
 import { decodeFormatterHash, encodeFormattedHash } from "./share-link";
 import { documentTitle } from "./document-title";
 import {
@@ -440,10 +444,6 @@ function ProcessingPerformanceReport({ report }: { report: ProcessingPerformance
   );
 }
 
-function snapshotProcessingPerformance(report: ProcessingPerformance): ProcessingPerformance {
-  return { ...report, stages: { ...report.stages }, counts: { ...report.counts }, reasons: { ...report.reasons } };
-}
-
 function formatMtgjsonManifestLabel(manifest) {
   const generatedAt = manifest?.generatedAt || manifest?.source?.downloadedAt || "";
   const date = generatedAt ? new Date(generatedAt) : null;
@@ -592,6 +592,7 @@ function App() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [isRefreshingMtgjson, setIsRefreshingMtgjson] = useState(false);
   const [mtgjsonUpdateLabel, setMtgjsonUpdateLabel] = useState("MTGJSON update unknown");
+  const [mtgjsonReadiness, setMtgjsonReadiness] = useState<ResolutionIndexReadiness | null>(null);
   const [message, setMessage] = useState(() => (
     requestedSavedJobId
       ? "Loading Saved Pull List..."
@@ -966,11 +967,13 @@ function App() {
         if (ignore) return;
 
         if (!response.ok) {
-          setMtgjsonUpdateLabel(manifest.error || "MTGJSON update unavailable");
+          setMtgjsonUpdateLabel("MTGJSON update unavailable");
+          setMtgjsonReadiness(null);
           return;
         }
 
         setMtgjsonUpdateLabel(formatMtgjsonManifestLabel(manifest));
+        setMtgjsonReadiness(resolutionIndexReadiness(manifest));
       } catch {
         if (!ignore) setMtgjsonUpdateLabel("MTGJSON update unavailable");
       }
@@ -1000,6 +1003,7 @@ function App() {
     abortControllerRef.current = controller;
     const report = createProcessingPerformance();
     report.stages.parse = parseDurationMs;
+    recordParsingPerformance(report, parsed.diagnostics);
     processingPerformanceRef.current = report;
     setProcessingPerformance(snapshotProcessingPerformance(report));
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1019,6 +1023,7 @@ function App() {
     };
 
     try {
+      const fuzzyResolved = await resolveCardNames(parsed.cards, setProcessingMessage, carefulMode, providerOptions);
       let recentCaseSets = [];
       if (caseCheck && useScryfall) {
         report.stage = "caseSets";
@@ -1031,7 +1036,6 @@ function App() {
         }
       }
 
-      const fuzzyResolved = await resolveCardNames(parsed.cards, setProcessingMessage, carefulMode, providerOptions);
       const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setProcessingMessage, carefulMode, providerOptions);
 
       if (!isCurrentRun()) return;
@@ -1057,7 +1061,7 @@ function App() {
       report.stage = "ready";
       const completedReport = finishProcessingPerformance(report);
       setProcessingPerformance(completedReport);
-      const readyMessage = `List formatted in ${(completedReport.totalMs / 1000).toFixed(1)} seconds.${reviewCount ? ` ${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : ""}`;
+      const readyMessage = [`List formatted in ${(completedReport.totalMs / 1000).toFixed(1)} seconds.${reviewCount ? ` ${reviewCount} line${reviewCount === 1 ? "" : "s"} need review.` : ""}`, processingReliabilityStatus(completedReport)].filter(Boolean).join(" ");
       setMessage(readyMessage);
       const resolvedNextCount = inferred.items.length - reviewCount;
       const nextFallbackCount = inferred.items.filter((item) => item.status === "found" && item.printLookupFailed).length;
@@ -1112,6 +1116,8 @@ function App() {
     const controller = new AbortController();
     abortControllerRef.current = controller;
     const report = createProcessingPerformance();
+    const reviewParse = parsePullList(reviewEntries.flatMap(({ item }) => item.originals?.length ? item.originals : [item.original || item.inputName]).join("\n"));
+    recordParsingPerformance(report, reviewParse.diagnostics);
     processingPerformanceRef.current = report;
     setProcessingPerformance(snapshotProcessingPerformance(report));
     const workspaceGeneration = workspaceGenerationRef.current;
@@ -1131,6 +1137,12 @@ function App() {
     };
 
     try {
+      const namesResolved = await resolveCardNames(
+        reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
+        setProcessingMessage,
+        carefulMode,
+        providerOptions,
+      );
       let recentCaseSets = [];
       if (caseCheck && useScryfall) {
         report.stage = "caseSets";
@@ -1143,12 +1155,6 @@ function App() {
         }
       }
 
-      const namesResolved = await resolveCardNames(
-        reviewEntries.map(({ item }) => ({ ...item, status: "missing", note: "" })),
-        setProcessingMessage,
-        carefulMode,
-        providerOptions,
-      );
       const retried = await enrichPrintHistories(namesResolved, caseCheck && useScryfall, recentCaseSets, setProcessingMessage, carefulMode, providerOptions);
       if (!isCurrentRun()) return;
       if (controller.signal.aborted) throw new DOMException("Processing canceled.", "AbortError");
@@ -1165,7 +1171,7 @@ function App() {
       report.stage = "ready";
       const completedReport = finishProcessingPerformance(report);
       setProcessingPerformance(completedReport);
-      setMessage(`Review finished in ${(completedReport.totalMs / 1000).toFixed(1)} seconds. ${reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved."}`);
+      setMessage([`Review finished in ${(completedReport.totalMs / 1000).toFixed(1)} seconds. ${reviewCount ? `${reviewCount} line${reviewCount === 1 ? "" : "s"} still need review.` : "Review items resolved."}`, processingReliabilityStatus(completedReport)].filter(Boolean).join(" "));
     } catch (error) {
       if (isCurrentRun()) {
         const canceled = controller.signal.aborted || error?.name === "AbortError";
@@ -1325,6 +1331,7 @@ function App() {
 
       clearMtgjsonIndexCache();
       setMtgjsonUpdateLabel(formatMtgjsonManifestLabel(result));
+      setMtgjsonReadiness(resolutionIndexReadiness(result));
       const cardCount = Number(result.counts?.cards || 0).toLocaleString();
       const failedSets = Number(result.source?.mtgjsonMeta?.failedSetCount || 0);
       setMessage(failedSets
@@ -1749,6 +1756,11 @@ function App() {
                 <h2>Diagnostics</h2>
                 <p>{rows.length} line{rows.length === 1 ? "" : "s"}</p>
                 <p className="diagnostics-meta">{mtgjsonUpdateLabel}</p>
+                {mtgjsonReadiness && <>
+                  <p className="diagnostics-meta">Resolution index schema: {mtgjsonReadiness.schemaVersion ?? "unknown"}; expected: {mtgjsonReadiness.expectedSchemaVersion}. Rarity history complete: {mtgjsonReadiness.rarityHistoryComplete === null ? "unknown" : String(mtgjsonReadiness.rarityHistoryComplete)}.</p>
+                  <p className="diagnostics-meta">Generated: {mtgjsonReadiness.generatedAt || "unknown"}. Failed sets: {mtgjsonReadiness.failedSetCount ?? "unknown"}.</p>
+                  {mtgjsonReadiness.compatibilityMode && <p className="diagnostics-meta">Card-name index is outdated. Using compatibility verification.</p>}
+                </>}
               </div>
               <div className="actions diagnostics-actions">
                 <IconButton onClick={refreshMtgjsonIndex} title="Refresh MTGJSON data" disabled={isRefreshingMtgjson || isProcessing}>

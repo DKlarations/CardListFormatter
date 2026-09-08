@@ -30,8 +30,8 @@ type LoaderDependencies = {
   setTimer?: (callback: () => void, milliseconds: number) => unknown;
   clearTimer?: (timer: unknown) => void;
 };
-type Manifest = { version: number; indexUrl: string; versioned: boolean };
-type CacheEntry = { request: Request; response: Response; savedAt: number; manifestUrl: string; indexUrl: string; manifestVersion: number; indexVersion: number };
+type Manifest = { version: number; indexUrl: string; versioned: boolean; rarityHistoryComplete?: boolean; failedSetCount?: number };
+type CacheEntry = { request: Request; response: Response; savedAt: number; manifestUrl: string; indexUrl: string; manifestVersion: number; indexVersion: number; manifestRarityHistoryComplete?: boolean; manifestFailedSetCount?: number };
 
 function clockNow() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
@@ -84,7 +84,16 @@ function parseManifest(value: unknown, manifestUrl: string): Manifest {
   if (!indexUrl || (data.version !== undefined && (!Number.isInteger(data.version) || Number(data.version) < 1))) {
     throw new Error("Card-name index manifest is invalid.");
   }
-  return { version: Number(data.version) || 0, indexUrl, versioned: Boolean(versionedUrl) };
+  return { version: Number(data.version) || 0, indexUrl, versioned: Boolean(versionedUrl),
+    rarityHistoryComplete: typeof data.rarityHistoryComplete === "boolean" ? data.rarityHistoryComplete : undefined,
+    failedSetCount: Number.isInteger(data.failedSetCount) && Number(data.failedSetCount) >= 0 ? Number(data.failedSetCount) : undefined,
+  };
+}
+
+function applyManifestReadiness(index: MtgjsonCardIndex, manifest: Pick<Manifest, "version" | "rarityHistoryComplete" | "failedSetCount">): MtgjsonCardIndex {
+  const mismatch = Boolean(manifest.version && manifest.version !== index.version);
+  if (!mismatch && manifest.rarityHistoryComplete !== false && !(manifest.failedSetCount > 0)) return index;
+  return { ...index, requiresCompatibilityVerification: true, manifestSchemaVersion: manifest.version || undefined, manifestSchemaMismatch: mismatch };
 }
 
 function emptyDiagnostics(source: MtgjsonIndexSource = "network"): MtgjsonIndexLoadDiagnostics {
@@ -175,12 +184,16 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
         const indexUrl = response.headers.get("x-pullsmith-index-url") || "";
         const manifestVersion = Number(response.headers.get("x-pullsmith-manifest-version"));
         const indexVersion = Number(response.headers.get("x-pullsmith-index-version"));
+        const completeHeader = response.headers.get("x-pullsmith-manifest-rarity-complete");
+        const manifestRarityHistoryComplete = completeHeader === "true" ? true : completeHeader === "false" ? false : undefined;
+        const failedHeader = response.headers.get("x-pullsmith-manifest-failed-sets");
+        const manifestFailedSetCount = failedHeader !== null && Number.isInteger(Number(failedHeader)) && Number(failedHeader) >= 0 ? Number(failedHeader) : undefined;
         const age = wallNow() - savedAt;
         if (!Number.isFinite(savedAt) || savedAt <= 0 || age < 0 || age > STALE_MAX_AGE_MS || !manifestUrl || !indexUrl || !Number.isInteger(manifestVersion) || !Number.isInteger(indexVersion)) {
           await evict(cache, request);
           continue;
         }
-        entries.push({ request, response, savedAt, manifestUrl, indexUrl, manifestVersion, indexVersion });
+        entries.push({ request, response, savedAt, manifestUrl, indexUrl, manifestVersion, indexVersion, manifestRarityHistoryComplete, manifestFailedSetCount });
       }
       entries.sort((left, right) => right.savedAt - left.savedAt);
       for (const entry of entries.slice(maxVersions)) await evict(cache, entry.request);
@@ -197,7 +210,7 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
       diagnostics.indexLoadMs += Math.max(0, now() - start);
       const index = await parseIndex(text, diagnostics);
       if ((index.version || 0) !== entry.indexVersion) throw new Error("Cached index schema does not match.");
-      return index;
+      return applyManifestReadiness(index, { version: entry.manifestVersion, rarityHistoryComplete: entry.manifestRarityHistoryComplete, failedSetCount: entry.manifestFailedSetCount });
     } catch {
       await evict(cache, entry.request);
       return null;
@@ -215,6 +228,8 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
         "x-pullsmith-index-url": manifest.indexUrl,
         "x-pullsmith-manifest-version": String(manifest.version),
         "x-pullsmith-index-version": String(indexVersion),
+        ...(manifest.rarityHistoryComplete !== undefined ? { "x-pullsmith-manifest-rarity-complete": String(manifest.rarityHistoryComplete) } : {}),
+        ...(manifest.failedSetCount !== undefined ? { "x-pullsmith-manifest-failed-sets": String(manifest.failedSetCount) } : {}),
       } }));
       await cacheEntries(cache);
     } catch { /* Quota and private-browsing failures use the in-memory/network path. */ }
@@ -222,6 +237,7 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
 
   async function performLoad(manifestUrl: string, onProgress?: LoadOptions["onProgress"]): Promise<{ result: MtgjsonIndexLoadResult; savedAt: number; maxAge: number }> {
     const diagnostics = emptyDiagnostics();
+    let manifest: Manifest | undefined;
     const cache = await openCache();
     const entries = cache ? (await cacheEntries(cache)).filter((entry) => entry.manifestUrl === manifestUrl) : [];
     const staleFallback = async (stage: "manifest" | "index") => {
@@ -233,7 +249,7 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
             diagnostics.failureStage = stage;
             diagnostics.cacheHits += 1;
             onProgress?.("Using the last available card-name index from browser cache...");
-            return { result: { index, diagnostics }, savedAt: entry.savedAt, maxAge: 0 };
+            return { result: { index: manifest ? applyManifestReadiness(index, manifest) : index, diagnostics }, savedAt: entry.savedAt, maxAge: 0 };
           }
         }
       }
@@ -243,12 +259,11 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
         diagnostics.failureStage = stage;
         diagnostics.cacheHits += 1;
         onProgress?.("Using the last available card-name index...");
-        return { result: { index: remembered.result.index, diagnostics }, savedAt: remembered.savedAt, maxAge: 0 };
+        return { result: { index: manifest ? applyManifestReadiness(remembered.result.index, manifest) : remembered.result.index, diagnostics }, savedAt: remembered.savedAt, maxAge: 0 };
       }
       throw new MtgjsonIndexLoadError(stage, diagnostics);
     };
 
-    let manifest: Manifest;
     const manifestStart = now();
     diagnostics.manifestRequests += 1;
     try {
@@ -268,7 +283,7 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
         if (index) {
           diagnostics.source = "persistent-cache";
           diagnostics.cacheHits += 1;
-          return { result: { index, diagnostics }, savedAt: entry.savedAt, maxAge };
+          return { result: { index: applyManifestReadiness(index, manifest), diagnostics }, savedAt: entry.savedAt, maxAge };
         }
       }
     }
@@ -287,12 +302,11 @@ export function createMtgjsonIndexLoader(dependencies: LoaderDependencies = {}) 
     let index: MtgjsonCardIndex;
     try {
       index = await parseIndex(text, diagnostics);
-      if (manifest.version && index.version !== manifest.version) throw new Error("Index and manifest schemas differ.");
     } catch {
       return staleFallback("index");
     }
     if (cache) await persist(cache, manifestUrl, manifest, text, index);
-    return { result: { index, diagnostics }, savedAt: wallNow(), maxAge };
+    return { result: { index: applyManifestReadiness(index, manifest), diagnostics }, savedAt: wallNow(), maxAge };
   }
 
   function load(manifestUrl: string, options: LoadOptions = {}): Promise<MtgjsonIndexLoadResult> {

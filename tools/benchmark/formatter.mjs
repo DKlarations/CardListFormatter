@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { buildSync } from "esbuild";
-import { BASELINE_COMMIT, createFixture, mixedFixture, withHarness, remoteRequestCount, assertPacing } from "./formatter-harness.mjs";
+import { BASELINE_COMMIT, RELIABILITY_BASELINE_COMMIT, createFixture, mixedFixture, productionShapeFixture, structuredExportFixture, withHarness, remoteRequestCount, assertPacing } from "./formatter-harness.mjs";
 
 const scenarios = [
   ["ordinary cold (30)", () => createFixture()],
@@ -47,6 +47,76 @@ for (const [scenario, makeFixture, preparation] of scenarios) {
   }
 }
 console.table(rows);
+
+console.log(`Retry-control comparison; actual pre-correction baseline ${RELIABILITY_BASELINE_COMMIT}. All durations are simulated, not live performance claims.`);
+const allOperations = ["collection", "exact", "fuzzy", "search", "history", "sets"];
+const reliabilityScenarios = [
+  ["118 current-v3 success", () => productionShapeFixture({ version: 3 })],
+  ["118 legacy-v2 compatibility", () => productionShapeFixture()],
+  ...[400, 403, 429, 500, 503, "timeout", "network", "malformed-json", "invalid-response"].map((kind) => [
+    `118 legacy history ${kind}`, () => productionShapeFixture({ failure: { kind, retryAfter: 30 } }),
+  ]),
+  ["118 nullable valid history", () => productionShapeFixture({ nullableFields: true })],
+  ...[403, 429, "timeout", "malformed-json"].map((kind) => [
+    `118 provider-wide ${kind}`, () => productionShapeFixture({ failure: { kind, operations: allOperations } }),
+  ]),
+  ["115 true exceptions 503", () => productionShapeFixture({ exceptions: true, failure: { kind: 503 } })],
+];
+const reliabilityRows = [];
+for (const [scenario, makeFixture] of reliabilityScenarios) {
+  for (const revision of ["reliability-baseline", "current"]) {
+    const result = await withHarness(makeFixture(), ({ format }) => format(), { revision });
+    assertPacing(result);
+    if (revision === "current") {
+      assert.equal(result.items.length, 118);
+      assert.equal(result.performance.outcome, "complete");
+      assert.ok(result.durationMs <= 25_220, `${scenario}: formatter exceeded its phase budget plus 220ms mocked index load`);
+      assert.ok(result.performance.providerElapsedMs <= 25_000, scenario);
+      assert.ok(remoteRequestCount(result) <= 40, scenario);
+      assert.equal(result.performance.counts.logicalCardRetries, 0, scenario);
+      assert.equal(result.items.filter((item) => item.isBasicLand && item.status === "found").length, 3);
+      if (scenario.includes("legacy history")) {
+        assert.equal(result.items.filter((item) => item.inputName.startsWith("Reliability Fixture") && item.status === "found").length, 114);
+        assert.equal(result.items.at(-1).status, "review");
+        assert.ok(result.counts.history <= 2);
+      }
+      if (scenario.includes("provider-wide") || scenario.includes("true exceptions")) {
+        assert.equal(result.performance.providerCircuitState, "open");
+        assert.match(result.output, /NEEDS REVIEW/);
+      }
+    }
+    reliabilityRows.push({ scenario, revision, simulatedMs: result.durationMs, requests: remoteRequestCount(result),
+      collection: result.counts.collection, exact: result.counts.exact, fuzzy: result.counts.fuzzy, history: result.counts.history,
+      historyCards: result.historyCardsStarted, genericRetries: result.performance.counts.retries,
+      requestRetries: revision === "current" ? result.performance.counts.requestRetries : "mixed", logicalCardRetries: revision === "current" ? result.performance.counts.logicalCardRetries : "mixed",
+      completed: result.items.filter((item) => item.status === "found").length, review: result.items.filter((item) => item.status === "review").length,
+      circuit: revision === "current" ? result.performance.providerCircuitState : "not implemented" });
+  }
+}
+console.table(reliabilityRows);
+
+// This baseline was measured from the working retry-control implementation before
+// structured parsing edits, rather than from the older production Git revision.
+// An optional local bundle snapshot permits an actual replay without checking in
+// another generated server library. No provider or production data is accessed.
+const structuredBefore = process.env.STRUCTURED_EXPORT_BASELINE_PATH
+  ? await withHarness(structuredExportFixture(), ({ format }) => format(), { revision: "structured-baseline" }) : null;
+const structuredAfter = await withHarness(structuredExportFixture(), ({ format }) => format());
+assert.equal(structuredAfter.items.length, 215);
+assert.equal(structuredAfter.performance.counts.mtgjsonMatches, 215);
+assert.equal(structuredAfter.performance.counts.mtgjsonMisses, 0);
+assert.equal(remoteRequestCount(structuredAfter), 0);
+assert.ok(structuredAfter.items.every((item) => item.status === "found" && item.requestedPrinting?.collectorNumber && !/\([A-Z0-9]+\)\s+\S+$|\*F\*/i.test(item.inputName)));
+const structuredRow = (revision, result) => ({ revision, simulatedMs: result.durationMs, requests: remoteRequestCount(result),
+  exactMatches: result.performance.counts.mtgjsonMatches, exactMisses: result.performance.counts.mtgjsonMisses,
+  collection: result.counts.collection, fuzzy: result.counts.fuzzy, history: result.counts.history, retries: result.performance.counts.requestRetries,
+  completed: result.items.filter((item) => item.status === "found").length });
+console.log("215-row structured-export comparison. Recorded pre-parser bundle SHA-256: c5a8d5e2a64bcb84f3499b486c4db92e2316dbb6001829536099985e7e93f8b5.");
+console.table([
+  structuredBefore ? structuredRow("snapshot replay", structuredBefore) : { revision: "recorded retry-control baseline", simulatedMs: 4980, requests: 40,
+    exactMatches: 0, exactMisses: 215, collection: 5, fuzzy: 35, history: 0, retries: 0, completed: 0 },
+  structuredRow("current structured parser", structuredAfter),
+]);
 
 // This is an explicitly synthetic parse probe, never production timing evidence.
 const example = createFixture().index;

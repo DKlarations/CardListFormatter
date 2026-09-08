@@ -58,3 +58,23 @@ test("copyable performance diagnostics contain numeric aggregates without privat
   report.counts.mtgjsonMatches = 999;
   assert.equal(completed.counts.mtgjsonMatches, 25, "completed diagnostics must remain a snapshot during later requests");
 });
+
+test("completed initial and manual review runs display compatibility and circuit status with printable output", () => {
+  for (const action of [processList, retry]) {
+    assert.match(action, /processingReliabilityStatus\(completedReport\)/);
+    assert.match(action, /setResolvedItems\(/);
+    assert.match(action, /const report = createProcessingPerformance\(\)/);
+    assert.ok(action.indexOf("await resolveCardNames(") < action.indexOf("await fetchRecentCaseSets("), "Index loading must precede the bounded Scryfall phase, including Case Check");
+  }
+  assert.match(source, /resolutionIndexReadiness\(manifest\)/);
+  assert.match(source, /Resolution index schema:/);
+  assert.match(source, /Rarity history complete:/);
+  assert.match(source, /Failed sets:/);
+});
+
+test("initial processing reports parsed import aggregates while manual review measures only its selected entries", () => {
+  assert.match(processList, /recordParsingPerformance\(report, parsed\.diagnostics\)/);
+  assert.match(retry, /parsePullList\(reviewEntries\.flatMap/);
+  assert.match(retry, /recordParsingPerformance\(report, reviewParse\.diagnostics\)/);
+  for (const action of [processList, retry]) assert.match(action, /processingReliabilityStatus\(completedReport\)/);
+});

@@ -1,0 +1,49 @@
+{
+  "object": "list",
+  "total_cards": 3,
+  "has_more": false,
+  "data": [
+    {
+      "object": "card",
+      "id": "00000000-0000-4000-8000-000000000102",
+      "oracle_id": "00000000-0000-4000-8000-000000000001",
+      "name": "Morning Archivist // Evening Historian",
+      "lang": "en",
+      "released_at": "2026-09-01",
+      "layout": "transform",
+      "cmc": 3,
+      "type_line": "Creature — Human Advisor // Creature — Human Wizard",
+      "color_identity": ["U"],
+      "keywords": [],
+      "card_faces": [
+        { "object": "card_face", "name": "Morning Archivist", "mana_cost": "{2}{U}", "type_line": "Creature — Human Advisor", "oracle_text": "Synthetic fixture rules text.", "colors": ["U"], "power": "2", "toughness": "3" },
+        { "object": "card_face", "name": "Evening Historian", "mana_cost": "", "type_line": "Creature — Human Wizard", "oracle_text": "Synthetic fixture reverse-side rules text.", "colors": ["U"], "power": "3", "toughness": "4" }
+      ],
+      "legalities": { "standard": "not_legal", "modern": "legal", "legacy": "legal", "commander": "legal" },
+      "games": ["paper"],
+      "reserved": false,
+      "foil": true,
+      "nonfoil": true,
+      "finishes": ["nonfoil", "foil"],
+      "oversized": false,
+      "promo": false,
+      "reprint": true,
+      "variation": false,
+      "set_id": "00000000-0000-4000-8000-000000000202",
+      "set": "ts2",
+      "set_name": "Synthetic Fixture Reprint Set",
+      "set_type": "expansion",
+      "prints_search_uri": "https://api.scryfall.com/cards/search?unique=prints&q=oracleid%3A00000000-0000-4000-8000-000000000001",
+      "collector_number": "102",
+      "digital": false,
+      "rarity": "rare",
+      "border_color": "black",
+      "frame": "2015",
+      "full_art": false,
+      "textless": false,
+      "booster": true,
+      "story_spotlight": false,
+      "prices": { "usd": "1.75", "usd_foil": null, "usd_etched": null, "eur": null, "eur_foil": null, "tix": null }
+    }
+  ]
+}

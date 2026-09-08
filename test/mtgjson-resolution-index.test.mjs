@@ -163,14 +163,50 @@ test("legacy resolution indexes load as name hints without inheriting v3 paper c
   assert.equal(schema.validateMtgjsonCardIndex({ version: 2, cards: { example: { name: "Example", rarities: ["common"] } } }), true);
 });
 
-test("resolution index validation rejects corrupt fields, unsafe aliases and unknown schema versions", () => {
+test("resolution index validation rejects corrupt fields, unsafe aliases and invalid schema versions", () => {
   const current = buildIndex({ AAA: set("AAA", [card("Example")]) });
   for (const corrupt of [
-    null, [], { cards: [] }, { ...current, version: 4 }, { ...current, rarityHistoryComplete: undefined },
+    null, [], { cards: [] }, { ...current, version: -1 }, { ...current, version: 2.5 }, { ...current, rarityHistoryComplete: "true" },
     { ...current, cards: { example: { ...current.cards.example, paperRarities: ["invalid"] } } },
     { ...current, cards: { example: { ...current.cards.example, hasPlayablePaperPrinting: false } } },
     { ...current, cards: { example: { ...current.cards.example, printings: "AAA" } } },
     { ...current, aliases: { example: "missing" } },
     { ...current, ambiguousAliases: { example: ["example", "example"] } },
   ]) assert.equal(schema.validateMtgjsonCardIndex(corrupt), false);
+});
+
+test("missing per-card v3 evidence remains usable for bounded compatibility without local confidence", () => {
+  for (const extra of [{}, { hasPlayablePaperPrinting: true }, { paperRarities: ["common"] }]) {
+    const incomplete = { version: 3, rarityHistoryComplete: true, cards: { example: { name: "Example", rarities: ["common"], ...extra } } };
+    assert.equal(schema.validateMtgjsonCardIndex(incomplete), true);
+    assert.equal(schema.hasSufficientLocalPaperEvidence(incomplete.cards.example, incomplete), false);
+  }
+});
+
+test("future structurally compatible schemas never inherit current-schema local confidence", () => {
+  const future = { ...buildIndex({ AAA: set("AAA", [card("Example")]) }), version: 4 };
+  assert.equal(schema.validateMtgjsonCardIndex(future), true);
+  assert.equal(schema.hasSufficientLocalPaperEvidence(future.cards.example, future), false);
+  assert.equal(schema.resolutionIndexReadiness(future).compatibilityMode, true);
+});
+
+test("readiness reports only sanitized schema, completeness, generation and failure metadata", () => {
+  const ready = { version: 3, rarityHistoryComplete: true, generatedAt: "2026-09-08T00:00:00Z", failedSetCount: 0 };
+  assert.deepEqual(schema.resolutionIndexReadiness(ready), { schemaVersion: 3, expectedSchemaVersion: 3, rarityHistoryComplete: true, generatedAt: "2026-09-08T00:00:00.000Z", failedSetCount: 0, compatibilityMode: false, manifestSchemaVersion: null, schemaMismatch: false });
+  for (const data of [{ version: 2 }, { ...ready, rarityHistoryComplete: false }, { ...ready, failedSetCount: 1 }]) assert.equal(schema.resolutionIndexReadiness(data).compatibilityMode, true);
+  const privateValues = schema.resolutionIndexReadiness({ version: "private-card", generatedAt: "https://secret.test/token?private=1", source: { url: "secret", mtgjsonMeta: { failedSetCount: 2 } } });
+  assert.equal(privateValues.schemaVersion, null);
+  assert.equal(privateValues.generatedAt, null);
+  assert.equal(privateValues.failedSetCount, 2);
+  assert.doesNotMatch(JSON.stringify(privateValues), /secret|token|private/);
+});
+
+test("missing global completeness and explicit failed sets cannot grant local confidence", () => {
+  const current = buildIndex({ AAA: set("AAA", [card("Example")]) });
+  for (const extra of [{ rarityHistoryComplete: undefined }, { failedSetCount: 1 }, { source: { mtgjsonMeta: { failedSetCount: 1 } } }]) {
+    const incomplete = { ...current, ...extra };
+    assert.equal(schema.validateMtgjsonCardIndex(incomplete), true);
+    assert.equal(schema.hasSufficientLocalPaperEvidence(incomplete.cards.example, incomplete), false);
+    assert.equal(schema.resolutionIndexReadiness(incomplete).compatibilityMode, true);
+  }
 });

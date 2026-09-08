@@ -20,7 +20,7 @@ Each Saved Pull List can also be permanently deleted one at a time from the Rece
 
 ## Exact duplicate protection
 
-The server computes a deterministic SHA-256 fingerprint from sorted, grouped processed card requests. Identity includes canonical card, grouped requested quantity, explicit requested set, Finish, foil technology, visual Treatment, and meaningful requested flavor/reskin. It ignores raw paste formatting, line order, capitalization/punctuation, and customer identity.
+The server computes a deterministic SHA-256 fingerprint from sorted, grouped processed card requests. Identity includes canonical card, grouped requested quantity, explicit requested set, Finish, foil technology, visual Treatment, meaningful requested flavor/reskin, and an imported collector number when supplied. Collector comparisons ignore case while preserving leading zeroes and punctuation; `260s`, `0260s`, and `260` are distinct requests. The additive collector field is omitted when absent, retaining the exact prior fingerprint serialization for legacy lists. It ignores raw paste formatting, line order, card-name capitalization/punctuation, and customer identity.
 
 Redis maps the fingerprint directly to one unexpired job ID. A match to another active job returns a compact summary and prevents a second record; a match to the current job updates normally. Changed jobs release their prior mapping when it is still owned by that job. Stale mappings are removed when the referenced job is missing, expired, or has a different fingerprint.
 
@@ -50,6 +50,8 @@ For local QA, `vite.config.ts` proxies `/api/pull-list-jobs` to the production o
 
 - Saved Pull List load restores the exact staff Pricing Assistant working state and then rehydrates current external catalogs/prices.
 - Copy Link shares processed formatter identity/intent and deliberately starts a fresh Pricing Assistant without print-status metadata.
+
+Structured deck-export intent uses the existing compact formatter `requestedPrinting` object: set code, raw collector-number string, optional finish/foil treatment, and `sourceFormat: "set-collector-export"`. Saved Pricing State retains corresponding requested collector/source fields together with the employee's authoritative set, finish, treatment, and exact MTGJSON UUID. Catalog hydration restores available physical data without changing valid manual choices. Legacy records without collector/source fields normalize to the established empty/default preferences. No saved schema migration or production write is necessary to adopt these optional fields. Copy Link preserves the imported hint but starts fresh staff pricing work, so it can choose the matching current catalog UUID when pricing opens.
 
 ## Email, Teams, and legacy links
 

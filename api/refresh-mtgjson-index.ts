@@ -597,7 +597,9 @@ export async function GET(request: Request) {
 
     const manifest = {
       version: INDEX_VERSION,
+      rarityHistoryComplete: index.rarityHistoryComplete,
       generatedAt: index.generatedAt,
+      failedSetCount: Number(index.source.mtgjsonMeta?.failedSetCount || 0),
       indexPathname: INDEX_PATHNAME,
       indexUrl: latestBlob.url,
       versionedPathname,

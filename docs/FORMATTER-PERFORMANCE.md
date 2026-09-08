@@ -1,5 +1,11 @@
 # Initial formatting performance
 
+**Structured-export follow-up (2026-09-08):** [Structured deck exports and bulk-miss safety](STRUCTURED-EXPORT-PARSING.md) adds right-anchored set/collector parsing, exact printing preferences, cautious mojibake repair and a guard for systematic export misses. The 215-row v3 fixture now resolves all names locally with zero provider requests. Its report contains the latest combined validation and staging inventory; earlier inventories below are historical.
+
+**Current reliability policy (2026-09-08):** [Scryfall reliability and retry control](SCRYFALL-RELIABILITY.md) supersedes the historical retry and legacy-index behavior below. Legacy/incomplete indexes now use bounded collection compatibility verification without ordinary-card history fan-out. Automatic second/third history passes and collection-level retries/fallback fan-out are removed. One request-level retry policy and a shared run circuit enforce 25-second normal / 45-second careful phase budgets and 40 total attempts. See [resolution-index readiness](RESOLUTION-INDEX-READINESS.md) for the backward-compatible release sequence and read-only post-deployment check.
+
+The remaining sections describe the preceding performance release and its original measurements; they are retained as historical evidence, including the now-corrected failure policy.
+
 This pass starts at `49ae9a77fa420888dc540af3492b2f87a4d15589` on `perf/faster-initial-processing`. All measurements below use synthetic lists and mocked providers. No load test, mailbox processing, Teams action, production data write, live Blob refresh, or deployment is part of this work.
 
 ## Measured starting pipeline

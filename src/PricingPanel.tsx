@@ -17,7 +17,7 @@ import {
   Trash2,
 } from "lucide-react";
 import "keyrune/css/keyrune.css";
-import { enrichPrintHistories, outputDisplayName, resolveCardNames, sortItemsForOutput } from "./formatter";
+import { createScryfallRunContext, enrichPrintHistories, outputDisplayName, resolveCardNames, sortItemsForOutput } from "./formatter";
 import {
   applyMinimumPrice,
   cardFromCatalog,
@@ -60,6 +60,7 @@ import {
   createManualPricingRow,
   initializeFoundPricingSelection,
   initializePricingRowSelection,
+  importedPrintingSelectionWarning,
   normalizePricingPhysicalSelection,
   pricingSelectionForPrintingUuid,
   reconcilePricingRowsWithFormatterItems,
@@ -1050,7 +1051,7 @@ export default function PricingPanel({
   function updatePrintingSelection(id: string, update: Partial<PricingRow>) {
     setRows((current) => current.map((row) => {
       if (row.id !== id) return row;
-      const next = { ...row, ...update };
+      const next = { ...row, ...update, setSelectionSource: "manual" as const };
       const card = cardFromCatalog(catalog, next.canonicalName);
       return {
         ...next,
@@ -1161,7 +1162,7 @@ export default function PricingPanel({
       foilTreatment: row.foilTreatment || "standard",
       selectedPrintingUuid: row.selectedPrintingUuid || "",
     }, selectedPrintingUuid, row.setSelectionSource === "manual" ? "" : row.requestedFlavorName);
-    updateRow(row.id, physicalSelection);
+    updateRow(row.id, { ...physicalSelection, setSelectionSource: "manual" });
   }
 
   function updateQuantity(row: PricingRow, quantity: number) {
@@ -1201,7 +1202,10 @@ export default function PricingPanel({
         specialRequests: [],
         lookupKey: pricingNameKey(inputName),
       };
-      const providerOptions = { useMtgjson: true, useScryfall: true, enrichmentPurpose: "pricing-recovery" as const, signal: null };
+      const providerOptions = {
+        useMtgjson: true, useScryfall: true, enrichmentPurpose: "pricing-recovery" as const, signal: null,
+        providerRun: createScryfallRunContext({ purpose: "pricing-recovery" }),
+      };
       const resolved = await resolveCardNames([candidate], setLoadMessage, false, { ...providerOptions, enrichmentPurpose: "formatter" });
       const existingCanonicalName = resolved[0] ? canonicalPricingNameForItem(resolved[0]) : "";
       const alreadyCataloged = resolved[0]?.status === "found"
@@ -1771,6 +1775,8 @@ export default function PricingPanel({
                     && pricing.automatic.status === "ready"
                     && pricing.automatic.source !== "tcgplayer-listed-median";
                   const foilNeedsDoubleCheck = row.found && row.finish === "foil";
+                  const importedPrintingWarning = catalogRowState === "ready"
+                    ? importedPrintingSelectionWarning(row, pricing.card) : "";
                   const showYellowWarning = usingMtgjsonFallback || foilNeedsDoubleCheck;
                   const yellowWarningMessage = foilNeedsDoubleCheck
                     ? `${pricing.automatic.message || "Foil comparison price selected."} Double-check this foil price before printing.`
@@ -1848,6 +1854,11 @@ export default function PricingPanel({
                       <div className="pricing-card-name">
                         {group.length > 1 && <span className="pricing-connector" aria-hidden="true">{rowIndex ? "↳" : "●"}</span>}
                         <strong>{pricingDisplayName(row.displayName, row.canonicalName)}</strong>
+                        {importedPrintingWarning && (
+                          <span className="pricing-fallback-warning" role="status" tabIndex={0}
+                            title={importedPrintingWarning} aria-label={importedPrintingWarning}
+                          ><AlertTriangle size={18} /></span>
+                        )}
                         {showYellowWarning && (
                           <span
                             className="pricing-fallback-warning"

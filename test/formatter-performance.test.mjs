@@ -80,7 +80,7 @@ test("transient Scryfall failure retries once, preserves output, and respects ra
   assert.equal(result.output, healthy.output);
   assert.equal(remoteRequestCount(result), remoteRequestCount(healthy) + 1);
   assert.equal(result.counts.retries, 1);
-  assert.ok(result.durationMs >= healthy.durationMs + 900);
+  assert.ok(result.durationMs > healthy.durationMs, "A real retry retains bounded backoff");
   assertPacing(result);
 });
 
@@ -95,7 +95,9 @@ test("prior schema exact matches conservatively require paper verification", asy
   const result = await withHarness(fixture, ({ format }) => format());
   assert.ok(remoteRequestCount(result) > 0);
   assert.equal(result.items[0].status, "found");
-  assert.ok(result.items[0].prints.length);
+  assert.equal(result.counts.collection, 1);
+  assert.equal(result.counts.history, 0, "Legacy evidence requests batched paper confirmation without full histories");
+  assert.equal(result.items[0].rarityEvidence, "legacy-index");
 });
 
 test("unavailable providers preserve every affected card as Needs Review", async () => {
@@ -158,7 +160,8 @@ test("incomplete local rarity history requests Scryfall without demoting unrelat
   fixture.index.cards["sol ring"].paperRarities = [];
   const result = await withHarness(fixture, ({ format }) => format());
   assert.equal(result.cardsRequiringRemote, 1);
-  assert.equal(result.counts.history, 2);
+  assert.equal(result.counts.history, 0, "Legacy rarity arrays remain compatibility evidence after paper confirmation");
+  assert.equal(result.items[0].rarityEvidence, "legacy-index");
   assert.ok(result.items.every((item) => item.status === "found"));
 });
 
@@ -202,9 +205,9 @@ test("exhausted print-history retries retain the failed exception in review and 
   const result = await withHarness(createFixture({ text: "Sol Ring FOIL\nCounterspell", historyFailure: true }), ({ format }) => format());
   assert.equal(result.items[0].status, "review");
   assert.equal(result.items[0].printLookupFailed, true);
-  assert.equal(result.items[0].printHistoryRetried, true);
+  assert.notEqual(result.items[0].printHistoryRetried, true);
   assert.equal(result.items[1].status, "found");
-  assert.equal(result.counts.history, 12, "Only the failed first history page gets the bounded 4-attempt/3-pass retry budget");
+  assert.equal(result.counts.history, 2, "Only the authoritative HTTP layer retries once; no second or third whole-card pass");
   assert.equal(result.counts.collection, 1);
   assert.equal(result.counts.exact, 0);
   assertPacing(result);

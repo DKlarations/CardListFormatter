@@ -86,6 +86,15 @@ Graph has no production mailbox-processing path here. These names configure the 
 
 Scryfall request intervals/cache policy and TCGplayer URLs are implemented constants and code paths, not secret environment variables. This inventory does not change those protections.
 
+## Resolution-index readiness check
+
+The separate `.github/workflows/resolution-index-readiness.yml` workflow performs one read-only manifest request after a successful main production deployment or manual dispatch on main. It does not refresh data or run the mailbox. See [RESOLUTION-INDEX-READINESS.md](RESOLUTION-INDEX-READINESS.md) for the release sequence and one-time setup.
+
+| Name | Consumer | Environment | Required? / purpose | Active / replacement status |
+| --- | --- | --- | --- | --- |
+| `FORMATTER_BASE_URL` | Readiness workflow repository-variable mapping; `tools/check-resolution-index-readiness.mjs` | Actions; optional local authorized read-only check | Required for this check; exact canonical HTTPS application origin, without credentials, query or fragment | Existing name; readiness check deliberately has no fallback target |
+| `RESOLUTION_INDEX_READINESS_BYPASS_SECRET` | Readiness workflow secret mapping; `tools/check-resolution-index-readiness.mjs` | Actions only when manifest is protected | Optional Vercel protection-bypass header; public manifests need no secret | New optional read-access setup; not a refresh or write credential |
+
 ## Obsolete documentation and platform-provided names
 
 | Name | References / environment | Required? / purpose | Active / replacement status |

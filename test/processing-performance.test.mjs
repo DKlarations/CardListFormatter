@@ -31,9 +31,66 @@ test("completed diagnostic snapshots cannot change when another run updates coun
   diagnostics.countPerformance(report, "scryfallFuzzy", 1);
   report.reasons["fuzzy-name-required"] = 99;
   report.stages.scryfallFuzzy = 999;
+  report.failuresByKind.network = 9;
+  report.failuresByHttpStatus[503] = 9;
   assert.equal(canceled.outcome, "canceled");
   assert.equal(canceled.stage, "scryfallFuzzy");
   assert.equal(canceled.counts.scryfallFuzzy, 2);
   assert.equal(canceled.reasons["fuzzy-name-required"], 2);
   assert.equal(canceled.stages.scryfallFuzzy, 0);
+  assert.deepEqual(canceled.failuresByKind, {});
+  assert.deepEqual(canceled.failuresByHttpStatus, {});
+});
+
+test("diagnostics distinguish request retries and circuit budgets with sanitized failure aggregates", () => {
+  const report = diagnostics.createProcessingPerformance();
+  diagnostics.recordResolutionIndexReadiness(report, { version: 2, generatedAt: "2026-09-08T00:00:00Z", source: { mtgjsonMeta: { failedSetCount: 0 } } });
+  report.providerCircuitState = "open";
+  report.providerCircuitReason = "HTTP_429";
+  report.providerBudgetMs = 25_000;
+  report.providerElapsedMs = 1_200;
+  report.providerAttemptBudget = 40;
+  report.providerAttemptsUsed = 12;
+  report.rateLimitRetryAfter = 60_000;
+  report.counts.printHistoryCardsCompleted = 8;
+  report.counts.printHistoryCardsSkippedAfterCircuit = 107;
+  report.failuresByKind["rate-limited"] = 1;
+  report.failuresByHttpStatus[429] = 1;
+  const copied = diagnostics.formatProcessingPerformance(report);
+  for (const line of ["resolutionIndexSchemaVersion: 2", "rarityHistoryComplete: unknown", "legacyIndexCompatibilityMode: true", "Scryfall circuit: open", "providerCircuitReason: HTTP 429", "providerBudgetMs: 25000", "providerAttemptsUsed: 12", "printHistoryCardsCompleted: 8", "printHistoryCardsSkippedAfterCircuit: 107", "logicalCardRetries: 0", "rateLimitRetryAfter: 60000 ms", "failuresByKind: rate-limited=1", "failuresByHttpStatus: 429=1"]) assert.ok(copied.includes(line), line);
+  assert.match(diagnostics.processingReliabilityStatus(report), /Card-name index is outdated\. Using compatibility verification\./);
+  assert.match(diagnostics.processingReliabilityStatus(report), /Scryfall verification stopped after repeated failures\. Affected cards were placed in Needs Review\./);
+});
+
+test("copyable reports discard unknown labels and unsafe provider failure text", () => {
+  const report = diagnostics.createProcessingPerformance();
+  const secret = "Private Customer Secret Card https://signed.test/?token=hidden";
+  report.providerCircuitReason = secret;
+  report.stage = secret;
+  report.indexSource = secret;
+  report.indexFailureStage = secret;
+  report.resolutionIndexGeneratedAt = secret;
+  report.counts[secret] = 1;
+  report.stages[secret] = 1;
+  report.reasons[secret] = 1;
+  report.failuresByKind[secret] = 1;
+  report.failuresByHttpStatus[secret] = 1;
+  assert.doesNotMatch(diagnostics.formatProcessingPerformance(report), /Private Customer|Secret Card|https?:|token=hidden/);
+});
+
+test("structured export diagnostics copy only safe aggregate counters and bulk-guard flags", () => {
+  const report = diagnostics.createProcessingPerformance();
+  diagnostics.recordParsingPerformance(report, { structuredExportRowsDetected: 215, structuredExportRowsParsed: 214, importedPrintingHints: 214, mojibakeCorrections: 1, privateInput: "Private Customer Card" });
+  report.exactMissRatio = 0.65;
+  report.bulkMissGuardTriggered = true;
+  report.counts.fuzzyLookupsPrevented = 140;
+  const copied = diagnostics.formatProcessingPerformance(report);
+  for (const text of ["structuredExportRowsDetected: 215", "structuredExportRowsParsed: 214", "importedPrintingHints: 214", "mojibakeCorrections: 1", "exactMissRatio: 0.65", "bulkMissGuardTriggered: true", "fuzzyLookupsPrevented: 140"]) assert.ok(copied.includes(text), text);
+  assert.doesNotMatch(copied, /Private Customer Card|privateInput/);
+  assert.match(diagnostics.processingReliabilityStatus(report), /Most card names failed exact matching.*unsupported export format/);
+  diagnostics.recordParsingPerformance(report, { structuredExportRowsDetected: -1, structuredExportRowsParsed: "private", importedPrintingHints: Infinity, mojibakeCorrections: 0.5 });
+  assert.equal(report.counts.structuredExportRowsDetected, 0);
+  assert.equal(report.counts.structuredExportRowsParsed, 0);
+  assert.equal(report.counts.importedPrintingHints, 0);
+  assert.equal(report.counts.mojibakeCorrections, 0);
 });

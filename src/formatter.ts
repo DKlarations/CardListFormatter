@@ -6,9 +6,15 @@ import {
   type Customer,
 } from "./customer";
 import { GENERATED_SAMPLE_CUSTOMER_NAMES } from "./generated-sample";
-import { countPerformance, createProcessingPerformance, finishProcessingPerformance, processingNow, type ProcessingPerformance } from "./processing-performance.js";
+import { type RequestedPrintingPreference } from "./requested-printing.js";
+import { parseStructuredExportLine, detectStructuredExportSuffix, repairMojibake } from "./structured-export.js";
+export { parseStructuredExportLine, detectStructuredExportSuffix, repairMojibake } from "./structured-export.js";
+import { countPerformance, createProcessingPerformance, finishProcessingPerformance, processingNow, recordResolutionIndexReadiness, type ProcessingPerformance } from "./processing-performance.js";
 import { loadMtgjsonResolutionIndex, prefetchMtgjsonResolutionIndex, clearMtgjsonResolutionIndexMemory } from "./mtgjson-index-cache.js";
 import { hasSufficientLocalPaperEvidence, type MtgjsonIndexedCard, type MtgjsonCardIndex } from "./mtgjson-resolution-index.js";
+import { createScryfallRunContext, providerCircuitFailure, startProviderPhase, remainingProviderMs, recordProviderAttempt, recordProviderSuccess, recordProviderFailure, countMalformedRecords, retryAfterDuration, waitForProvider, openScryfallCircuit, syncScryfallDiagnostics, SCRYFALL_REQUEST_TIMEOUT_MS, SCRYFALL_MAX_ATTEMPTS, type ProviderFailure, type ProviderOperation, type ScryfallRunContext } from "./scryfall-reliability.js";
+export { createScryfallRunContext, providerCircuitFailure, type ProviderFailure, type ScryfallRunContext } from "./scryfall-reliability.js";
+import { BULK_MISS_GUARD_MESSAGE, recordParsingPerformance } from "./processing-performance.js";
 
 const SCRYFALL_COLLECTION_URL = "https://api.scryfall.com/cards/collection";
 const SCRYFALL_NAMED_URL = "https://api.scryfall.com/cards/named";
@@ -29,6 +35,7 @@ let scryfallRequestGate = Promise.resolve();
 let lastScryfallRequestAt = 0;
 let activeScryfallSignal: AbortSignal | null = null;
 let activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+let activeScryfallRun: ScryfallRunContext | undefined;
 
 type ScryfallSetSummary = {
   code: string;
@@ -44,12 +51,7 @@ type PullItem = Record<string, any> & {
   inputName: string;
   statedRarities: string[];
   specialRequests: string[];
-  requestedPrinting?: {
-    setCode?: string;
-    finish?: "normal" | "foil" | "etched";
-    foilTreatment?: "standard" | "surge";
-    treatment?: string;
-  };
+  requestedPrinting?: RequestedPrintingPreference;
   lookupKey: string;
   note?: string;
   presetStatus?: string;
@@ -61,7 +63,7 @@ type FetchResult = {
   status: number;
   data: any;
   cached?: boolean;
-  error?: unknown;
+  failure?: ProviderFailure;
 };
 
 type LabeledPattern = readonly [string, RegExp];
@@ -87,6 +89,7 @@ export type ProviderOptions = {
   performance?: ProcessingPerformance;
   minIntervalMs?: number;
   requestType?: string;
+  providerRun?: ScryfallRunContext;
 };
 
 export function clearMtgjsonIndexCache() {
@@ -126,11 +129,13 @@ function randomSamplePhoneNumber() {
 export function beginScryfallRun(signal: AbortSignal | null, carefulMode = false) {
   activeScryfallSignal = signal;
   activeScryfallMinIntervalMs = carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : SCRYFALL_MIN_INTERVAL_MS;
+  activeScryfallRun = createScryfallRunContext({ carefulMode });
 }
 
 export function endScryfallRun() {
   activeScryfallSignal = null;
   activeScryfallMinIntervalMs = SCRYFALL_MIN_INTERVAL_MS;
+  activeScryfallRun = undefined;
 }
 
 // Builds the default paste-in sample with a fresh fake customer each page load.
@@ -312,12 +317,19 @@ function sleep(ms: number, signal?: AbortSignal | null) {
 }
 
 function providerContext(options: ProviderOptions, carefulMode = false): ProviderOptions {
-  return { ...options, signal: options.signal === undefined ? activeScryfallSignal : options.signal,
-    minIntervalMs: carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : Math.max(SCRYFALL_MIN_INTERVAL_MS, options.minIntervalMs || (options.signal === undefined ? activeScryfallMinIntervalMs : SCRYFALL_MIN_INTERVAL_MS)) };
+  const minIntervalMs = carefulMode ? CAREFUL_SCRYFALL_MIN_INTERVAL_MS : Math.max(SCRYFALL_MIN_INTERVAL_MS, options.minIntervalMs || (options.signal === undefined ? activeScryfallMinIntervalMs : SCRYFALL_MIN_INTERVAL_MS));
+  options.providerRun ||= options.enrichmentPurpose !== "pricing-recovery" && activeScryfallRun
+    ? activeScryfallRun : createScryfallRunContext({ carefulMode: minIntervalMs >= CAREFUL_SCRYFALL_MIN_INTERVAL_MS, purpose: options.enrichmentPurpose, performance: options.performance });
+  if (options.performance) options.providerRun.performance = options.performance;
+  syncScryfallDiagnostics(options.providerRun);
+  return { ...options, signal: options.signal === undefined ? activeScryfallSignal : options.signal, minIntervalMs };
 }
 
 // Keeps Scryfall requests spaced out so we do not hammer the good card oracle.
 async function waitForScryfallSlot(context: ProviderOptions) {
+  const run = context.providerRun!;
+  startProviderPhase(run);
+  if (providerCircuitFailure(run)) return false;
   const previousGate = scryfallRequestGate;
   let releaseGate;
   scryfallRequestGate = new Promise((resolve) => {
@@ -325,15 +337,27 @@ async function waitForScryfallSlot(context: ProviderOptions) {
   });
 
   try {
-    await previousGate;
+    // The gate holds at most one short interval; cancellation also interrupts a queued consumer.
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => { context.signal?.removeEventListener("abort", cancel); run.controller.signal.removeEventListener("abort", stopped); };
+      const cancel = () => { cleanup(); reject(new DOMException("Processing canceled.", "AbortError")); };
+      const stopped = () => { cleanup(); resolve(); };
+      context.signal?.addEventListener("abort", cancel, { once: true });
+      run.controller.signal.addEventListener("abort", stopped, { once: true });
+      previousGate.then(() => { cleanup(); resolve(); }, reject);
+    });
     throwIfAborted(context.signal);
+    if (providerCircuitFailure(run)) return false;
     const elapsed = Date.now() - lastScryfallRequestAt;
     const interval = context.minIntervalMs || SCRYFALL_MIN_INTERVAL_MS;
-    if (elapsed < interval) await sleep(interval - elapsed, context.signal);
+    if (elapsed < interval && !await waitForProvider(run, interval - elapsed, context.signal)) return false;
     throwIfAborted(context.signal);
+    if (providerCircuitFailure(run)) return false;
     lastScryfallRequestAt = Date.now();
+    return true;
   } finally {
-    releaseGate();
+    // A canceled queued consumer must not let later consumers overtake its predecessor.
+    previousGate.then(releaseGate, releaseGate);
   }
 }
 
@@ -533,15 +557,14 @@ function isIgnoredEmailMetadataLine(line) {
 function parseCustomerAndCards(text) {
   const lines = text
     .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
+    .filter((line) => line.trim());
 
   const customer = { name: "", contact: "" };
   const emailHeaderContact = { name: "", contact: "" };
   const cardLines = [];
 
   for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
+    const line = lines[index].trim();
     if (isSeparatorLine(line) || STORE_EMAIL_PATTERN.test(line)) continue;
 
     if (isContactSectionHeading(line, lines[index + 1])) continue;
@@ -562,13 +585,13 @@ function parseCustomerAndCards(text) {
       continue;
     }
 
-    if (parseStructuredPriceRow(line)) {
-      cardLines.push(line);
+    if (parseStructuredPriceRow(line) || parseStructuredExportLine(line)) {
+      cardLines.push(lines[index]);
       continue;
     }
 
     if (isLikelyNoteLine(line)) continue;
-    cardLines.push(line);
+    cardLines.push(lines[index]);
   }
 
   customer.name = customer.name || emailHeaderContact.name;
@@ -936,6 +959,10 @@ function mergeRequestedPrinting(a, b) {
 
 // Checks whether an item needs a specific printing style beyond plain old nonfoil.
 function hasSpecialPrintRequest(item) {
+  if (item.requestedPrinting?.sourceFormat === "set-collector-export") {
+    return (item.specialRequests || []).some((request) => request !== "NONFOIL"
+      && !(request === "FOIL" && item.requestedPrinting.finish === "foil"));
+  }
   return Boolean(item.requestedPrinting?.setCode) || (item.specialRequests || []).some((request) => request !== "NONFOIL");
 }
 
@@ -951,6 +978,7 @@ export function requiresScryfallEnrichment(item, options: ProviderOptions = {}) 
   if (options.enrichmentPurpose === "case-check") return decision(true, "case-check");
   if (item.requestedFlavor) return decision(true, "requested-flavor-name");
   if (hasSpecialPrintRequest(item)) return decision(true, "special-printing-request");
+  if (item.legacyIndexCompatibility) return decision(!item.paperIdentityVerified, "legacy-index-compatibility");
   if (!item.localPaperVerified && !isPlayablePaperCard(item.card)) return decision(true, "insufficient-paper-confidence");
   if (!item.localRarityVerified) return decision(true, "insufficient-local-rarity");
   return decision(false, "already-complete");
@@ -1102,6 +1130,13 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
   const quantityMatch = line.match(/^(\d+)\s*x?\s+(.+)$/i);
   let quantity = quantityMatch ? Number(quantityMatch[1]) : 1;
   line = quantityMatch ? quantityMatch[2].trim() : line;
+  const structuredExport = parseStructuredExportLine(line, true);
+  // Correct display-name encoding without rewriting imported source identifiers.
+  const nameToRepair = structuredExport ? structuredExport.name : line;
+  const repairedName = repairMojibake(nameToRepair);
+  const mojibakeCorrected = repairedName !== nameToRepair;
+  if (structuredExport) structuredExport.name = repairedName;
+  else line = repairedName;
 
   const manaMatch = line.match(/^(white|blue|black|red|green)\s+mana$/i);
   if (manaMatch) {
@@ -1119,28 +1154,33 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
   }
 
   const metadata = emptyMetadata();
-  const structuredPriceRow = parseStructuredPriceRow(line);
+  const structuredPriceRow = structuredExport ? null : parseStructuredPriceRow(line);
+  if (structuredExport) line = structuredExport.name;
   if (structuredPriceRow) {
     line = structuredPriceRow.name;
     metadata.rarities.push(structuredPriceRow.rarity);
     metadata.setCode = structuredPriceRow.setCode;
   }
 
-  const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
-  line = parentheticalQuantity.line;
-  quantity = parentheticalQuantity.quantity || quantity;
-  if (!structuredPriceRow) line = stripTrailingDescriptors(line, metadata);
+  if (!structuredExport) {
+    const parentheticalQuantity = pullTrailingParentheticalQuantity(line);
+    line = parentheticalQuantity.line;
+    quantity = parentheticalQuantity.quantity || quantity;
+    if (!structuredPriceRow) line = stripTrailingDescriptors(line, metadata);
+  }
   quantity = metadata.quantity || quantity;
 
   let inputName = cleanLookupName(line);
   if (!inputName) return null;
   const isToken = isTokenRequestName(inputName);
-  const tokenDetails = isToken ? extractTokenDetails(rawLine) : [];
-  const tokenColors = isToken ? extractTokenColors(rawLine) : [];
+  // Imported set/collector identifiers are not token colors, abilities, or P/T.
+  const tokenSource = structuredExport ? inputName : rawLine;
+  const tokenDetails = isToken ? extractTokenDetails(tokenSource) : [];
+  const tokenColors = isToken ? extractTokenColors(tokenSource) : [];
   if (isToken) inputName = applyTokenColors(cleanTokenName(inputName), tokenColors);
   if (!inputName) return null;
 
-  const uniqueSpecialRequests = Array.from(new Set(metadata.specialRequests));
+  const uniqueSpecialRequests = Array.from(new Set([...metadata.specialRequests, ...(structuredExport?.finish === "foil" ? ["FOIL"] : [])]));
   return {
     index,
     original: rawLine,
@@ -1148,7 +1188,14 @@ function parseCardLine(rawLine: string, index: number): PullItem | null {
     inputName,
     statedRarities: Array.from(new Set(metadata.rarities)),
     specialRequests: uniqueSpecialRequests,
-    requestedPrinting: requestedPrintingFor(uniqueSpecialRequests, metadata.setCode),
+    requestedPrinting: structuredExport ? {
+      setCode: structuredExport.setCode, collectorNumber: structuredExport.collectorNumber,
+      ...(structuredExport.finish ? { finish: structuredExport.finish, foilTreatment: structuredExport.foilTreatment } : {}),
+      sourceFormat: structuredExport.sourceFormat,
+    } : requestedPrintingFor(uniqueSpecialRequests, metadata.setCode),
+    structuredExportDetected: detectStructuredExportSuffix(rawLine),
+    structuredExportParsed: Boolean(structuredExport),
+    mojibakeCorrected,
     lookupKey: isToken ? normalizeName(`${inputName} ${tokenDetails.join(" ")}`) : normalizeName(inputName),
     ...(isToken ? {
       status: "found",
@@ -1166,12 +1213,22 @@ export function parsePullList(text: string) {
   const { customer, cardLines } = parseCustomerAndCards(text);
   const normalizedCardLines = normalizeCopiedTableLines(cardLines);
   const grouped = new Map<string, PullItem>();
+  const diagnostics = { structuredExportRowsDetected: 0, structuredExportRowsParsed: 0, importedPrintingHints: 0, mojibakeCorrections: 0 };
 
   normalizedCardLines.forEach((line, index) => {
     const item = parseCardLine(line, index);
     if (!item) return;
+    if (item.structuredExportDetected) diagnostics.structuredExportRowsDetected += 1;
+    if (item.structuredExportParsed) { diagnostics.structuredExportRowsParsed += 1; diagnostics.importedPrintingHints += 1; }
+    if (item.mojibakeCorrected) diagnostics.mojibakeCorrections += 1;
 
-    const existing = grouped.get(item.lookupKey);
+    // Keep imported physical preferences distinct, while identical requests still
+    // combine quantities. The lookupKey itself remains only canonical name text.
+    const hint = item.requestedPrinting;
+    const groupKey = hint?.sourceFormat === "set-collector-export"
+      ? JSON.stringify([item.lookupKey, hint.setCode?.toLowerCase(), hint.collectorNumber?.toLowerCase(), hint.finish || "", hint.foilTreatment || ""])
+      : item.lookupKey;
+    const existing = grouped.get(groupKey);
     if (existing) {
       existing.quantity += item.quantity;
       existing.originals.push(item.original);
@@ -1185,10 +1242,10 @@ export function parsePullList(text: string) {
       return;
     }
 
-    grouped.set(item.lookupKey, { ...item, originals: [item.original] });
+    grouped.set(groupKey, { ...item, originals: [item.original] });
   });
 
-  return { customer, cards: Array.from(grouped.values()), cardLineCount: normalizedCardLines.length };
+  return { customer, cards: Array.from(grouped.values()), cardLineCount: normalizedCardLines.length, diagnostics };
 }
 
 // Slices arrays into small batches for parallel-but-polite Scryfall work, so scryfall doesn't give me a spank.
@@ -1249,15 +1306,16 @@ function chooseExactMtgjsonCandidate(index: MtgjsonCardIndex, inputName: string,
 }
 
 function findMtgjsonCard(index: MtgjsonCardIndex | null, inputName: string) {
-  if (!index?.cards || !index.aliases) return null;
+  if (!index?.cards) return null;
 
   for (const key of mtgjsonAliasKey(inputName)) {
     if (index.ambiguousAliases?.[key]?.length) {
       const card = chooseExactMtgjsonCandidate(index, inputName, index.ambiguousAliases[key]);
       return card ? { card, ambiguous: false } : { card: null, ambiguous: true };
     }
-    const cardKey = index.aliases[key];
-    const card = cardKey ? index.cards[cardKey] : null;
+    const cardKey = index.aliases?.[key];
+    const card = cardKey ? index.cards[cardKey]
+      : chooseExactMtgjsonCandidate(index, inputName, [key]);
     if (card) return { card, ambiguous: false };
   }
 
@@ -1304,6 +1362,8 @@ function resolveItemWithMtgjsonCard(item: PullItem, card: MtgjsonIndexedCard, in
     mtgjsonCard: card,
     localPaperVerified: paperVerified,
     localRarityVerified,
+    rarityEvidence: localRarityVerified ? "current-index" : "legacy-index",
+    legacyRarities: localRarityVerified ? undefined : providerRarities,
     requestedFlavor: ![card.name, card.asciiName].filter(Boolean).some((name) => compactName(name) === compactName(item.inputName)),
   };
 }
@@ -1333,6 +1393,7 @@ async function resolveExactWithMtgjson(items: PullItem[], setMessage, options: P
   }
   const { index, diagnostics } = loaded;
   recordDiagnostics(diagnostics);
+  recordResolutionIndexReadiness(options.performance, index);
   const lookupStarted = processingNow();
   const resolved = [];
   const missing = [];
@@ -1352,34 +1413,106 @@ async function resolveExactWithMtgjson(items: PullItem[], setMessage, options: P
     }
 
     countPerformance(options.performance, "mtgjsonMatches");
-    const local = resolveItemWithMtgjsonCard(item, result.card, index);
+    const local: PullItem = resolveItemWithMtgjsonCard(item, result.card, index);
+    if (!local.localRarityVerified && !local.requestedFlavor && !hasSpecialPrintRequest(local)
+      && options.enrichmentPurpose !== "case-check" && options.enrichmentPurpose !== "pricing-recovery") {
+      local.legacyIndexCompatibility = true;
+      if (options.performance) options.performance.legacyIndexCompatibilityMode = true;
+      if (options.useScryfall === false) {
+        resolved.push({ ...local, status: "review", lessVerified: true, note: "Card-name index requires refresh; paper identity not verified (Scryfall disabled)." });
+      } else {
+        missing.push({ ...local, status: "missing", mtgjsonExactName: result.card.name, enrichmentReason: "legacy-index-compatibility" });
+      }
+      continue;
+    }
     const decision = requiresScryfallEnrichment(local, options);
     if (decision.required && options.useScryfall !== false) {
       missing.push({ ...local, status: "missing", mtgjsonExactName: result.card.name, enrichmentReason: decision.reason });
     } else resolved.push(local);
   }
 
+  const guarded = guardBulkExactMisses(items, resolved, missing, options);
   if (options.performance) options.performance.stages.mtgjsonLookup += processingNow() - lookupStarted;
+  if (guarded) {
+    setMessage(BULK_MISS_GUARD_MESSAGE);
+    return guarded;
+  }
   setMessage(`MTGJSON matched ${resolved.length} cards ready locally; ${missing.length} need further verification.`);
+  if (missing.some((item) => item.legacyIndexCompatibility)) setMessage("Card-name index is outdated. Using compatibility verification.");
   return { resolved, missing };
 }
 
+const BULK_MISS_MINIMUM_NAMES = 20;
+const BULK_MISS_RATIO_THRESHOLD = 0.60;
+const BULK_MISS_EXPORT_EVIDENCE_RATIO = 0.60;
+
+/** Detect a failed export shape after exact lookup, before any per-name remote work. */
+function guardBulkExactMisses(items: PullItem[], resolved: PullItem[], missing: PullItem[], options: ProviderOptions) {
+  const ordinary = (item: PullItem) => !item.isToken && !item.isBasicLand && !BASIC_LAND_NAMES.has(item.inputName)
+    && !item.requestedFlavor && !hasSpecialPrintRequest(item);
+  const ordinaryNames = new Set(items.filter(ordinary).map((item) => normalizeName(item.inputName)));
+  const missingNames = new Map<string, PullItem[]>();
+  for (const item of missing) {
+    if (item.enrichmentReason !== "mtgjson-miss" || !ordinary(item)) continue;
+    const key = normalizeName(item.inputName);
+    missingNames.set(key, [...(missingNames.get(key) || []), item]);
+  }
+  const exactMissRatio = ordinaryNames.size ? missingNames.size / ordinaryNames.size : null;
+  if (options.performance) options.performance.exactMissRatio = exactMissRatio;
+  if (options.useScryfall === false || options.enrichmentPurpose === "pricing-recovery"
+    || ordinaryNames.size < BULK_MISS_MINIMUM_NAMES || !(exactMissRatio > BULK_MISS_RATIO_THRESHOLD)) return null;
+
+  // Hints prove the supported parser ran. Raw suffix evidence also catches an
+  // export variant that the parser conservatively left untouched. Names-only
+  // misspellings and newly released individual cards keep normal recovery.
+  const hasExportEvidence = (item: PullItem) => item.requestedPrinting?.sourceFormat === "set-collector-export"
+    || [item.original, ...(item.originals || [])].some((line) => typeof line === "string" && detectStructuredExportSuffix(line));
+  const exportMisses = [...missingNames.values()].filter((entries) => entries.some(hasExportEvidence)).length;
+  if (exportMisses / missingNames.size < BULK_MISS_EXPORT_EVIDENCE_RATIO) return null;
+
+  const blocked = missing.filter((item) => item.enrichmentReason === "mtgjson-miss" && ordinary(item));
+  const blockedItems = new Set(blocked);
+  if (options.performance) options.performance.bulkMissGuardTriggered = true;
+  countPerformance(options.performance, "fuzzyLookupsPrevented", missingNames.size);
+  return {
+    resolved: [...resolved, ...blocked.map((item) => ({
+      ...item, status: "review", bulkMissGuarded: true, lessVerified: true,
+      enrichmentReason: "bulk-exact-miss-guard",
+      note: "Most exact card names failed. Check the pasted export format before reprocessing.",
+    }))],
+    missing: missing.filter((item) => !blockedItems.has(item)),
+  };
+}
+
 // Fetches JSON with cache, retries, throttling, and a little patience when Scryfall has a mood.
-const scryfallFlights = new Map<string, { signal: AbortSignal | null | undefined; promise: Promise<FetchResult> }[]>();
+const scryfallFlights = new Map<string, { signal: AbortSignal | null | undefined; run: ScryfallRunContext; promise: Promise<FetchResult> }[]>();
 
 function evictScryfallResponse(url: string, options: RequestInit = {}) {
   try { if (typeof localStorage !== "undefined") localStorage.removeItem(cacheKeyForRequest(url, options)); } catch { /* Optional cache. */ }
 }
 
-function validScryfallResponse(url: string, data, context: ProviderOptions) {
+function normalizedScryfallResponse(url: string, data, context: ProviderOptions, countDropped = false) {
   const type = context.requestType || scryfallRequestCounter(url);
-  if (type === "scryfallExact" || type === "scryfallFuzzy") return validScryfallCard(data);
+  if (type === "scryfallExact" || type === "scryfallFuzzy") return normalizeScryfallCard(data);
   if (type === "scryfallCollection" || type === "scryfallPrintPages") {
-    return Array.isArray(data?.data) && data.data.every(validScryfallCard)
-      && (!data.has_more || (typeof data.next_page === "string" && data.next_page !== url && data.next_page.length > 0));
+    if (!Array.isArray(data?.data) || (data.has_more !== undefined && typeof data.has_more !== "boolean")
+      || (data.has_more && (!safeScryfallUrl(data.next_page) || data.next_page === url))) return null;
+    const cards = data.data.map(normalizeScryfallCard).filter((card) => card
+      && (type !== "scryfallPrintPages" || (Array.isArray(card.games) && Boolean(parseRarity(card.rarity))
+        && (Boolean(card.type_line) || card.card_faces?.some((face) => Boolean(face.type_line))))));
+    const dropped = data.data.length - cards.length;
+    if (countDropped && dropped && context.providerRun) countMalformedRecords(context.providerRun, dropped);
+    if (!cards.length && (data.data.length || type === "scryfallPrintPages")) return null;
+    return { ...data, data: cards };
   }
-  if (type === "scryfallSets") return Array.isArray(data?.data) && data.data.every((set) => set && typeof set.code === "string");
-  return Number.isFinite(data?.total_cards);
+  if (type === "scryfallSets") return Array.isArray(data?.data) && data.data.every((set) => set && typeof set.code === "string") ? data : null;
+  return Number.isFinite(data?.total_cards) && data.total_cards >= 0 ? data : null;
+}
+
+function safeScryfallUrl(value) {
+  if (typeof value !== "string") return false;
+  try { const url = new URL(value); return url.origin === "https://api.scryfall.com" && !url.username && !url.password; }
+  catch { return false; }
 }
 
 function scryfallRequestCounter(url: string) {
@@ -1391,15 +1524,19 @@ function scryfallRequestCounter(url: string) {
   return "scryfallSearch";
 }
 
-async function fetchJsonWithRetry(url: string, options: RequestInit = {}, attempts = 4, context: ProviderOptions = {}): Promise<FetchResult> {
+async function fetchJsonWithRetry(url: string, options: RequestInit = {}, attempts = SCRYFALL_MAX_ATTEMPTS, context: ProviderOptions = {}): Promise<FetchResult> {
+  context = providerContext(context);
   throwIfAborted(context.signal);
   const cached = readCachedResponse(url, options);
-  if (cached && validScryfallResponse(url, cached.data, context)) { countPerformance(context.performance, "scryfallCacheHits"); return cached; }
+  const normalizedCache = cached && normalizedScryfallResponse(url, cached.data, context);
+  if (cached && normalizedCache) { countPerformance(context.performance, "scryfallCacheHits"); return { ...cached, data: normalizedCache }; }
   if (cached) evictScryfallResponse(url, options);
+  const stopped = providerCircuitFailure(context.providerRun, (context.requestType || scryfallRequestCounter(url)) as ProviderOperation);
+  if (stopped) return { ok: false, status: 0, data: null, failure: stopped };
   const key = cacheKeyForRequest(url, options);
-  const existing = scryfallFlights.get(key)?.find((entry) => entry.signal === context.signal);
+  const existing = scryfallFlights.get(key)?.find((entry) => entry.signal === context.signal && entry.run === context.providerRun);
   if (existing) { countPerformance(context.performance, "scryfallCacheHits"); return existing.promise; }
-  const entry = { signal: context.signal, promise: fetchJsonAttempts(url, options, attempts, context) };
+  const entry = { signal: context.signal, run: context.providerRun!, promise: fetchJsonAttempts(url, options, Math.min(attempts, SCRYFALL_MAX_ATTEMPTS), context) };
   scryfallFlights.set(key, [...(scryfallFlights.get(key) || []), entry]);
   try { return await entry.promise; }
   finally {
@@ -1409,60 +1546,76 @@ async function fetchJsonWithRetry(url: string, options: RequestInit = {}, attemp
 }
 
 async function fetchJsonAttempts(url: string, options: RequestInit, attempts: number, context: ProviderOptions): Promise<FetchResult> {
-  let lastError;
-  let lastStatus = 0;
-  const retryableStatuses = new Set([408, 409, 425, 429, 500, 502, 503, 504]);
+  const run = context.providerRun!;
+  const operation = (context.requestType || scryfallRequestCounter(url)) as ProviderOperation;
+  const retryableStatuses = new Set([408, 425, 500, 502, 503, 504]);
+  let failure: ProviderFailure = { kind: "network", retryable: true, operation, attemptCount: 0 };
 
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     const controller = new AbortController();
     const abort = () => controller.abort();
+    let timedOut = false;
+    let responseStatus: number | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
       throwIfAborted(context.signal);
-      await waitForScryfallSlot(context);
+      if (!await waitForScryfallSlot(context)) return { ok: false, status: 0, data: null, failure: providerCircuitFailure(run, operation)! };
       throwIfAborted(context.signal);
       context.signal?.addEventListener("abort", abort, { once: true });
-      countPerformance(context.performance, context.requestType || scryfallRequestCounter(url));
-      if (attempt > 1) countPerformance(context.performance, "retries");
-      // Deadline covers the response body as well as connection setup. Reject even
-      // when a transport ignores abort, while aborting cooperative transports.
+      run.controller.signal.addEventListener("abort", abort, { once: true });
+      recordProviderAttempt(run, operation, attempt);
+      // Abort cooperative fetch and bound even a transport/body reader that ignores abort.
+      const remaining = remainingProviderMs(run);
       const deadline = new Promise<never>((_, reject) => {
         const cancel = () => reject(new DOMException("Request interrupted.", "AbortError"));
         controller.signal.addEventListener("abort", cancel, { once: true });
-        timeout = setTimeout(() => controller.abort(), 15000);
+        timeout = setTimeout(() => {
+          timedOut = true;
+          if (remaining <= SCRYFALL_REQUEST_TIMEOUT_MS) openScryfallCircuit(run, "time_budget");
+          controller.abort();
+        }, Math.min(SCRYFALL_REQUEST_TIMEOUT_MS, remaining));
       });
       const response = await Promise.race([fetch(url, {
         ...options, headers: scryfallRequestHeaders(options.headers), signal: controller.signal,
-      }).then(async (response) => ({ ok: response.ok, status: response.status, headers: response.headers,
-        data: response.ok ? await response.json() : null })), deadline]);
+      }).then(async (response) => {
+        responseStatus = response.status;
+        return { ok: response.ok, status: response.status, headers: response.headers,
+          data: response.ok ? await response.json() : null };
+      }), deadline]);
       clearTimeout(timeout);
-      lastStatus = response.status;
-
-      if (retryableStatuses.has(response.status) && attempt < attempts) {
-        const retryAfter = Number(response.headers.get("Retry-After")) || 1;
-        await sleep(Math.min(10000, Math.max(retryAfter * 1000, 900 * attempt)), context.signal);
-        continue;
-      }
-
       if (!response.ok) {
-        return { ok: false, status: response.status, data: null };
+        failure = { kind: response.status === 403 ? "forbidden" : response.status === 429 ? "rate-limited" : "http-status",
+          status: response.status, retryable: retryableStatuses.has(response.status), operation, attemptCount: attempt,
+          ...(response.status === 429 ? { retryAfterMs: retryAfterDuration(response.headers.get("Retry-After"), run.now()) } : {}) };
+      } else {
+        const normalized = normalizedScryfallResponse(url, response.data, context, true);
+        if (normalized) {
+          recordProviderSuccess(run);
+          const result = { ok: true, status: response.status, data: normalized };
+          writeCachedResponse(url, options, result);
+          return result;
+        }
+        failure = { kind: response.data?.has_more && response.data.next_page === url ? "pagination-loop" : "invalid-response", status: response.status, retryable: false, operation, attemptCount: attempt };
       }
-
-      if (!validScryfallResponse(url, response.data, context)) return { ok: false, status: 502, data: null };
-      const result = { ok: true, status: response.status, data: response.data };
-      writeCachedResponse(url, options, result);
-      return result;
     } catch (error) {
+      if (context.signal?.aborted) recordProviderFailure(run, { kind: "canceled", retryable: false, operation, attemptCount: attempt });
       throwIfAborted(context.signal);
-      lastError = error;
-      if (attempt < attempts) await sleep(900 * attempt, context.signal);
+      const stopped = providerCircuitFailure(run, operation);
+      if (stopped) return { ok: false, status: 0, data: null, failure: { ...stopped, attemptCount: attempt } };
+      const kind = timedOut ? "timeout" : error instanceof SyntaxError ? "malformed-json" : "network";
+      failure = { kind, ...(responseStatus ? { status: responseStatus } : {}), retryable: kind === "timeout" || kind === "network", operation, attemptCount: attempt };
     } finally {
       clearTimeout(timeout);
       context.signal?.removeEventListener("abort", abort);
+      run.controller.signal.removeEventListener("abort", abort);
     }
+    recordProviderFailure(run, failure);
+    if (!failure.retryable || attempt === attempts || providerCircuitFailure(run, operation)) break;
+    // One retry layer, bounded jittered exponential backoff. 429 never reaches this path.
+    const backoff = Math.min(1500, 400 * 2 ** (attempt - 1) * (0.75 + run.random() * 0.5));
+    if (!await waitForProvider(run, backoff, context.signal)) break;
   }
-
-  return { ok: false, status: lastStatus, data: null, error: lastError };
+  return { ok: false, status: failure.status || 0, data: null, failure };
 }
 
 // Sends up to 50 exact card-name lookups to Scryfall in one neat bundle. This has been reduced from 100, then 75, might end up reducing it again to 25 if we have to.
@@ -1476,18 +1629,42 @@ async function fetchCollection(items, context: ProviderOptions) {
     body: JSON.stringify({
       identifiers: items.map((item) => ({ name: item.mtgjsonExactName || item.inputName })),
     }),
-  }, 4, context);
-  return result.ok && (!Array.isArray(result.data?.data) || !result.data.data.every(validScryfallCard))
-    ? { ok: false, status: 502, data: null } : result;
+  }, SCRYFALL_MAX_ATTEMPTS, context);
+  return result;
 }
 
-function validScryfallCard(card) {
-  if (!card || typeof card !== "object" || typeof card.name !== "string" || !card.name) return false;
-  if (["rarity", "type_line", "set", "set_name", "set_type", "flavor_name", "prints_search_uri"].some((key) => card[key] !== undefined && typeof card[key] !== "string")) return false;
-  if (["games", "finishes", "frame_effects", "promo_types"].some((key) => card[key] !== undefined
-    && (!Array.isArray(card[key]) || card[key].some((value) => typeof value !== "string")))) return false;
-  return card.card_faces === undefined || (Array.isArray(card.card_faces)
-    && card.card_faces.every((face) => face && (face.flavor_name === undefined || typeof face.flavor_name === "string")));
+function normalizeScryfallCard(card) {
+  if (!card || typeof card !== "object" || Array.isArray(card) || typeof card.name !== "string" || !card.name) return null;
+  const normalized = { ...card };
+  // Scryfall's official Card/Face types mark these optional. Null and absence have
+  // identical meaning to our treatment/flavor checks; never relax core field types.
+  for (const key of ["flavor_name", "type_line", "oracle_text", "printed_name", "printed_type_line", "printed_text", "flavor_text"]) {
+    if (normalized[key] === null) normalized[key] = "";
+    if (normalized[key] !== undefined && typeof normalized[key] !== "string") return null;
+  }
+  for (const key of ["frame_effects", "promo_types"]) if (normalized[key] === null) normalized[key] = [];
+  if (["id", "oracle_id", "rarity", "set", "set_name", "set_type", "prints_search_uri", "collector_number", "released_at", "border_color", "frame"].some((key) => normalized[key] !== undefined && typeof normalized[key] !== "string")) return null;
+  if (["digital", "booster", "foil", "nonfoil", "full_art", "promo"].some((key) => normalized[key] !== undefined && typeof normalized[key] !== "boolean")) return null;
+  if (["games", "finishes", "frame_effects", "promo_types"].some((key) => normalized[key] !== undefined
+    && (!Array.isArray(normalized[key]) || normalized[key].some((value) => typeof value !== "string")))) return null;
+  if (normalized.prices !== undefined && normalized.prices !== null
+    && (typeof normalized.prices !== "object" || Array.isArray(normalized.prices)
+      || Object.values(normalized.prices).some((price) => price !== null && typeof price !== "string"))) return null;
+  if (normalized.card_faces === null) normalized.card_faces = [];
+  if (normalized.card_faces !== undefined) {
+    if (!Array.isArray(normalized.card_faces)) return null;
+    normalized.card_faces = normalized.card_faces.map((face) => {
+      if (!face || typeof face !== "object" || Array.isArray(face)) return null;
+      const copy = { ...face };
+      for (const key of ["name", "flavor_name", "type_line", "oracle_text", "mana_cost", "printed_name", "printed_text", "flavor_text"]) {
+        if (copy[key] === null) copy[key] = "";
+        if (copy[key] !== undefined && typeof copy[key] !== "string") return null;
+      }
+      return copy;
+    });
+    if (normalized.card_faces.some((face) => !face)) return null;
+  }
+  return normalized;
 }
 
 // Convenience wrapper for a named-card lookup when we only care about the card.
@@ -1501,8 +1678,8 @@ async function fetchNamedCardResult(name, mode = "fuzzy", context: ProviderOptio
   const params = new URLSearchParams({ [mode]: name });
   const result = await fetchJsonWithRetry(`${SCRYFALL_NAMED_URL}?${params.toString()}`, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
-  }, 4, context);
-  return result.ok && !validScryfallCard(result.data) ? { ok: false, status: 502, data: null } : result;
+  }, SCRYFALL_MAX_ATTEMPTS, context);
+  return result;
 }
 
 // Checks short one-word inputs so vague names do not sneak into the sorted list. mostly just for silly edge cases the customer might have put in the list
@@ -1535,8 +1712,10 @@ async function isAmbiguousFuzzyMatch(inputName, card, context: ProviderOptions =
 function isPlayablePaperCard(card) {
   if (!card || card.digital) return false;
   if (!Array.isArray(card.games) || !card.games.includes("paper")) return false;
+  const typeLine = card.type_line || card.card_faces?.map((face) => face.type_line || "").join(" // ");
+  if (!typeLine) return false;
   if (card.set_type === "memorabilia" || card.set_type === "token") return false;
-  if (/\b(Card|Emblem|Token)\b/i.test(card.type_line || "")) return false;
+  if (/\b(Card|Emblem|Token)\b/i.test(typeLine)) return false;
   return true;
 }
 
@@ -1582,7 +1761,7 @@ function isLandCard(cardOrPrint) {
 export async function fetchRecentCaseSets(options: ProviderOptions = {}) {
   const result = await fetchJsonWithRetry(SCRYFALL_SETS_URL, {
     headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
-  }, 4, providerContext(options));
+  }, SCRYFALL_MAX_ATTEMPTS, providerContext(options));
 
   if (!result.ok || !Array.isArray(result.data?.data)) return Object.assign([], { lookupFailed: true });
 
@@ -1644,49 +1823,72 @@ function hasPlayablePaperPrint(prints) {
 
 // Walks a card's print history to learn real rarities, special versions, and case-check facts - hopefully all without breakign scryfall
 async function fetchPrintFacts(card, context: ProviderOptions) {
-  const failedFacts = () => ({
-    rarities: [card?.rarity].filter(Boolean), nonSecretRarities: [card?.rarity].filter(Boolean),
-    hasFullArt: Boolean(card?.full_art), prints: [card].filter(Boolean),
-    eligibleRarityChecked: false, printLookupFailed: true,
-  });
-  if (!card?.prints_search_uri) {
-    return failedFacts();
+  context = providerContext(context);
+  let started = false;
+  const prints = [];
+  const failedFacts = (failure: ProviderFailure) => {
+    countPerformance(context.performance, started ? "printHistoryCardsFailed"
+      : failure.kind === "circuit-open" || failure.kind === "phase-budget-exhausted" ? "printHistoryCardsSkippedAfterCircuit" : "printHistoryCardsFailed");
+    return {
+      rarities: [card?.rarity].filter(Boolean), nonSecretRarities: [card?.rarity].filter(Boolean),
+      hasFullArt: prints.some((print) => print.full_art) || Boolean(card?.full_art), prints: prints.length ? prints : [card].filter(Boolean),
+      eligibleRarityChecked: false, printLookupFailed: true, providerFailure: failure, historyProcessingStarted: started,
+    };
+  };
+  const structuralFailure = (kind: ProviderFailure["kind"]): ProviderFailure => ({ kind, retryable: false, operation: "scryfallPrintPages", attemptCount: 0 });
+  if (!safeScryfallUrl(card?.prints_search_uri)) {
+    return failedFacts(providerCircuitFailure(context.providerRun) || structuralFailure("invalid-response"));
   }
 
   let nextUrl = card.prints_search_uri;
-  const prints = [];
   const visited = new Set<string>();
 
   while (nextUrl) {
     if (typeof nextUrl !== "string" || visited.has(nextUrl) || visited.size >= 100) {
       for (const url of visited) evictScryfallResponse(url);
-      return failedFacts();
+      const failure = structuralFailure(visited.size >= 100 ? "pagination-limit" : "pagination-loop");
+      recordProviderFailure(context.providerRun!, failure);
+      return failedFacts(failure);
     }
     visited.add(nextUrl);
     const result = await fetchJsonWithRetry(nextUrl, {
       headers: { Accept: "application/json;q=0.9,*/*;q=0.8" },
-    }, 4, { ...context, requestType: "scryfallPrintPages" });
+    }, SCRYFALL_MAX_ATTEMPTS, { ...context, requestType: "scryfallPrintPages" });
 
-    if (!result.ok || !Array.isArray(result.data?.data) || !result.data.data.every(validScryfallCard)
-      || (result.data.has_more && !result.data.next_page)) return failedFacts();
+    if (!started && (result.ok || (result.failure?.attemptCount || 0) > 0)) {
+      started = true;
+      countPerformance(context.performance, "printHistoryCardsStarted");
+    }
+    if (!result.ok) return failedFacts(result.failure || structuralFailure("invalid-response"));
 
     const data = result.data;
     prints.push(...(data.data || []));
     nextUrl = data.has_more ? data.next_page : "";
   }
 
-  const usablePrints = prints.length ? prints : [card];
+  const usablePrints = prints.filter((print) => Array.isArray(print.games) && Boolean(parseRarity(print.rarity)));
+  if (!usablePrints.length) {
+    for (const url of visited) evictScryfallResponse(url);
+    const failure = structuralFailure("invalid-response");
+    recordProviderFailure(context.providerRun!, failure);
+    return failedFacts(failure);
+  }
   const eligibleRarityPrints = usablePrints.filter(isEligibleRarityPrint);
   const rarityPrints = eligibleRarityPrints.length
     ? eligibleRarityPrints
     : usablePrints.filter((print) => isPlayablePaperCard(print) && !isSecretLairPrint(print) && !isPlayerRewardPrint(print) && print.set_type !== "promo");
 
+  countPerformance(context.performance, "printHistoryCardsCompleted");
   return {
     rarities: Array.from(new Set(usablePrints.map((print) => print.rarity).filter(Boolean))),
     nonSecretRarities: Array.from(new Set(rarityPrints.map((print) => print.rarity).filter(Boolean))),
     hasFullArt: usablePrints.some((print) => print.full_art),
     prints: usablePrints,
     eligibleRarityChecked: true,
+    historyProcessingStarted: started,
+    rarityEvidence: "scryfall",
+    printLookupFailed: false,
+    providerFailure: undefined,
   };
 }
 
@@ -1703,6 +1905,23 @@ function mergeResolvedCards(batch, result) {
     }
 
     const card = byName.get(normalizeName(item.mtgjsonExactName || item.inputName));
+    if (item.legacyIndexCompatibility) {
+      const verified = card && isPlayablePaperCard(card) && item.legacyRarities?.length;
+      return {
+        ...item,
+        // Keep the exact canonical MTGJSON identity and its lower-confidence history.
+        card: card ? { ...card, name: item.mtgjsonExactName || item.card.name } : item.card,
+        status: verified ? "found" : "review",
+        paperIdentityVerified: Boolean(card && isPlayablePaperCard(card)),
+        rarityEvidence: "legacy-index",
+        lessVerified: true,
+        note: verified
+          ? "Paper identity verified; grouping uses legacy index rarity history."
+          : card && !isPlayablePaperCard(card)
+            ? "Not a playable paper card; card-name index requires refresh."
+            : "Card-name index requires refresh; compatibility verification incomplete.",
+      };
+    }
     if (card) {
       return {
         ...item,
@@ -1727,42 +1946,21 @@ function resolveItemWithCard(item, card) {
   };
 }
 
-// Tries exact batch lookup first, then exact one-by-one when the batch trips over itself.
+// A failed collection never fans out. Only a successful collection's true misses
+// may enter named recovery; request-level retries are authoritative.
 async function resolveExactBatch(batch, batchNumber, setMessage, context: ProviderOptions) {
-  let lastResult = null;
-
-  for (let attempt = 1; attempt <= 2; attempt += 1) {
-    if (attempt > 1) countPerformance(context.performance, "retries");
-    setMessage(attempt === 1
-      ? `Exact lookup batch ${batchNumber}...`
-      : `Exact lookup batch ${batchNumber} retry ${attempt}...`);
-    lastResult = await fetchCollection(batch, context);
-    if (lastResult.ok) return mergeResolvedCards(batch, lastResult.data);
-    if (attempt < 2) await sleep(500 * attempt, context.signal);
-  }
-
-  setMessage(`Exact lookup batch ${batchNumber} failed; trying exact names one at a time...`);
-  const resolved = [];
-
-  for (const [index, item] of batch.entries()) {
-    setMessage(`Exact retry ${index + 1} of ${batch.length}: "${item.inputName}"...`);
-    const result = await fetchNamedCardResult(item.mtgjsonExactName || item.inputName, "exact", context);
-
-    if (result.ok) {
-      resolved.push(resolveItemWithCard(item, result.data));
-    } else {
-      resolved.push({
-        ...item,
-        status: "missing",
-        note: result.status && result.status !== 404
-          ? `Exact lookup failed (${result.status})`
-          : "",
-      });
-    }
-
-  }
-
-  return resolved;
+  setMessage(`Exact lookup batch ${batchNumber}...`);
+  const result = await fetchCollection(batch, context);
+  if (result.ok) return mergeResolvedCards(batch, result.data);
+  return batch.map((item) => ({
+    ...item,
+    status: "review",
+    providerFailure: result.failure,
+    lessVerified: true,
+    note: item.legacyIndexCompatibility
+      ? "Card-name index requires refresh; compatibility verification unavailable. Reprocess Needs Review later."
+      : "Scryfall verification unavailable. Reprocess Needs Review later.",
+  }));
 }
 
 // Chooses the output section: high rarity/low rarity (or rarity-shifted chaos because WotC)
@@ -2067,9 +2265,14 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
         mtgjsonCard: item.mtgjsonCard,
       };
     } else {
+      if (exactResult.failure?.attemptCount === 0
+        && ["circuit-open", "phase-budget-exhausted"].includes(exactResult.failure.kind)) {
+        countPerformance(providerOptions.performance, "printHistoryCardsSkippedAfterCircuit");
+      }
       return {
         ...item,
         printLookupFailed: true,
+        providerFailure: exactResult.failure,
       };
     }
   }
@@ -2095,36 +2298,16 @@ async function enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptio
   };
 }
 
-// For further rounds of inquiry in case Scryfall is being a pain about print history.
+// Isolate unexpected item errors without restarting a complete card lookup.
 async function safelyEnrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions: ProviderOptions) {
   try { return await enrichResolvedItem(item, caseCheck, recentCaseSets, providerOptions); }
   catch (error) {
     throwIfAborted(providerOptions.signal);
     if (error?.name === "AbortError") throw error;
-    return { ...item, printLookupFailed: true, enrichmentFailed: true };
+    const failure: ProviderFailure = { kind: "invalid-response", retryable: false, operation: "scryfallPrintPages", attemptCount: 0 };
+    if (providerOptions.providerRun) recordProviderFailure(providerOptions.providerRun, failure);
+    return { ...item, printLookupFailed: true, enrichmentFailed: true, providerFailure: failure };
   }
-}
-
-async function retryFailedPrintHistories(items, caseCheck, recentCaseSets, delayMs, passLabel, setMessage, providerOptions: ProviderOptions = {}) {
-  const retriedItems = [...items];
-  const failedIndexes = retriedItems
-    .map((item, index) => ({ item, index }))
-    .filter(({ item }) => item.status === "found" && item.printLookupFailed);
-
-  for (const [retryIndex, { item, index }] of failedIndexes.entries()) {
-    setMessage(`${passLabel}: Scryfall threw an error, retrying print history ${retryIndex + 1} of ${failedIndexes.length}...`);
-    if (retryIndex > 0) await sleep(delayMs, providerOptions.signal);
-    countPerformance(providerOptions.performance, "retries");
-    const retriedItem = await safelyEnrichResolvedItem(
-      item,
-      caseCheck,
-      recentCaseSets,
-      providerOptions,
-    );
-    retriedItems[index] = { ...retriedItem, printHistoryRetried: true };
-  }
-
-  return retriedItems;
 }
 
 // Resolves parsed names through MTGJSON exact matches, then Scryfall exact/fuzzy cleanup when enabled.
@@ -2134,6 +2317,15 @@ export async function resolveCardNames(items, setMessage, carefulMode, providerO
   const report = providerOptions.performance;
   const useMtgjson = providerOptions.useMtgjson !== false;
   const useScryfall = providerOptions.useScryfall !== false;
+  // Employee-requested reprocessing must not inherit previous failures or stale
+  // printing evidence. The new index/provider run establishes confidence again.
+  items = items.map((item) => item.status === "missing" ? {
+    ...item, providerFailure: undefined, printLookupFailed: false, enrichmentFailed: false,
+    bulkMissGuarded: false,
+    printHistoryRetried: false, paperIdentityVerified: false, localPaperVerified: false,
+    localRarityVerified: false, legacyIndexCompatibility: false, legacyRarities: undefined,
+    rarityEvidence: undefined, prints: undefined, eligibleRarityChecked: false,
+  } : item);
   // Ordinary named basics need neither an index download nor provider lookup.
   items = items.map((item) => BASIC_LAND_NAMES.has(item.inputName) && !hasSpecialPrintRequest(item)
     ? { ...item, status: "found", isBasicLand: true, card: { name: item.inputName, rarity: "common" } }
@@ -2169,6 +2361,7 @@ export async function resolveCardNames(items, setMessage, carefulMode, providerO
   for (const item of [...firstPass, ...lookupItems]) {
     const decision = requiresScryfallEnrichment(item, providerOptions);
     countPerformance(report, decision.required && useScryfall ? "remoteCards" : "skippedCards");
+    if (decision.required && useScryfall) countPerformance(report, "logicalRemoteCards");
     if (report) report.reasons[decision.reason] = (report.reasons[decision.reason] || 0) + 1;
   }
 
@@ -2181,7 +2374,7 @@ export async function resolveCardNames(items, setMessage, carefulMode, providerO
     return ordered(firstPass);
   }
 
-  const exactBatches = chunk(lookupItems, carefulMode ? 1 : BATCH_SIZE);
+  const exactBatches = chunk(lookupItems, BATCH_SIZE);
   const exactStarted = processingNow();
   if (report && exactBatches.length) report.stage = "scryfall-exact";
 
@@ -2209,6 +2402,7 @@ export async function resolveCardNames(items, setMessage, carefulMode, providerO
         : {
           ...item,
           status: "review",
+          providerFailure: fuzzyResult.failure,
           note: ambiguous
             ? "Ambiguous card name"
             : item.note
@@ -2227,9 +2421,10 @@ export async function resolveCardNames(items, setMessage, carefulMode, providerO
   return ordered(fuzzyResolved);
 }
 
-// Walks print histories in small parallel groups, then runs slower retry passes for failures.
+// Walks only selective histories once. Staff can explicitly reprocess review items.
 export async function enrichPrintHistories(items, caseCheck, recentCaseSets, setMessage, carefulMode, providerOptions: ProviderOptions = {}) {
-  providerOptions = providerContext({ ...providerOptions, enrichmentPurpose: caseCheck ? "case-check" : providerOptions.enrichmentPurpose || "formatter" }, carefulMode);
+  providerOptions = providerContext(providerOptions, carefulMode);
+  providerOptions = { ...providerOptions, enrichmentPurpose: caseCheck ? "case-check" : providerOptions.enrichmentPurpose || "formatter" };
   throwIfAborted(providerOptions.signal);
   const started = processingNow();
   const report = providerOptions.performance;
@@ -2255,26 +2450,6 @@ export async function enrichPrintHistories(items, caseCheck, recentCaseSets, set
     }));
   }
 
-  withRarities = await retryFailedPrintHistories(
-    withRarities,
-    caseCheck,
-    recentCaseSets,
-    500,
-    "Second pass",
-    setMessage,
-    providerOptions,
-  );
-
-  withRarities = await retryFailedPrintHistories(
-    withRarities,
-    caseCheck,
-    recentCaseSets,
-    2000,
-    "Third pass",
-    setMessage,
-    providerOptions,
-  );
-
   if (report) report.stages.printHistory += processingNow() - started;
   return withRarities.map((item) => ((item.printLookupFailed
     && (!item.localRarityVerified || hasSpecialPrintRequest(item) || item.requestedFlavor || item.enrichmentFailed || caseCheck))
@@ -2285,12 +2460,13 @@ export async function enrichPrintHistories(items, caseCheck, recentCaseSets, set
 
 export function reliabilityMessage(items, options: ProviderOptions = {}) {
   const notes = [];
-  const retryCount = items.filter((item) => item.printHistoryRetried).length;
   const fallbackCount = items.filter((item) => item.status === "found" && item.printLookupFailed).length;
 
   if (options.useScryfall === false) notes.push("Scryfall off: output is less verified.");
+  if (items.some((item) => item.legacyIndexCompatibility)) notes.push("Card-name index is outdated. Using compatibility verification.");
+  if (items.some((item) => item.status === "found" && item.rarityEvidence === "legacy-index")) notes.push("Paper identities verified; rarity grouping uses lower-confidence legacy index evidence.");
+  if (options.performance?.providerCircuitState === "open") notes.push("Scryfall verification stopped after repeated failures. Affected cards were placed in Needs Review.");
   if (fallbackCount) notes.push(`${fallbackCount} card${fallbackCount === 1 ? "" : "s"} used fallback rarity.`);
-  if (retryCount) notes.push(`Scryfall needed print-history retries for ${retryCount} card${retryCount === 1 ? "" : "s"}.`);
   return notes.join(" ");
 }
 
@@ -2314,6 +2490,10 @@ export function compactFormatterItems(items: any[]) {
     caseNote: item.caseNote || "",
     note: item.note || "",
     printLookupFailed: Boolean(item.printLookupFailed),
+    rarityEvidence: ["current-index", "legacy-index", "scryfall"].includes(item.rarityEvidence) ? item.rarityEvidence : undefined,
+    legacyIndexCompatibility: Boolean(item.legacyIndexCompatibility),
+    paperIdentityVerified: Boolean(item.paperIdentityVerified),
+    lessVerified: Boolean(item.lessVerified),
     card: item.card?.name ? { name: item.card.name } : undefined,
     mtgjsonCard: item.mtgjsonCard?.name ? { name: item.mtgjsonCard.name } : undefined,
   }));
@@ -2333,10 +2513,12 @@ export async function processPullListText(text: string, options: ProcessPullList
   const performance = createProcessingPerformance();
   const parseStarted = processingNow();
   const parsed = parsePullList(text);
+  recordParsingPerformance(performance, parsed.diagnostics);
   performance.stages.parse = processingNow() - parseStarted;
   const providerOptions: ProviderOptions = { useMtgjson, useScryfall, mtgjsonManifestUrl, enrichmentPurpose: caseCheck ? "case-check" : "formatter", signal: options.signal || null, performance, minIntervalMs: carefulMode ? 500 : 120 };
 
   try {
+    const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
     let recentCaseSets = [];
     if (caseCheck && useScryfall) {
       setMessage("Checking recent set list for case rules...");
@@ -2346,7 +2528,6 @@ export async function processPullListText(text: string, options: ProcessPullList
       performance.stages.caseSets = processingNow() - setsStarted;
     }
 
-    const fuzzyResolved = await resolveCardNames(parsed.cards, setMessage, carefulMode, providerOptions);
     const withRarities = await enrichPrintHistories(fuzzyResolved, caseCheck && useScryfall, recentCaseSets, setMessage, carefulMode, providerOptions);
     const inferred = inferBoundaryCustomer(parsed.customer, withRarities, parsed.cardLineCount);
 

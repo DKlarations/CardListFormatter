@@ -18,13 +18,17 @@ Set is **not** an exact printing. A set can contain several Sol Rings with diffe
 
 ## Requested intent and defaults
 
-Formatter items carry conservative `requestedPrinting` data for set code, treatment, and/or finish. The parser captures a set only from the existing structured row format with exactly one set code:
+Formatter items carry one shared `RequestedPrintingPreference` in `requestedPrinting`, separate from canonical name identity. It can carry set code, exact collector-number text, treatment, finish, foil treatment, flavor name, and the optional `sourceFormat: "set-collector-export"` marker. The established prose row format still captures exactly one set code:
 
 ```
 Card Name - Rarity - Price - SET - Color
 ```
 
 For example, `Putrefy - Rare - $0.35 - RVR - Black/Green` requests `RVR`. Rows with slash-separated alternate set codes deliberately do not choose one. Free-form three-to-five-character words are not inferred as set codes.
+
+Structured deck exports also preserve the terminal `(SET) COLLECTOR` suffix as printing intent: `1 Elegant Parlor (PMKM) 260s *F*` resolves the name `Elegant Parlor` and carries set `PMKM`, collector number `260s`, and ordinary foil. The imported hint stays in the same `requestedPrinting` object. It does not require full Scryfall history during ordinary initial formatting with complete v3 evidence. The foil instruction remains visible on the pull list; imported set and collector text are reserved for Pricing Assistant. Prose special requests and Case Check keep their verification behavior.
+
+Pricing first prefers the imported set and collector number with the requested finish, then that same collector with the closest available finish. It prefers the same finish with another available foil technology before falling back to the existing Non-Foil, Foil, Surge, Etched availability order. If the collector is absent, it uses the requested set and finish, then existing set/default behavior. Set and collector comparisons ignore case; collector numbers remain exact strings, preserving leading zeroes, suffix letters, slashes, periods, hyphens, and special characters. A matched exact printing receives its real MTGJSON UUID deterministically. Missing collector/set or finish choices show a Pricing Assistant row warning; the card remains resolved and no formatter-wide crawl starts. Staff Set, Finish, Treatment, Art, and Exact Printing choices override these initial hints.
 
 `SURGE FOIL` is preserved as requested `finish: "foil"` plus `foilTreatment: "surge"`; it is never stored as a visual Treatment. A simultaneous visual request such as `BORDERLESS` remains independently available as `treatment: "borderless"`.
 
@@ -42,7 +46,7 @@ The normal **Printing** menu has a focused set-level search field. Staff can typ
 
 This set search does not replace **Exact Printing Search**. The magnifying-glass tool remains the advanced cross-set search for collector number, artist, year, finish, treatment, and exact physical UUID.
 
-Requested flavor/reskin identity is an **initial** printing preference. When staff manually change Set, that choice is authoritative: the row keeps its customer-facing display and canonical identities, but recalculates **Set -> Finish -> Treatment -> Art -> exact UUID** from the canonical card in the new set. Previous finish, treatment, art UUID, and reskin preference do not constrain the new physical selection.
+Requested flavor/reskin identity and imported collector numbers are **initial** printing preferences. When staff manually change Set, that choice is authoritative: the row keeps its customer-facing display and canonical identities, but recalculates **Set -> Finish -> Treatment -> Art -> exact UUID** from the canonical card in the new set. Previous finish, treatment, art UUID, and reskin preference do not constrain the new physical selection. Manual Finish, Treatment, and Art changes also record manual selection provenance so subsequent catalog hydration or Found toggles cannot reapply an imported hint over staff work.
 
 The normal Pricing Assistant row remains the primary requested-card row. After it is marked Found, and after set, effective finish (including foil treatment), and visual treatment are applied, an indented **Art / Variant** row appears only when multiple human-distinct collector/art variants remain. A branch connector and left border make the relationship unmistakable. Options group equivalent provider records by collector number, flavor name, and artist, then display the collector number plus useful name/artist detail.
 
@@ -57,6 +61,8 @@ Legacy pricing-index schemas cannot safely distinguish every effective Finish an
 Pricing-session work is intentionally local: Found states, split rows, set/Finish/Treatment/Art selections, UUIDs, source, overrides, quantities, and manually added Pricing Assistant cards are not serialized. New links use formatter-only schema v5. Older v1-v4 links still restore their formatter data without crashing, but any embedded legacy pricing session is deliberately ignored.
 
 This differs deliberately from a **Saved Pull List**. A Saved Pull List is a resumable staff job and persists those Pricing Assistant row selections, splits, manual rows, quantities, exact UUIDs, price overrides, receipt preference, and pricing source. It does not persist the external MTGJSON catalog or automatic market values; those rehydrate from current sources when the job is loaded. Copy Link still starts fresh pricing work.
+
+Imported collector text and its source marker survive compact formatter items, Saved Pull List normalization, and current/legacy link loading as additive fields. Pricing rows retain `requestedCollectorNumber` and `requestedSourceFormat` beside the existing requested set/finish fields. Older rows without these fields continue using their established defaults; no schema migration or live data refresh is required for this preference bridge.
 
 ## Manual cards and reskins
 
